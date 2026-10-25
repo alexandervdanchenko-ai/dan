@@ -1,16 +1,19 @@
-"""Генератор кода языка Дан (версия 0.1).
+"""Генератор кода языка Дан (версия 0.2).
 
 Переводит проверенное дерево программы в текст на языке C. Полученный
 файл самодостаточен: в его начало встраивается небольшая среда
-выполнения Дан (вывод значений, работа со строками, защита от деления
-на ноль). Затем файл компилируется обычным компилятором C (gcc или
-clang) в исполняемую программу.
+выполнения Дан (вывод значений, строки, списки, ввод, защита от деления
+на ноль и выхода за границы списка). Затем файл компилируется обычным
+компилятором C (gcc или clang) в исполняемую программу.
 
 Соответствие типов:
-    цел  -> int64_t
-    дроб -> double
-    лог  -> bool
-    стр  -> const char*   (строка в кодировке UTF-8)
+    цел    -> int64_t
+    дроб   -> double
+    лог    -> bool
+    стр    -> const char*   (строка в кодировке UTF-8)
+    [тип]  -> указатель на структуру списка; для каждого типа списка,
+              встречающегося в программе, создаётся своя структура
+              и свои функции (dl_Li для [цел], dl_LLi для [[цел]] и т.д.)
 
 Все имена в получаемом C-коде латинские: имена из программы на Дан
 транслитерируются (сумма -> d_summa), а русские тексты записываются
@@ -22,21 +25,27 @@ C независимо от его настроек кодировки.
 """
 
 import uzly as у
-from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, ПУСТО
+from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, ПУСТО, это_список, элемент
 
-ТИПЫ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", ПУСТО: "void"}
+БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", ПУСТО: "void"}
+КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b"}
+ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool"}
 
-СРЕДА = r"""/* Создано компилятором языка Дан. Редактировать не нужно. */
-#include <stdint.h>
-#include <inttypes.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
+СООБЩЕНИЯ = {
+    "DAN_MSG_RUNTIME": "Ошибка выполнения в строке %d: %s\n",
+    "DAN_MSG_DIV_ZERO": "деление на ноль",
+    "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
+    "DAN_MSG_NO_MEMORY": "недостаточно памяти",
+    "DAN_MSG_INDEX": "индекс %lld за пределами списка длиной %lld",
+    "DAN_MSG_NOT_INT": "строку \"%s\" нельзя преобразовать в целое число",
+    "DAN_MSG_INT_RANGE": "число \"%s\" слишком велико для типа цел",
+    "DAN_MSG_NOT_FLOAT": "строку \"%s\" нельзя преобразовать в число",
+    "DAN_MSG_FLOAT_RANGE": "дробное число слишком велико для типа цел или не является числом",
+    "DAN_TRUE": "истина",
+    "DAN_FALSE": "ложь",
+}
 
+СРЕДА = r"""
 typedef const char *dan_str;
 
 static void dan_error(const char *text, int line) {
@@ -44,6 +53,32 @@ static void dan_error(const char *text, int line) {
     fprintf(stderr, DAN_MSG_RUNTIME, line, text);
     exit(1);
 }
+
+static void *dan_alloc(size_t n) {
+    void *p = malloc(n ? n : 1);
+    if (!p) dan_error(DAN_MSG_NO_MEMORY, 0);
+    return p;
+}
+
+static void *dan_realloc(void *p, size_t n) {
+    p = realloc(p, n ? n : 1);
+    if (!p) dan_error(DAN_MSG_NO_MEMORY, 0);
+    return p;
+}
+
+static void dan_index_error(int64_t i, int64_t len, int line) {
+    char buf[200];
+    snprintf(buf, sizeof buf, DAN_MSG_INDEX, (long long)i, (long long)len);
+    dan_error(buf, line);
+}
+
+static void dan_conv_error(const char *fmt, dan_str s, int line) {
+    char buf[300];
+    snprintf(buf, sizeof buf, fmt, s);
+    dan_error(buf, line);
+}
+
+/* ---- arithmetic ---- */
 
 static int64_t dan_div(int64_t a, int64_t b, int line) {
     if (b == 0) dan_error(DAN_MSG_DIV_ZERO, line);
@@ -57,10 +92,18 @@ static int64_t dan_mod(int64_t a, int64_t b, int line) {
     return a % b;
 }
 
+/* ---- strings ---- */
+
+static dan_str dan_strdup(const char *s) {
+    size_t n = strlen(s);
+    char *r = dan_alloc(n + 1);
+    memcpy(r, s, n + 1);
+    return r;
+}
+
 static dan_str dan_concat(dan_str a, dan_str b) {
     size_t la = strlen(a), lb = strlen(b);
-    char *r = malloc(la + lb + 1);
-    if (!r) dan_error(DAN_MSG_NO_MEMORY, 0);
+    char *r = dan_alloc(la + lb + 1);
     memcpy(r, a, la);
     memcpy(r + la, b, lb + 1);
     return r;
@@ -68,34 +111,178 @@ static dan_str dan_concat(dan_str a, dan_str b) {
 
 static bool dan_str_eq(dan_str a, dan_str b) { return strcmp(a, b) == 0; }
 
-static void dan_print_int(int64_t v) { printf("%" PRId64 "\n", v); }
-static void dan_print_str(dan_str v) { puts(v); }
-static void dan_print_bool(bool v) { puts(v ? DAN_TRUE : DAN_FALSE); }
+/* Number of characters (not bytes) in a UTF-8 string. */
+static int64_t dan_str_len(dan_str s) {
+    int64_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if ((*p & 0xC0) != 0x80) n++;
+    return n;
+}
 
-static void dan_print_float(double v) {
-    char buf[64];
+/* ---- output ---- */
+
+static void dan_format_float(char *buf, size_t size, double v) {
     /* Shortest text that reads back as the same number; the integer
        part is never shortened to exponent form (10.0, not 1e+01). */
     double mag = v < 0 ? -v : v;
     int start = 1;
     while (mag >= 10.0 && start < 17) { mag /= 10.0; start++; }
     for (int prec = start; prec <= 17; prec++) {
-        snprintf(buf, sizeof buf, "%.*g", prec, v);
+        snprintf(buf, size, "%.*g", prec, v);
         if (strtod(buf, NULL) == v) break;
     }
     if (!strpbrk(buf, ".eEn")) strcat(buf, ".0");
-    puts(buf);
+}
+
+static void dan_write_int(int64_t v) { printf("%" PRId64, v); }
+static void dan_write_float(double v) { char b[64]; dan_format_float(b, sizeof b, v); fputs(b, stdout); }
+static void dan_write_bool(bool v) { fputs(v ? DAN_TRUE : DAN_FALSE, stdout); }
+static void dan_write_str(dan_str v) { fputs(v, stdout); }
+static void dan_write_quoted(dan_str v) { putchar('"'); fputs(v, stdout); putchar('"'); }
+static void dan_newline(void) { putchar('\n'); }
+
+/* ---- conversions ---- */
+
+static dan_str dan_int_to_str(int64_t v) {
+    char b[32];
+    snprintf(b, sizeof b, "%" PRId64, v);
+    return dan_strdup(b);
+}
+
+static dan_str dan_float_to_str(double v) {
+    char b[64];
+    dan_format_float(b, sizeof b, v);
+    return dan_strdup(b);
+}
+
+static dan_str dan_bool_to_str(bool v) { return v ? DAN_TRUE : DAN_FALSE; }
+
+static int64_t dan_str_to_int(dan_str s, int line) {
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    errno = 0;
+    char *end;
+    long long v = strtoll(p, &end, 10);
+    if (end == p) dan_conv_error(DAN_MSG_NOT_INT, s, line);
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end) dan_conv_error(DAN_MSG_NOT_INT, s, line);
+    if (errno == ERANGE) dan_conv_error(DAN_MSG_INT_RANGE, s, line);
+    return (int64_t)v;
+}
+
+static double dan_str_to_float(dan_str s, int line) {
+    /* A comma is accepted as the decimal separator: "3,5" == 3.5 */
+    size_t n = strlen(s);
+    char *copy = dan_alloc(n + 1);
+    for (size_t i = 0; i <= n; i++) copy[i] = s[i] == ',' ? '.' : s[i];
+    char *p = copy;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end;
+    double v = strtod(p, &end);
+    bool bad = end == p;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end) bad = true;
+    free(copy);
+    if (bad) dan_conv_error(DAN_MSG_NOT_FLOAT, s, line);
+    return v;
+}
+
+static int64_t dan_float_to_int(double v, int line) {
+    if (v != v || v >= 9223372036854775808.0 || v < -9223372036854775808.0)
+        dan_error(DAN_MSG_FLOAT_RANGE, line);
+    return (int64_t)v;
+}
+
+/* ---- input ---- */
+
+static dan_str dan_input(dan_str prompt) {
+    if (prompt) fputs(prompt, stdout);
+    fflush(stdout);
+#ifdef _WIN32
+    /* In a Windows console read UTF-16 and convert, so that Cyrillic
+       input works regardless of the console code page. */
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (GetConsoleMode(h, &mode)) {
+        size_t cap = 256, len = 0;
+        wchar_t *w = dan_alloc(cap * sizeof(wchar_t));
+        for (;;) {
+            DWORD got = 0;
+            if (len + 1 >= cap) { cap *= 2; w = dan_realloc(w, cap * sizeof(wchar_t)); }
+            if (!ReadConsoleW(h, w + len, 1, &got, NULL) || got == 0) break;
+            if (w[len] == L'\n') break;
+            if (w[len] != L'\r') len++;
+        }
+        int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)len, NULL, 0, NULL, NULL);
+        char *r = dan_alloc((size_t)n + 1);
+        WideCharToMultiByte(CP_UTF8, 0, w, (int)len, r, n, NULL, NULL);
+        r[n] = 0;
+        free(w);
+        return r;
+    }
+#endif
+    size_t cap = 256, len = 0;
+    char *r = dan_alloc(cap);
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+        if (len + 1 >= cap) { cap *= 2; r = dan_realloc(r, cap); }
+        r[len++] = (char)c;
+    }
+    if (len && r[len - 1] == '\r') len--;
+    r[len] = 0;
+    return r;
 }
 
 static void dan_start(void) {
 #ifdef _WIN32
-    SetConsoleOutputCP(65001);
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
 #endif
 }
 """
 
-# Транслитерация русских букв для имён в C. Имена в C делаются
-# латинскими, чтобы программа собиралась любым компилятором.
+ШАБЛОН_СПИСКА = """
+/* ---- list {описание} ---- */
+typedef struct {{ int64_t len, cap; {T} *items; }} {S};
+
+static {S} *{S}_from(int64_t n, {T} const *src) {{
+    {S} *l = dan_alloc(sizeof *l);
+    l->len = n;
+    l->cap = n < 4 ? 4 : n;
+    l->items = dan_alloc((size_t)l->cap * sizeof({T}));
+    if (n) memcpy(l->items, src, (size_t)n * sizeof({T}));
+    return l;
+}}
+
+static void {S}_push({S} *l, {T} v) {{
+    if (l->len == l->cap) {{
+        l->cap *= 2;
+        l->items = dan_realloc(l->items, (size_t)l->cap * sizeof({T}));
+    }}
+    l->items[l->len++] = v;
+}}
+
+static {T} {S}_get(const {S} *l, int64_t i, int line) {{
+    if (i < 0 || i >= l->len) dan_index_error(i, l->len, line);
+    return l->items[i];
+}}
+
+static void {S}_set({S} *l, int64_t i, {T} v, int line) {{
+    if (i < 0 || i >= l->len) dan_index_error(i, l->len, line);
+    l->items[i] = v;
+}}
+
+static void {S}_write(const {S} *l) {{
+    putchar('[');
+    for (int64_t i = 0; i < l->len; i++) {{
+        if (i) fputs(", ", stdout);
+        {запись_элемента}(l->items[i]);
+    }}
+    putchar(']');
+}}
+"""
+
+# Транслитерация русских букв для имён в C.
 ТРАНСЛИТ = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
     "ж": "zh", "з": "z", "и": "i", "й": "j", "к": "k", "л": "l", "м": "m",
@@ -149,16 +336,10 @@ def дробь_c(значение):
     return т
 
 
-СООБЩЕНИЯ = {
-    "DAN_MSG_RUNTIME": "Ошибка выполнения в строке %d: %s\n",
-    "DAN_MSG_DIV_ZERO": "деление на ноль",
-    "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
-    "DAN_MSG_NO_MEMORY": "недостаточно памяти",
-    "DAN_TRUE": "истина",
-    "DAN_FALSE": "ложь",
-}
-
-ВЫВОД = {ЦЕЛ: "dan_print_int", ДРОБ: "dan_print_float", СТР: "dan_print_str", ЛОГ: "dan_print_bool"}
+def код_типа(тип):
+    if это_список(тип):
+        return "L" + код_типа(элемент(тип))
+    return КОДЫ_ТИПОВ[тип]
 
 
 class Генератор:
@@ -168,6 +349,30 @@ class Генератор:
         self.строки = []
         self.отступ = 0
         self.счётчик = 0
+        self.списки = {}           # тип списка -> имя структуры C (вложенные раньше внешних)
+
+    # ---------- типы ----------
+
+    def тип_c(self, тип):
+        if это_список(тип):
+            return self.структура(тип) + "*"
+        return БАЗОВЫЕ_C[тип]
+
+    def структура(self, тип):
+        if тип not in self.списки:
+            тип_эл = элемент(тип)
+            if это_список(тип_эл):
+                self.структура(тип_эл)
+            self.списки[тип] = "dl_" + код_типа(тип)
+        return self.списки[тип]
+
+    def запись(self, тип, в_списке=False):
+        """Функция C, которая печатает значение этого типа без перевода строки."""
+        if это_список(тип):
+            return self.структура(тип) + "_write"
+        if тип == СТР and в_списке:
+            return "dan_write_quoted"
+        return ЗАПИСЬ[тип]
 
     # ---------- имена и вывод ----------
 
@@ -195,15 +400,10 @@ class Генератор:
         функции = [и for и in программа.инструкции if isinstance(и, у.Функция)]
         прочие = [и for и in программа.инструкции if not isinstance(и, у.Функция)]
 
-        шапка, тело = СРЕДА.split("typedef", 1)
-        self.строки.extend(шапка.rstrip().splitlines())
-        for имя, текст in СООБЩЕНИЯ.items():
-            self.строки.append(f"#define {имя} {строка_c(текст)}")
-        self.строки.extend(("typedef" + тело).splitlines())
-        self.пиши()
-
+        # Сначала генерируется тело программы: при этом выясняется,
+        # какие типы списков нужны, и их определения ставятся выше.
         if функции:
-            self.пиши("/* Объявления функций программы */")
+            self.пиши("/* ---- program functions ---- */")
             for ф in функции:
                 self.пиши(self._заголовок(ф) + ";")
             self.пиши()
@@ -219,12 +419,28 @@ class Генератор:
         self.пиши("return 0;")
         self.отступ -= 1
         self.пиши("}")
-        return "\n".join(self.строки) + "\n"
+
+        шапка = [
+            "/* Создано компилятором языка Дан. Редактировать не нужно. */",
+            "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
+            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>",
+            "#include <errno.h>",
+            "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
+        ]
+        шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
+        части = ["\n".join(шапка), СРЕДА]
+        for тип, имя in self.списки.items():
+            тип_эл = элемент(тип)
+            части.append(ШАБЛОН_СПИСКА.format(
+                описание=тип, S=имя, T=self.тип_c(тип_эл),
+                запись_элемента=self.запись(тип_эл, в_списке=True)))
+        части.append("\n".join(self.строки))
+        return "\n".join(части) + "\n"
 
     def _заголовок(self, ф):
-        результат = ТИПЫ_C[ф.тип_результата] if ф.тип_результата else "void"
-        параметры = ", ".join(f"const {ТИПЫ_C[п.тип]} {self.имя(п.имя)}" for п in ф.параметры) or "void"
-        return f"static {результат} {self.имя(ф.имя)}({параметры})"
+        результат = self.тип_c(ф.тип_результата) if ф.тип_результата else "void"
+        параметры = ", ".join(f"{self.тип_c(п.тип)} const {self.имя(п.имя)}" for п in ф.параметры)
+        return f"static {результат} {self.имя(ф.имя)}({параметры or 'void'})"
 
     def функция(self, ф):
         self.пиши(f"/* line {ф.строка} */")
@@ -247,19 +463,37 @@ class Генератор:
         getattr(self, "и_" + type(и).__name__)(и)
 
     def и_ОбъявлениеПеременной(self, и):
-        тип = и.тип or и.значение.тип_выр
-        модификатор = "" if и.изменяемая else "const "
-        self.пиши(f"{модификатор}{ТИПЫ_C[тип]} {self.имя(и.имя)} = {self.выр(и.значение)};")
+        модификатор = "" if и.изменяемая else " const"
+        self.пиши(f"{self.тип_c(и.тип_итог)}{модификатор} {self.имя(и.имя)} = {self.выр(и.значение)};")
 
     def и_Присваивание(self, и):
         цель = self.имя(и.имя)
-        if и.оператор == "=":
-            self.пиши(f"{цель} = {self.выр(и.значение)};")
-            return
-        оп = и.оператор[0]
-        тип_цели = и.тип_цели
         значение = self.выр(и.значение)
-        self.пиши(f"{цель} = {self._арифметика(оп, цель, тип_цели, значение, и.значение.тип_выр, и.строка)};")
+        if и.оператор == "=":
+            self.пиши(f"{цель} = {значение};")
+            return
+        результат = self._арифметика(и.оператор[0], цель, и.тип_цели, значение,
+                                     и.значение.тип_выр, и.строка)
+        self.пиши(f"{цель} = {результат};")
+
+    def и_ПрисваиваниеЭлемента(self, и):
+        тип_списка = и.объект.тип_выр
+        структура = self.структура(тип_списка)
+        объект = self.служебное_имя("list")
+        индекс = self.служебное_имя("i")
+        # Список и индекс вычисляются один раз, даже при «с[ф()] += 1».
+        self.пиши("{")
+        self.отступ += 1
+        self.пиши(f"{структура}* const {объект} = {self.выр(и.объект)};")
+        self.пиши(f"const int64_t {индекс} = {self.выр(и.индекс)};")
+        значение = self.выр(и.значение)
+        if и.оператор != "=":
+            текущее = f"{структура}_get({объект}, {индекс}, {и.строка})"
+            значение = self._арифметика(и.оператор[0], текущее, и.тип_элемента, значение,
+                                        и.значение.тип_выр, и.строка)
+        self.пиши(f"{структура}_set({объект}, {индекс}, {значение}, {и.строка});")
+        self.отступ -= 1
+        self.пиши("}")
 
     def и_Выражение(self, и):
         self.пиши(f"{self.выр(и.выражение)};")
@@ -283,13 +517,29 @@ class Генератор:
 
     def и_Для(self, и):
         перем = self.имя(и.переменная)
-        конец = self.служебное_имя("end")
-        начало = self.выр(и.источник.начало)
-        граница = self.выр(и.источник.конец)
-        # Граница вычисляется один раз до начала цикла.
-        self.пиши(f"for (int64_t {перем} = {начало}, {конец} = {граница}; "
-                  f"{перем} <= {конец}; {перем}++) {{")
+        if и.тип_элемента is None:
+            конец = self.служебное_имя("end")
+            начало = self.выр(и.источник.начало)
+            граница = self.выр(и.источник.конец)
+            # Граница вычисляется один раз до начала цикла.
+            self.пиши(f"for (int64_t {перем} = {начало}, {конец} = {граница}; "
+                      f"{перем} <= {конец}; {перем}++) {{")
+            self.блок(и.тело)
+            self.пиши("}")
+            return
+        структура = self.структура(и.источник.тип_выр)
+        список = self.служебное_имя("list")
+        номер = self.служебное_имя("i")
+        self.пиши("{")
+        self.отступ += 1
+        self.пиши(f"{структура}* const {список} = {self.выр(и.источник)};")
+        self.пиши(f"for (int64_t {номер} = 0; {номер} < {список}->len; {номер}++) {{")
+        self.отступ += 1
+        self.пиши(f"{self.тип_c(и.тип_элемента)} const {перем} = {список}->items[{номер}];")
+        self.отступ -= 1
         self.блок(и.тело)
+        self.пиши("}")
+        self.отступ -= 1
         self.пиши("}")
 
     def и_Вернуть(self, и):
@@ -353,12 +603,59 @@ class Генератор:
                 return f"dan_mod({л}, {п}, {строка})"
         return f"({л} {оп} {п})"
 
+    def в_Список(self, в):
+        тип = в.тип_выр
+        структура = self.структура(тип)
+        if not в.элементы:
+            return f"{структура}_from(0, NULL)"
+        элементы = ", ".join(self.выр(э) for э in в.элементы)
+        return f"{структура}_from({len(в.элементы)}, ({self.тип_c(элемент(тип))}[]){{{элементы}}})"
+
+    def в_Индекс(self, в):
+        структура = self.структура(в.объект.тип_выр)
+        return f"{структура}_get({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
+
+    def в_Поле(self, в):
+        # единственное свойство версии 0.2 - длина
+        тип = в.объект.тип_выр
+        if тип == СТР:
+            return f"dan_str_len({self.выр(в.объект)})"
+        if not это_список(тип):           # литерал «[]»
+            return "INT64_C(0)"
+        return f"({self.выр(в.объект)})->len"
+
     def в_Вызов(self, в):
+        if isinstance(в.функция, у.Поле):    # метод: список.добавить(х)
+            объект = в.функция.объект
+            структура = self.структура(объект.тип_выр)
+            return f"{структура}_push({self.выр(объект)}, {self.выр(в.аргументы[0])})"
+
         имя = в.функция.имя
         аргументы = [self.выр(а) for а in в.аргументы]
+
         if имя == "вывод":
-            return f"{ВЫВОД[в.аргументы[0].тип_выр]}({аргументы[0]})"
+            тип = в.аргументы[0].тип_выр
+            return f"({self.запись(тип)}({аргументы[0]}), dan_newline())"
+        if имя == "ввод":
+            return f"dan_input({аргументы[0] if аргументы else 'NULL'})"
+        if имя in (СТР, ЦЕЛ, ДРОБ):
+            return self._преобразование(имя, в.аргументы[0].тип_выр, аргументы[0], в.строка)
         return f"{self.имя(имя)}({', '.join(аргументы)})"
+
+    @staticmethod
+    def _преобразование(куда, откуда, значение, строка):
+        if куда == откуда:
+            return значение
+        if куда == СТР:
+            return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str",
+                    ЛОГ: "dan_bool_to_str"}[откуда] + f"({значение})"
+        if куда == ЦЕЛ:
+            функция = "dan_float_to_int" if откуда == ДРОБ else "dan_str_to_int"
+            return f"{функция}({значение}, {строка})"
+        # дроб
+        if откуда == ЦЕЛ:
+            return f"((double)({значение}))"
+        return f"dan_str_to_float({значение}, {строка})"
 
 
 def сгенерировать(программа):
