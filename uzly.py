@@ -40,6 +40,8 @@ class Логическое(Узел):
 @dataclass
 class Имя(Узел):
     имя: str
+    # имя так, как оно написано в программе (с «ё»), для сообщений об ошибках
+    написание: Optional[str] = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 @dataclass
@@ -119,6 +121,7 @@ class Присваивание(Узел):
     имя: str
     оператор: str          # "=", "+=", "-=", "*=", "/="
     значение: Узел
+    написание: Optional[str] = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 @dataclass
@@ -242,7 +245,7 @@ def показать(узел, отступ=0):
     простые = []
     вложенные = []
     for п in fields(узел):
-        if п.name in ("строка", "столбец"):
+        if п.name in ("строка", "столбец") or not п.repr:
             continue
         значение = getattr(узел, п.name)
         if isinstance(значение, (Узел, list)) and значение != []:

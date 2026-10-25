@@ -1600,6 +1600,8 @@ class Генератор:
                         f"static inline {имя} {имя}_some({т_c} v) {{ return ({имя}){{ .has = true, .value = v }}; }}",
                     ]
             строки.append(f"static dan_str {имя}_str({имя} v);")
+            if not это_необяз(тип):
+                строки.append(f"static void {имя}_strb({имя} v, dan_buf *b);")
             строки.append(f"static void {имя}_write({имя} v);")
             if это_необяз(тип):
                 строки.append(f"static dan_str {имя}_qstr({имя} v);")
@@ -1652,18 +1654,28 @@ class Генератор:
             else:
                 поля = self.собственные[тип]
                 проверка = "DAN_STACK_CHECK(0); " if тип in рекурсивные else ""
-                строки.append(f"static dan_str {имя}_str({имя} v) {{")
+                # Вложенные значения собственных типов дописываются в общий буфер,
+                # поэтому вывод длинной цепочки занимает линейное время.
+                строки.append(f"static void {имя}_strb({имя} v, dan_buf *b) {{")
                 if проверка:
                     строки.append("    DAN_STACK_CHECK(0);")
-                строки.append("    dan_buf b = { NULL, 0, 0 };")
-                строки.append(f"    dan_buf_add(&b, {строка_c(self.написания.get(тип, тип) + '(')});")
+                строки.append(f"    dan_buf_add(b, {строка_c(self.написания.get(тип, тип) + '(')});")
                 for номер, (поле, т, _) in enumerate(поля):
                     подпись = (", " if номер else "") + self.написания.get((тип, поле), поле) + " = "
-                    строки.append(f"    dan_buf_add(&b, {строка_c(подпись)});")
-                    строки.append(f"    dan_buf_add(&b, {self.строка_элемента(т)}(v.{self.поле_c(тип, поле)}));")
-                строки.append('    dan_buf_add(&b, ")");')
-                строки.append("    return b.s;")
+                    строки.append(f"    dan_buf_add(b, {строка_c(подпись)});")
+                    знач = f"v.{self.поле_c(тип, поле)}"
+                    if т in self.собственные:
+                        строки.append(f"    {self.значимый(т)}_strb({знач}, b);")
+                    elif это_необяз(т) and основа(т) in self.собственные:
+                        о = self.значимый(т)
+                        строки.append(f"    if ({о}_has({знач})) {self.значимый(основа(т))}_strb({о}_val({знач}), b); "
+                                      f"else dan_buf_add(b, {ничего});")
+                    else:
+                        строки.append(f"    dan_buf_add(b, {self.строка_элемента(т)}({знач}));")
+                строки.append('    dan_buf_add(b, ")");')
                 строки.append("}")
+                строки.append(f"static dan_str {имя}_str({имя} v) {{ dan_buf b = {{ NULL, 0, 0 }}; "
+                              f"{имя}_strb(v, &b); return b.s; }}")
                 if self.сравнимый(тип):
                     части = []
                     for поле, т, _ in поля:
