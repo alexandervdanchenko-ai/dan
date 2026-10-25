@@ -1,4 +1,4 @@
-"""Генератор кода языка Дан (версия 0.2).
+"""Генератор кода языка Дан (версия 0.3).
 
 Переводит проверенное дерево программы в текст на языке C. Полученный
 файл самодостаточен: в его начало встраивается небольшая среда
@@ -25,6 +25,7 @@ C независимо от его настроек кодировки.
 """
 
 import uzly as у
+import matematika
 from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, ПУСТО, это_список, элемент
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", ПУСТО: "void"}
@@ -36,6 +37,7 @@ from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, ПУСТО, это_спи
     "DAN_MSG_DIV_ZERO": "деление на ноль",
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
+    "DAN_MSG_TOO_BIG": "результат слишком велик для типа цел",
     "DAN_MSG_INDEX": "индекс %lld за пределами списка длиной %lld",
     "DAN_MSG_NOT_INT": "строку \"%s\" нельзя преобразовать в целое число",
     "DAN_MSG_INT_RANGE": "число \"%s\" слишком велико для типа цел",
@@ -80,16 +82,23 @@ static void dan_conv_error(const char *fmt, dan_str s, int line) {
 
 /* ---- arithmetic ---- */
 
+/* Division with remainder as defined in school mathematics:
+   a = b * q + r, where 0 <= r < |b|. The remainder is never negative,
+   so -7 : 2 = -4 (remainder 1), and -7 % 3 == 2. */
 static int64_t dan_div(int64_t a, int64_t b, int line) {
     if (b == 0) dan_error(DAN_MSG_DIV_ZERO, line);
-    if (a == INT64_MIN && b == -1) return INT64_MIN;
-    return a / b;
+    if (a == INT64_MIN && b == -1) dan_error(DAN_MSG_TOO_BIG, line);
+    int64_t q = a / b, r = a % b;
+    if (r < 0) q += b > 0 ? -1 : 1;
+    return q;
 }
 
 static int64_t dan_mod(int64_t a, int64_t b, int line) {
     if (b == 0) dan_error(DAN_MSG_MOD_ZERO, line);
-    if (b == -1) return 0;
-    return a % b;
+    if (b == -1 || b == 1) return 0;
+    int64_t r = a % b;
+    if (r < 0) r += b > 0 ? b : -b;
+    return r;
 }
 
 /* ---- strings ---- */
@@ -350,6 +359,7 @@ class Генератор:
         self.отступ = 0
         self.счётчик = 0
         self.списки = {}           # тип списка -> имя структуры C (вложенные раньше внешних)
+        self.нужна_математика = False
 
     # ---------- типы ----------
 
@@ -428,12 +438,17 @@ class Генератор:
             "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
         ]
         шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
+        if self.нужна_математика:
+            шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
+            шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
         части = ["\n".join(шапка), СРЕДА]
         for тип, имя in self.списки.items():
             тип_эл = элемент(тип)
             части.append(ШАБЛОН_СПИСКА.format(
                 описание=тип, S=имя, T=self.тип_c(тип_эл),
                 запись_элемента=self.запись(тип_эл, в_списке=True)))
+        if self.нужна_математика:
+            части.append(matematika.КОД_C)
         части.append("\n".join(self.строки))
         return "\n".join(части) + "\n"
 
@@ -632,6 +647,15 @@ class Генератор:
 
         имя = в.функция.имя
         аргументы = [self.выр(а) for а in в.аргументы]
+
+        if getattr(в, "библиотека", None):
+            каноническое, вариант = в.библиотека
+            описание = matematika.ФУНКЦИИ[каноническое]
+            self.нужна_математика = True
+            self.структура("[цел]")      # библиотека работает со списками целых
+            if описание["строка"][вариант]:
+                аргументы.append(str(в.строка))
+            return f"{описание['c'][вариант]}({', '.join(аргументы)})"
 
         if имя == "вывод":
             тип = в.аргументы[0].тип_выр
