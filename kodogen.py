@@ -45,6 +45,7 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
 
 СООБЩЕНИЯ = {
     "DAN_MSG_RUNTIME": "Ошибка выполнения в строке %d: %s\n",
+    "DAN_MSG_RUNTIME_FILE": "Ошибка выполнения в файле %s, строка %d: %s\n",
     "DAN_MSG_DIV_ZERO": "деление на ноль",
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
@@ -113,7 +114,10 @@ typedef const char *dan_str;
 
 static void dan_error(const char *text, int line) {
     fflush(stdout);
-    fprintf(stderr, DAN_MSG_RUNTIME, line, text);
+    if (line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT)
+        fprintf(stderr, DAN_MSG_RUNTIME_FILE, dan_files[line / DAN_FILE_STEP], line % DAN_FILE_STEP, text);
+    else
+        fprintf(stderr, DAN_MSG_RUNTIME, line, text);
     exit(1);
 }
 
@@ -1534,6 +1538,9 @@ class Генератор:
         if self.нужна_математика:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
+        файлы = getattr(программа, "файлы", None) or ["программа.dan"]
+        шапка += ["", f"#define DAN_FILE_STEP {у.ШАГ_ФАЙЛА}", f"#define DAN_FILE_COUNT {len(файлы)}",
+                  "static const char *const dan_files[] = {" + ", ".join(строка_c(ф) for ф in файлы) + "};"]
         части = ["\n".join(шапка), СРЕДА]
         self._собрать_все_типы()
         части.append(self._определения_типов())
