@@ -130,6 +130,44 @@ class ТестыМатематики(unittest.TestCase):
         self.assertIn("передано: ничего", с[0].текст)
 
 
+class ТестыДробейИСтепеней(unittest.TestCase):
+
+    def тип(self, выражение):
+        п = ок("пусть _р = " + выражение)
+        return п.инструкции[-1].значение.тип_выр
+
+    def test_типы_арифметики(self):
+        self.assertEqual(self.тип("рац(1, 2) + 1"), "рац")
+        self.assertEqual(self.тип("рац(1, 2) + 1.5"), "дроб")
+        self.assertEqual(self.тип("7 / 2"), "цел")
+        self.assertEqual(self.тип("рац(7) / 2"), "рац")
+        self.assertEqual(self.тип("[1, рац(1, 2)]"), "[рац]")
+        self.assertEqual(self.тип("[1, рац(1, 2), 0.5]"), "[дроб]")
+
+    def test_типы_степени(self):
+        self.assertEqual(self.тип("2 ^ 3"), "цел")
+        self.assertEqual(self.тип("рац(1, 2) ^ 3"), "рац")
+        self.assertEqual(self.тип("2 ^ 0.5"), "дроб")
+        self.assertEqual(self.тип("2.0 ^ 2"), "дроб")
+        self.assertEqual(self.тип("2 ^ рац(1, 2)"), "дроб")
+
+    def test_приведение_отмечается(self):
+        п = ок("пусть х: рац = 5")
+        self.assertEqual(п.инструкции[0].значение.привести_к, "рац")
+
+    def test_дробь_не_становится_целым(self):
+        с = ошибки("перем а = 1\nа = рац(1, 2)")
+        self.assertIn("имеет тип цел", с[0].текст)
+
+    def test_дробь_не_индекс(self):
+        с = ошибки("пусть с = [1]\nвывод(с[рац(0)])")
+        self.assertIn("целым числом", с[0].текст)
+
+    def test_степень_строки(self):
+        с = ошибки("пусть а = \"х\" ^ 2")
+        self.assertIn("только числа", с[0].текст)
+
+
 class ТестыОшибок(unittest.TestCase):
 
     def одна(self, текст, фрагмент, строка=None):
