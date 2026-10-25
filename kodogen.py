@@ -27,13 +27,14 @@ C независимо от его настроек кодировки.
 
 import uzly as у
 import matematika
-from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, ПУСТО, это_список, элемент
+import dannye
+from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, это_список, элемент, найти_в_библиотеке
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
-             МН: "dan_mn", ПУСТО: "void"}
-КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p"}
+             МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void"}
+КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p", БАЙТЫ: "y"}
 ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool",
-          РАЦ: "dan_write_rat", МН: "dan_write_poly"}
+          РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes"}
 ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
                "%": "dan_poly_mod"}
 ОПЕРАЦИИ_РАЦ = {"+": "dan_rat_add", "-": "dan_rat_sub", "*": "dan_rat_mul", "/": "dan_rat_div"}
@@ -54,6 +55,7 @@ from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, ПУСТО,
     "DAN_MSG_NOT_FINITE": "бесконечность или не-число нельзя преобразовать в дробь",
     "DAN_MSG_NEG_POW": "целое число в отрицательной степени не является целым; "
                        "используйте рац(а) ^ н или дробное число",
+    "DAN_TXT_BYTES": "байты",
     "DAN_TRUE": "истина",
     "DAN_FALSE": "ложь",
 }
@@ -438,6 +440,65 @@ static dan_rat dan_rat_from_float(double v, int line) {
     return dan_rat_make(neg ? -n : n, d, line);
 }
 
+/* ---- bytes ---- */
+
+typedef struct { int64_t len; uint8_t *data; } dan_bytes_s;
+typedef const dan_bytes_s *dan_bytes;
+
+static dan_bytes_s *dan_bytes_alloc(int64_t len) {
+    dan_bytes_s *b = dan_alloc(sizeof *b);
+    b->len = len;
+    b->data = dan_alloc((size_t)len + 1);
+    b->data[len] = 0;
+    return b;
+}
+
+static dan_bytes dan_bytes_from_str(dan_str s) {
+    size_t n = strlen(s);
+    dan_bytes_s *b = dan_bytes_alloc((int64_t)n);
+    memcpy(b->data, s, n);
+    return b;
+}
+
+/* Text from bytes in UTF-8; the text ends at the first zero byte. */
+static dan_str dan_bytes_to_str(dan_bytes b) {
+    char *s = dan_alloc((size_t)b->len + 1);
+    memcpy(s, b->data, (size_t)b->len);
+    s[b->len] = 0;
+    return s;
+}
+
+static dan_bytes dan_bytes_concat(dan_bytes a, dan_bytes b) {
+    dan_bytes_s *r = dan_bytes_alloc(a->len + b->len);
+    memcpy(r->data, a->data, (size_t)a->len);
+    memcpy(r->data + a->len, b->data, (size_t)b->len);
+    return r;
+}
+
+static bool dan_bytes_eq(dan_bytes a, dan_bytes b) {
+    return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+}
+
+static int64_t dan_bytes_get(dan_bytes b, int64_t i, int line) {
+    if (i < 0 || i >= b->len) dan_index_error(i, b->len, line);
+    return b->data[i];
+}
+
+/* байты(5): 68 65 6c 6c 6f */
+static dan_str dan_bytes_show(dan_bytes b) {
+    dan_buf s = { NULL, 0, 0 };
+    char t[32];
+    snprintf(t, sizeof t, "(%" PRId64 ")", b->len);
+    dan_buf_add(&s, DAN_TXT_BYTES);
+    dan_buf_add(&s, t);
+    if (b->len) dan_buf_add(&s, ":");
+    for (int64_t i = 0; i < b->len && i < 32; i++) { snprintf(t, sizeof t, " %02x", b->data[i]); dan_buf_add(&s, t); }
+    if (b->len > 32) dan_buf_add(&s, " ...");
+    return s.s;
+}
+
+static void dan_write_bytes(dan_bytes b) { fputs(dan_bytes_show(b), stdout); }
+
 /* ---- polynomials: defined after the list types ---- */
 typedef struct dan_poly dan_poly;
 typedef const dan_poly *dan_mn;
@@ -573,6 +634,7 @@ class Генератор:
         self.счётчик = 0
         self.списки = {}           # тип списка -> имя структуры C (вложенные раньше внешних)
         self.нужна_математика = False
+        self.нужны_данные = False
 
     # ---------- типы ----------
 
@@ -582,6 +644,13 @@ class Генератор:
         if тип == МН:
             self.включить_математику()
         return БАЗОВЫЕ_C[тип]
+
+    def включить_данные(self):
+        if self.нужны_данные:
+            return
+        self.нужны_данные = True
+        for тип_списка in ("[цел]", "[стр]"):
+            self.структура(тип_списка)
 
     def включить_математику(self):
         """Библиотека и многочлены нужны: регистрируются все используемые ими типы списков."""
@@ -612,7 +681,8 @@ class Генератор:
         if это_список(тип):
             return self.структура(тип) + "_str"
         return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
-                ЛОГ: "dan_bool_to_str", СТР: "dan_quote_str", МН: "dan_poly_to_str"}[тип]
+                ЛОГ: "dan_bool_to_str", СТР: "dan_quote_str", МН: "dan_poly_to_str",
+                БАЙТЫ: "dan_bytes_show"}[тип]
 
     # ---------- имена и вывод ----------
 
@@ -664,10 +734,13 @@ class Генератор:
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>",
-            "#include <errno.h>", "#include <math.h>",
+            "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
+            "#ifndef _WIN32", "#include <dirent.h>", "#endif",
             "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
         ]
         шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
+        if self.нужны_данные:
+            шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in dannye.СООБЩЕНИЯ.items()]
         if self.нужна_математика:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
@@ -678,6 +751,8 @@ class Генератор:
                 описание=тип, S=имя, T=self.тип_c(тип_эл),
                 запись_элемента=self.запись(тип_эл, в_списке=True),
                 строка_элемента=self.строка_элемента(тип_эл)))
+        if self.нужны_данные:
+            части.append(dannye.код_c())
         if self.нужна_математика:
             части.append(matematika.КОД_C)
             части.append(matematika.код_c_дополнения())
@@ -866,8 +941,9 @@ class Генератор:
             return f"({л} && {п})"
         if оп == "или":
             return f"({л} || {п})"
-        if в.левый.тип_выр == СТР:
-            равно = f"dan_str_eq({л}, {п})"
+        if в.левый.тип_выр in (СТР, БАЙТЫ):
+            функция = "dan_str_eq" if в.левый.тип_выр == СТР else "dan_bytes_eq"
+            равно = f"{функция}({л}, {п})"
             return равно if оп == "==" else f"(!{равно})"
         if getattr(в, "тип_операндов", None) == РАЦ:
             return f"(dan_rat_cmp({л}, {п}) {оп} 0)"
@@ -880,6 +956,8 @@ class Генератор:
         """Код «л оп п», где оба операнда уже приведены к типу результата."""
         if тип == СТР:
             return f"dan_concat({л}, {п})"
+        if тип == БАЙТЫ:
+            return f"dan_bytes_concat({л}, {п})"
         if тип == РАЦ:
             return f"{ОПЕРАЦИИ_РАЦ[оп]}({л}, {п}, {строка})"
         if тип == МН:
@@ -900,6 +978,8 @@ class Генератор:
         return f"{структура}_from({len(в.элементы)}, ({self.тип_c(элемент(тип))}[]){{{элементы}}})"
 
     def в_Индекс(self, в):
+        if в.объект.тип_выр == БАЙТЫ:
+            return f"dan_bytes_get({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
         структура = self.структура(в.объект.тип_выр)
         return f"{структура}_get({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
 
@@ -913,6 +993,8 @@ class Генератор:
             return f"dan_poly_coeffs({self.выр(в.объект)})"
         if тип == СТР:
             return f"dan_str_len({self.выр(в.объект)})"
+        if тип == БАЙТЫ:
+            return f"({self.выр(в.объект)})->len"
         if not это_список(тип):           # литерал «[]»
             return "INT64_C(0)"
         return f"({self.выр(в.объект)})->len"
@@ -928,8 +1010,11 @@ class Генератор:
 
         if getattr(в, "библиотека", None):
             каноническое, вариант = в.библиотека
-            описание = matematika.ФУНКЦИИ[каноническое]
-            self.включить_математику()
+            _, описание = найти_в_библиотеке(каноническое)
+            if описание.get("модуль") == "данные":
+                self.включить_данные()
+            else:
+                self.включить_математику()
             if описание["строка"][вариант]:
                 аргументы.append(str(в.строка))
             return f"{описание['c'][вариант]}({', '.join(аргументы)})"
@@ -939,9 +1024,12 @@ class Генератор:
             return f"({self.запись(тип)}({аргументы[0]}), dan_newline())"
         if имя == "ввод":
             return f"dan_input({аргументы[0] if аргументы else 'NULL'})"
+        if имя == БАЙТЫ and getattr(в, "из_списка", False):
+            self.включить_данные()
+            return f"dan_bytes_from_list({аргументы[0]}, {в.строка})"
         if имя == РАЦ and len(аргументы) == 2:
             return f"dan_rat_of({аргументы[0]}, {аргументы[1]}, {в.строка})"
-        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ):
+        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ, БАЙТЫ):
             return self._преобразование(имя, в.аргументы[0].тип_выр, аргументы[0], в.строка)
         return f"{self.имя(имя)}({', '.join(аргументы)})"
 
@@ -950,6 +1038,10 @@ class Генератор:
             return значение
         if куда == СТР and это_список(откуда):
             return f"{self.структура(откуда)}_str({значение})"
+        if куда == БАЙТЫ:
+            return f"dan_bytes_from_str({значение})"
+        if откуда == БАЙТЫ:
+            return f"dan_bytes_to_str({значение})"
         if куда == СТР:
             return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
                     ЛОГ: "dan_bool_to_str", МН: "dan_poly_to_str"}[откуда] + f"({значение})"
