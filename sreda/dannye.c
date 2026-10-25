@@ -206,6 +206,14 @@ static dan_bytes dan_bytes_from_list(const dl_Li *l, int line) {
     return dan_bytes_wrap(d, l->len);
 }
 
+static dan_bytes dan_bytes_slice(dan_bytes b, int64_t a, int64_t z, int line) {
+    if (a < 0 || a > b->len) dan_index_error(a, b->len, line);
+    if (z < a - 1 || z >= b->len) dan_index_error(z, b->len, line);
+    uint8_t *d = dan_alloc((size_t)(z - a + 2));
+    memcpy(d, b->data + a, (size_t)(z - a + 1));
+    return dan_bytes_wrap(d, z - a + 1);
+}
+
 static dl_Li *dan_bytes_to_list(dan_bytes b) {
     dl_Li *r = dl_Li_from(0, NULL);
     for (int64_t i = 0; i < b->len; i++) dl_Li_push(r, b->data[i]);

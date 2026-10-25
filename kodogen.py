@@ -45,7 +45,9 @@ from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ,
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
     "DAN_MSG_TOO_BIG": "результат слишком велик для типа цел",
-    "DAN_MSG_INDEX": "индекс %lld за пределами списка длиной %lld",
+    "DAN_MSG_INDEX": "индекс %lld за пределами (длина %lld)",
+    "DAN_MSG_EMPTY_SEARCH": "искомая строка не может быть пустой",
+    "DAN_MSG_NEG_REPEAT": "число повторений не может быть отрицательным",
     "DAN_MSG_NOT_INT": "строку \"%s\" нельзя преобразовать в целое число",
     "DAN_MSG_INT_RANGE": "число \"%s\" слишком велико для типа цел",
     "DAN_MSG_NOT_FLOAT": "строку \"%s\" нельзя преобразовать в число",
@@ -133,6 +135,100 @@ static dan_str dan_concat(dan_str a, dan_str b) {
 
 static bool dan_str_eq(dan_str a, dan_str b) { return strcmp(a, b) == 0; }
 
+/* ---- characters of UTF-8 strings ---- */
+
+static size_t dan_utf8_len(unsigned char c) { return c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4; }
+
+/* byte offset of character number i (i may equal the length: end of string) */
+static const char *dan_utf8_at(dan_str s, int64_t i) {
+    const char *p = s;
+    while (i > 0 && *p) { p += dan_utf8_len((unsigned char)*p); i--; }
+    return i == 0 ? p : NULL;
+}
+
+static int64_t dan_str_len(dan_str s);
+
+static dan_str dan_str_sub(const char *a, const char *b) {
+    size_t n = (size_t)(b - a);
+    char *r = dan_alloc(n + 1);
+    memcpy(r, a, n);
+    r[n] = 0;
+    return r;
+}
+
+static dan_str dan_str_char_at(dan_str s, int64_t i, int line) {
+    const char *p = i >= 0 ? dan_utf8_at(s, i) : NULL;
+    if (!p || !*p) dan_index_error(i, dan_str_len(s), line);
+    return dan_str_sub(p, p + dan_utf8_len((unsigned char)*p));
+}
+
+/* characters a..b inclusive; b == a - 1 gives an empty string */
+static dan_str dan_str_slice(dan_str s, int64_t a, int64_t b, int line) {
+    int64_t n = dan_str_len(s);
+    if (a < 0 || a > n) dan_index_error(a, n, line);
+    if (b < a - 1 || b >= n) dan_index_error(b, n, line);
+    const char *pa = dan_utf8_at(s, a), *pb = dan_utf8_at(pa, b - a + 1);
+    return dan_str_sub(pa, pb);
+}
+
+static int64_t dan_str_find(dan_str s, dan_str t) {
+    const char *f = strstr(s, t);
+    if (!f) return -1;
+    int64_t n = 0;
+    for (const char *p = s; p < f; p += dan_utf8_len((unsigned char)*p)) n++;
+    return n;
+}
+
+static bool dan_str_contains(dan_str s, dan_str t) { return strstr(s, t) != NULL; }
+static bool dan_str_starts(dan_str s, dan_str t) { return strncmp(s, t, strlen(t)) == 0; }
+static bool dan_str_ends(dan_str s, dan_str t) {
+    size_t a = strlen(s), b = strlen(t);
+    return b <= a && memcmp(s + a - b, t, b) == 0;
+}
+
+static int dan_str_cmp(dan_str a, dan_str b) { return strcmp(a, b); }
+
+static dan_str dan_str_trim(dan_str s) {
+    const char *a = s, *b = s + strlen(s);
+    while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r') a++;
+    while (b > a && (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\n' || b[-1] == '\r')) b--;
+    return dan_str_sub(a, b);
+}
+
+/* upper and lower case for Latin and Cyrillic letters (including ё) */
+static dan_str dan_str_case(dan_str s, int upper) {
+    size_t n = strlen(s);
+    unsigned char *r = dan_alloc(n + 1);
+    memcpy(r, s, n + 1);
+    for (size_t i = 0; i < n;) {
+        unsigned char c = r[i];
+        if (c < 0x80) {
+            if (upper && c >= 'a' && c <= 'z') r[i] = (unsigned char)(c - 32);
+            if (!upper && c >= 'A' && c <= 'Z') r[i] = (unsigned char)(c + 32);
+            i++;
+            continue;
+        }
+        size_t k = dan_utf8_len(c);
+        if (k == 2 && i + 1 < n) {
+            unsigned cp = ((unsigned)(c & 0x1F) << 6) | (r[i + 1] & 0x3F);
+            if (upper) {
+                if (cp >= 0x430 && cp <= 0x44F) cp -= 0x20;
+                else if (cp == 0x451) cp = 0x401;
+            } else {
+                if (cp >= 0x410 && cp <= 0x42F) cp += 0x20;
+                else if (cp == 0x401) cp = 0x451;
+            }
+            r[i] = (unsigned char)(0xC0 | (cp >> 6));
+            r[i + 1] = (unsigned char)(0x80 | (cp & 0x3F));
+        }
+        i += k;
+    }
+    return (dan_str)r;
+}
+
+static dan_str dan_str_upper(dan_str s) { return dan_str_case(s, 1); }
+static dan_str dan_str_lower(dan_str s) { return dan_str_case(s, 0); }
+
 /* Growing text buffer. */
 typedef struct { char *s; size_t len, cap; } dan_buf;
 
@@ -144,6 +240,30 @@ static void dan_buf_add(dan_buf *b, const char *t) {
     }
     memcpy(b->s + b->len, t, n + 1);
     b->len += n;
+}
+
+static dan_str dan_str_replace(dan_str s, dan_str a, dan_str b, int line) {
+    if (!*a) dan_error(DAN_MSG_EMPTY_SEARCH, line);
+    dan_buf r = { NULL, 0, 0 };
+    dan_buf_add(&r, "");
+    size_t la = strlen(a);
+    const char *p = s, *f;
+    while ((f = strstr(p, a)) != NULL) {
+        dan_str part = dan_str_sub(p, f);
+        dan_buf_add(&r, part);
+        dan_buf_add(&r, b);
+        p = f + la;
+    }
+    dan_buf_add(&r, p);
+    return r.s;
+}
+
+static dan_str dan_str_repeat(dan_str s, int64_t k, int line) {
+    if (k < 0) dan_error(DAN_MSG_NEG_REPEAT, line);
+    dan_buf r = { NULL, 0, 0 };
+    dan_buf_add(&r, "");
+    for (int64_t i = 0; i < k; i++) dan_buf_add(&r, s);
+    return r.s;
 }
 
 static dan_str dan_quote_str(dan_str s) {
@@ -504,6 +624,7 @@ typedef struct dan_poly dan_poly;
 typedef const dan_poly *dan_mn;
 static void dan_write_poly(dan_mn p);
 static dan_str dan_poly_to_str(dan_mn p);
+static bool dan_poly_eq(dan_mn a, dan_mn b);
 
 static void dan_start(void) {
 #ifdef _WIN32
@@ -553,6 +674,34 @@ static void {S}_write(const {S} *l) {{
     putchar(']');
 }}
 
+static void {S}_insert({S} *l, int64_t i, {T} v, int line) {{
+    if (i < 0 || i > l->len) dan_index_error(i, l->len, line);
+    {S}_push(l, v);
+    memmove(&l->items[i + 1], &l->items[i], (size_t)(l->len - 1 - i) * sizeof({T}));
+    l->items[i] = v;
+}}
+
+static void {S}_remove({S} *l, int64_t i, int line) {{
+    if (i < 0 || i >= l->len) dan_index_error(i, l->len, line);
+    memmove(&l->items[i], &l->items[i + 1], (size_t)(l->len - i - 1) * sizeof({T}));
+    l->len--;
+}}
+
+static {S} *{S}_copy(const {S} *l) {{ return {S}_from(l->len, l->items); }}
+
+static {S} *{S}_reversed(const {S} *l) {{
+    {S} *r = {S}_from(l->len, l->items);
+    for (int64_t i = 0, j = r->len - 1; i < j; i++, j--) {{ {T} t = r->items[i]; r->items[i] = r->items[j]; r->items[j] = t; }}
+    return r;
+}}
+
+/* elements a..b inclusive; b == a - 1 gives an empty list */
+static {S} *{S}_slice(const {S} *l, int64_t a, int64_t b, int line) {{
+    if (a < 0 || a > l->len) dan_index_error(a, l->len, line);
+    if (b < a - 1 || b >= l->len) dan_index_error(b, l->len, line);
+    return {S}_from(b - a + 1, l->items + a);
+}}
+
 static dan_str {S}_str(const {S} *l) {{
     dan_buf b = {{ NULL, 0, 0 }};
     dan_buf_add(&b, "[");
@@ -563,6 +712,65 @@ static dan_str {S}_str(const {S} *l) {{
     dan_buf_add(&b, "]");
     return b.s;
 }}
+"""
+
+# Равенство элементов списка (для «содержит» и «найти»).
+РАВЕНСТВО = {ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
+             РАЦ: "(dan_rat_cmp(a, b) == 0)", МН: "dan_poly_eq(a, b)", БАЙТЫ: "dan_bytes_eq(a, b)"}
+
+ШАБЛОН_ПОИСКА = """
+static int64_t {S}_find(const {S} *l, {T} b) {{
+    for (int64_t i = 0; i < l->len; i++) {{ {T} a = l->items[i]; if ({EQ}) return i; }}
+    return -1;
+}}
+static bool {S}_contains(const {S} *l, {T} b) {{ return {S}_find(l, b) >= 0; }}
+"""
+
+# Функции строк, которые возвращают списки строк: идут после определения dl_Ls.
+КОД_СТРОК_СО_СПИСКАМИ = r"""
+static dl_Ls *dan_str_chars(dan_str s) {
+    dl_Ls *r = dl_Ls_from(0, NULL);
+    for (const char *p = s; *p;) {
+        size_t k = dan_utf8_len((unsigned char)*p);
+        dl_Ls_push(r, dan_str_sub(p, p + k));
+        p += k;
+    }
+    return r;
+}
+
+static dl_Ls *dan_str_split(dan_str s, dan_str sep, int line) {
+    if (!*sep) dan_error(DAN_MSG_EMPTY_SEARCH, line);
+    dl_Ls *r = dl_Ls_from(0, NULL);
+    size_t ls = strlen(sep);
+    const char *p = s, *f;
+    while ((f = strstr(p, sep)) != NULL) { dl_Ls_push(r, dan_str_sub(p, f)); p = f + ls; }
+    dl_Ls_push(r, dan_strdup(p));
+    return r;
+}
+
+/* words separated by any spaces, tabs and line breaks */
+static dl_Ls *dan_str_split_ws(dan_str s) {
+    dl_Ls *r = dl_Ls_from(0, NULL);
+    const char *p = s;
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        const char *a = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+        dl_Ls_push(r, dan_str_sub(a, p));
+    }
+    return r;
+}
+
+static dan_str dl_Ls_join(const dl_Ls *l, dan_str sep) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "");
+    for (int64_t i = 0; i < l->len; i++) {
+        if (i) dan_buf_add(&b, sep);
+        dan_buf_add(&b, l->items[i]);
+    }
+    return b.s;
+}
 """
 
 # Транслитерация русских букв для имён в C.
@@ -751,6 +959,11 @@ class Генератор:
                 описание=тип, S=имя, T=self.тип_c(тип_эл),
                 запись_элемента=self.запись(тип_эл, в_списке=True),
                 строка_элемента=self.строка_элемента(тип_эл)))
+            равенство = РАВЕНСТВО.get(тип_эл)
+            if равенство:
+                части.append(ШАБЛОН_ПОИСКА.format(S=имя, T=self.тип_c(тип_эл), EQ=равенство))
+            if тип_эл == СТР:
+                части.append(КОД_СТРОК_СО_СПИСКАМИ)
         if self.нужны_данные:
             части.append(dannye.код_c())
         if self.нужна_математика:
@@ -849,12 +1062,17 @@ class Генератор:
             self.блок(и.тело)
             self.пиши("}")
             return
-        структура = self.структура(и.источник.тип_выр)
+        if getattr(и, "по_строке", False):
+            структура = self.структура("[стр]")
+            источник = f"dan_str_chars({self.выр(и.источник)})"
+        else:
+            структура = self.структура(и.источник.тип_выр)
+            источник = self.выр(и.источник)
         список = self.служебное_имя("list")
         номер = self.служебное_имя("i")
         self.пиши("{")
         self.отступ += 1
-        self.пиши(f"{структура}* const {список} = {self.выр(и.источник)};")
+        self.пиши(f"{структура}* const {список} = {источник};")
         self.пиши(f"for (int64_t {номер} = 0; {номер} < {список}->len; {номер}++) {{")
         self.отступ += 1
         self.пиши(f"{self.тип_c(и.тип_элемента)} const {перем} = {список}->items[{номер}];")
@@ -941,6 +1159,8 @@ class Генератор:
             return f"({л} && {п})"
         if оп == "или":
             return f"({л} || {п})"
+        if в.левый.тип_выр == СТР and оп not in ("==", "!="):
+            return f"(dan_str_cmp({л}, {п}) {оп} 0)"
         if в.левый.тип_выр in (СТР, БАЙТЫ):
             функция = "dan_str_eq" if в.левый.тип_выр == СТР else "dan_bytes_eq"
             равно = f"{функция}({л}, {п})"
@@ -978,6 +1198,18 @@ class Генератор:
         return f"{структура}_from({len(в.элементы)}, ({self.тип_c(элемент(тип))}[]){{{элементы}}})"
 
     def в_Индекс(self, в):
+        тип = в.объект.тип_выр
+        if getattr(в, "срез", False):
+            объект = self.выр(в.объект)
+            а, б = self.выр(в.индекс.начало), self.выр(в.индекс.конец)
+            if тип == СТР:
+                return f"dan_str_slice({объект}, {а}, {б}, {в.строка})"
+            if тип == БАЙТЫ:
+                self.включить_данные()
+                return f"dan_bytes_slice({объект}, {а}, {б}, {в.строка})"
+            return f"{self.структура(тип)}_slice({объект}, {а}, {б}, {в.строка})"
+        if тип == СТР:
+            return f"dan_str_char_at({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
         if в.объект.тип_выр == БАЙТЫ:
             return f"dan_bytes_get({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
         структура = self.структура(в.объект.тип_выр)
@@ -1000,10 +1232,20 @@ class Генератор:
         return f"({self.выр(в.объект)})->len"
 
     def в_Вызов(self, в):
-        if isinstance(в.функция, у.Поле):    # метод: список.добавить(х)
+        if isinstance(в.функция, у.Поле):    # метод: список.добавить(х), строка.найти(т)
             объект = в.функция.объект
+            аргументы = [self.выр(объект)] + [self.выр(а) for а in в.аргументы]
+            if getattr(в, "метод_c", None):
+                функция, нужна_строка = в.метод_c
+                self.структура("[стр]")       # некоторые методы строк возвращают списки строк
+                if нужна_строка:
+                    аргументы.append(str(в.строка))
+                return f"{функция}({', '.join(аргументы)})"
+            суффикс, нужна_строка = в.метод_списка
             структура = self.структура(объект.тип_выр)
-            return f"{структура}_push({self.выр(объект)}, {self.выр(в.аргументы[0])})"
+            if нужна_строка:
+                аргументы.append(str(в.строка))
+            return f"{структура}_{суффикс}({', '.join(аргументы)})"
 
         имя = в.функция.имя
         аргументы = [self.выр(а) for а in в.аргументы]
