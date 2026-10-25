@@ -232,5 +232,83 @@ class ТестыДанных(unittest.TestCase):
                    ['["из_python.txt"]', "зашифровано в Python"])
 
 
+# Контрольный пример RFC 8439, раздел 2.8.2 (ChaCha20-Poly1305 с дополнительными данными).
+RFC8439_ТЕКСТ = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip "
+                 b"for the future, sunscreen would be it.")
+RFC8439_ШИФР = ("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca96712"
+                "82fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58"
+                "fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116")
+RFC8439_КОД = "1ae10b594f09e26a7e902ecbd0600691"
+# Контрольные примеры RFC 7914, раздел 11 (PBKDF2-HMAC-SHA256).
+RFC7914 = [
+    (b"passwd", b"salt", 1,
+     "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+     "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"),
+    (b"Password", b"NaCl", 80000,
+     "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+     "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"),
+]
+
+
+def массив_c(имя, данные):
+    return f"static const uint8_t {имя}[{max(len(данные), 1)}] = {{{', '.join(str(б) for б in данные) or '0'}}};\n"
+
+
+@unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
+class ТестыОфициальныхПримеров(unittest.TestCase):
+    """Сверка шифрования библиотеки выполнения с примерами из RFC, без сторонних библиотек.
+
+    Функции библиотеки выполнения вызываются напрямую: к переведённой программе
+    добавляется небольшая программа на C, печатающая результаты в шестнадцатеричном виде.
+    """
+
+    def test_примеры_rfc(self):
+        код = dan.перевести('пусть з = зашифровать("а", "б")\nвывод(стр(расшифровать(з, "б")))')
+        обвязка = ["#include <stdio.h>",
+                   "static void печать(const uint8_t *д, size_t n) {",
+                   "    for (size_t i = 0; i < n; i++) printf(\"%02x\", д[i]);",
+                   "    printf(\"\\n\");",
+                   "}"]
+        обвязка.append(массив_c("ключ", bytes(range(0x80, 0xa0))))
+        обвязка.append(массив_c("одноразовое", bytes.fromhex("070000004041424344454647")))
+        обвязка.append(массив_c("доп", bytes.fromhex("50515253c0c1c2c3c4c5c6c7")))
+        обвязка.append(массив_c("текст", RFC8439_ТЕКСТ))
+        for номер, (пароль, соль, _, _) in enumerate(RFC7914):
+            обвязка.append(массив_c(f"пароль{номер}", пароль))
+            обвязка.append(массив_c(f"соль{номер}", соль))
+        обвязка += ["int main(void) {",
+                    f"    uint8_t буфер[{len(RFC8439_ТЕКСТ)}], код[16], вывод[64];",
+                    "    memcpy(буфер, текст, sizeof буфер);",
+                    "    dan_chacha20_xor(ключ, 1, одноразовое, буфер, sizeof буфер);",
+                    "    dan_aead_tag(ключ, одноразовое, доп, sizeof доп, буфер, sizeof буфер, код);",
+                    "    печать(буфер, sizeof буфер);",
+                    "    печать(код, 16);"]
+        for номер, (пароль, соль, повторы, _) in enumerate(RFC7914):
+            обвязка.append(f"    dan_pbkdf2_sha256(пароль{номер}, {len(пароль)}, соль{номер}, {len(соль)}, "
+                           f"{повторы}, вывод, 64);")
+            обвязка.append("    печать(вывод, 64);")
+        обвязка += ["    return 0;", "}"]
+        текст_c = ("#define main dan_program_main\n" + код + "\n#undef main\n#include <string.h>\n"
+                   + "\n".join(обвязка) + "\n")
+        папка = tempfile.mkdtemp()
+        try:
+            путь_c = os.path.join(папка, "rfc.c")
+            исполняемый = os.path.join(папка, "rfc.exe" if os.name == "nt" else "rfc")
+            with open(путь_c, "w", encoding="utf-8") as ф:
+                ф.write(текст_c)
+            сборка = subprocess.run([dan.найти_компилятор(), *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ,
+                                     путь_c, "-o", исполняемый, *dan.БИБЛИОТЕКИ],
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace")
+            self.assertEqual(сборка.returncode, 0, сборка.stderr)
+            р = subprocess.run([исполняемый], capture_output=True, text=True, timeout=120)
+            self.assertEqual(р.returncode, 0, р.stderr)
+            строки = р.stdout.split()
+        finally:
+            shutil.rmtree(папка, ignore_errors=True)
+        self.assertEqual(строки[0], RFC8439_ШИФР)
+        self.assertEqual(строки[1], RFC8439_КОД)
+        self.assertEqual(строки[2:], [ожидается for _, _, _, ожидается in RFC7914])
+
+
 if __name__ == "__main__":
     unittest.main()
