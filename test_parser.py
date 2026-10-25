@@ -217,5 +217,32 @@ class ТестыСоветов(unittest.TestCase):
         self.assertIn("используйте «==»", str(к.exception))
 
 
+class ТестыТипов(unittest.TestCase):
+
+    def test_объявление_типа(self):
+        п = разобрать("тип Т {\n  а: цел\n  б: [стр]? = ничего, г: Т2\n}")
+        о = п.инструкции[0]
+        self.assertEqual([(п.имя, п.тип) for п in о.поля], [("а", "цел"), ("б", "[стр]?"), ("г", "Т2")])
+
+    def test_именованные_аргументы(self):
+        в = одна("ф(1, б = 2)").выражение
+        self.assertEqual(в.имена, [None, "б"])
+        with self.assertRaises(ОшибкаРазбора):
+            разобрать("ф(а = 1, 2)")
+
+    def test_иначе_в_выражении(self):
+        в = одна("пусть х = а иначе б иначе 3").значение
+        self.assertIsInstance(в, у.Иначе)
+        self.assertIsInstance(в.запасное, у.Иначе)
+
+    def test_если_пусть(self):
+        и = одна("если пусть з = а { } иначе { }")
+        self.assertIsInstance(и, у.ЕслиЕсть)
+        self.assertEqual(и.имя, "з")
+
+    def test_присваивание_полю(self):
+        self.assertIsInstance(одна("а.б.г += 1"), у.ПрисваиваниеПоля)
+
+
 if __name__ == "__main__":
     unittest.main()
