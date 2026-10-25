@@ -19,7 +19,7 @@ from matematika import ЦЕЛ, ДРОБ, ЛОГ, РАЦ, СТР, МН
 НЕОБЯЗ_СР, НЕОБЯЗ_ЦЕЛ, НЕОБЯЗ_ДРОБ = "[рац]?", "цел?", "дроб?"
 
 # Типы, которые должен зарегистрировать генератор, чтобы код C библиотеки собрался.
-НУЖНЫЕ_ТИПЫ = (МД, НЕОБЯЗ_СР, НЕОБЯЗ_ЦЕЛ, НЕОБЯЗ_ДРОБ)
+НУЖНЫЕ_ТИПЫ = (МД, НЕОБЯЗ_СР, НЕОБЯЗ_ЦЕЛ, НЕОБЯЗ_ДРОБ, "цел!", "дроб!")
 
 
 def д(имя, варианты, описание):
@@ -258,6 +258,13 @@ for имя, c, описание in (
 д("компенсация_за_задержку", [([РАЦ, РАЦ, ЦЕЛ], РАЦ, "dan_late_pay_comp", True)],
   "компенсация за задержку выплат работнику по ст. 236 ТК РФ: сумма × ключевая ставка / 100 / 150 × дней")
 
+# ---------- разбор чисел с ошибкой как значением ----------
+
+д("разобрать_цел", [([СТР], "цел!", "dan_parse_int_res", True)],
+  "целое число из строки или ошибка, если строка - не число: разобрать_цел(\"42\") = 42")
+д("разобрать_дроб", [([СТР], "дроб!", "dan_parse_float_res", True)],
+  "дробное число из строки (точка или запятая) или ошибка")
+
 # ---------- логика ----------
 
 д("импликация", [([ЛОГ, ЛОГ], ЛОГ, "dan_implies", False)], "«если а, то б»: ложь только при а = истина, б = ложь")
@@ -276,6 +283,9 @@ for имя, c, описание in (
 м._БЕЗ_Ё.update({имя.replace("ё", "е"): имя for имя in м.ФУНКЦИИ})
 
 м.СООБЩЕНИЯ.update({
+    "DAN_TXT_NOT_INT": "\" - не целое число",
+    "DAN_TXT_INT_BIG": "\" - слишком большое число для типа цел",
+    "DAN_TXT_NOT_FLOAT": "\" - не число",
     "DAN_MSG_TAN": "тангенс не определён для угла пи/2 + пи·к (90° + 180°·к)",
     "DAN_MSG_CTG": "котангенс не определён для угла пи·к (180°·к)",
     "DAN_MSG_ASIN": "арксинус и арккосинус определены для чисел от -1 до 1",
@@ -1316,6 +1326,40 @@ static dan_rat dan_late_pay_comp(dan_rat s, dan_rat key_rate, int64_t days, int 
     if (days < 0) dan_error(DAN_MSG_YEAR_DAYS, line);
     return dan_rat_div(dan_rat_mul(dan_rat_mul(s, dan_pct_r(key_rate, line), line), dan_rat_from_int(days, line), line),
                        dan_rat_from_int(150, line), line);
+}
+
+/* -- parsing numbers: errors as values -- */
+static dan_str dan_not_number_msg(dan_str s, const char *what) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "\"");
+    dan_buf_add(&b, s);
+    dan_buf_add(&b, what);
+    return b.s;
+}
+static dr_i dan_parse_int_res(dan_str s, int line) {
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    errno = 0;
+    char *end;
+    long long v = strtoll(p, &end, 10);
+    if (end == p) return dr_i_err(dan_not_number_msg(s, DAN_TXT_NOT_INT), line);
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+    if (*end) return dr_i_err(dan_not_number_msg(s, DAN_TXT_NOT_INT), line);
+    if (errno == ERANGE) return dr_i_err(dan_not_number_msg(s, DAN_TXT_INT_BIG), line);
+    return dr_i_some((int64_t)v);
+}
+static dr_f dan_parse_float_res(dan_str s, int line) {
+    size_t n = strlen(s);
+    char *t = dan_alloc(n + 1);
+    for (size_t i = 0; i <= n; i++) t[i] = s[i] == ',' ? '.' : s[i];
+    const char *p = t;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end;
+    double v = strtod(p, &end);
+    if (end == p) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+    if (*end) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
+    return dr_f_some(v);
 }
 
 /* -- logic -- */
