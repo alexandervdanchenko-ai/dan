@@ -30,7 +30,7 @@ import matematika
 import vysshaya  # регистрирует функции высшей и прикладной математики
 import dannye
 from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, НИЧЕГО, это_список, элемент,
-                      это_необяз, основа, найти_в_библиотеке)
+                      это_необяз, основа, найти_в_библиотеке, это_словарь, ключ_словаря, значение_словаря)
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
              МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void"}
@@ -54,6 +54,7 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
                     "не завершившись; проверьте условие остановки рекурсии или замените её циклом",
     "DAN_MSG_TOO_BIG": "результат слишком велик для типа цел",
     "DAN_MSG_INDEX": "индекс %lld за пределами (длина %lld)",
+    "DAN_MSG_NO_KEY": "в словаре нет ключа ",
     "DAN_MSG_EMPTY_SEARCH": "искомая строка не может быть пустой",
     "DAN_MSG_NEG_REPEAT": "число повторений не может быть отрицательным",
     "DAN_MSG_NOT_INT": "строку \"%s\" нельзя преобразовать в целое число",
@@ -854,6 +855,176 @@ static dan_str {S}_str(const {S} *l) {{
 }}
 """
 
+# Словари: хеш-таблица с открытой адресацией; записи хранятся в порядке
+# добавления, поэтому перебор и вывод предсказуемы. Удалённые записи
+# помечаются и убираются при ближайшем расширении таблицы.
+КОД_ХЕШЕЙ = r"""
+/* ---- dictionaries: hashing ---- */
+static uint64_t dan_hash_i(int64_t v) {
+    uint64_t z = (uint64_t)v + 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+static uint64_t dan_hash_s(dan_str s) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) { h ^= *p; h *= 0x100000001B3ULL; }
+    return dan_hash_i((int64_t)h);
+}
+static uint64_t dan_hash_r(dan_rat r) { return dan_hash_i(r.n) * 31 + dan_hash_i(r.d); }
+static void dan_key_error(dan_str key, int line) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, DAN_MSG_NO_KEY);
+    dan_buf_add(&b, key);
+    dan_error(b.s, line);
+}
+"""
+ХЕШИ = {ЦЕЛ: "dan_hash_i(k)", СТР: "dan_hash_s(k)", ЛОГ: "(uint64_t)(k)", РАЦ: "dan_hash_r(k)"}
+
+ОБЪЯВЛЕНИЯ_СЛОВАРЯ = """
+static {D} *{D}_share({D} *d);
+static dan_str {D}_str(const {D} *d);
+static void {D}_write(const {D} *d);
+"""
+
+ШАБЛОН_СЛОВАРЯ = """
+/* ---- dictionary {описание} ---- */
+struct {D} {{ int64_t len, n, cap, rc, slots; {K} *keys; {V} *vals; uint64_t *hashes; bool *alive; int64_t *index; }};
+
+static {D} *{D}_new(void) {{
+    {D} *d = dan_alloc(sizeof *d);
+    d->len = d->n = d->cap = d->rc = d->slots = 0;
+    d->keys = NULL; d->vals = NULL; d->hashes = NULL; d->alive = NULL; d->index = NULL;
+    return d;
+}}
+static {D} *{D}_share({D} *d) {{ d->rc++; return d; }}
+static {D} *{D}_release({D} *d) {{ if (d->rc > 0) d->rc--; return d; }}
+
+static void {D}_reindex({D} *d) {{
+    int64_t s = 8;
+    while (s < 2 * d->cap) s *= 2;
+    d->index = dan_alloc(sizeof(int64_t) * (size_t)s);
+    for (int64_t i = 0; i < s; i++) d->index[i] = -1;
+    d->slots = s;
+    for (int64_t e = 0; e < d->n; e++) {{
+        if (!d->alive[e]) continue;
+        int64_t p = (int64_t)(d->hashes[e] & (uint64_t)(s - 1));
+        while (d->index[p] >= 0) p = (p + 1) & (s - 1);
+        d->index[p] = e;
+    }}
+}}
+static int64_t {D}_lookup(const {D} *d, {K} k, uint64_t h) {{
+    if (!d->slots) return -1;
+    for (int64_t p = (int64_t)(h & (uint64_t)(d->slots - 1));; p = (p + 1) & (d->slots - 1)) {{
+        int64_t e = d->index[p];
+        if (e < 0) return -1;
+        if (d->alive[e] && d->hashes[e] == h) {{ {K} a = d->keys[e], b = k; if ({EQ_K}) return e; }}
+    }}
+}}
+static void {D}_grow({D} *d) {{   /* убирает удалённые записи и увеличивает таблицу */
+    int64_t cap = d->len * 2 < 8 ? 8 : d->len * 2, m = 0;
+    {K} *keys = dan_alloc(sizeof({K}) * (size_t)cap);
+    {V} *vals = dan_alloc(sizeof({V}) * (size_t)cap);
+    uint64_t *hashes = dan_alloc(sizeof(uint64_t) * (size_t)cap);
+    bool *alive = dan_alloc(sizeof(bool) * (size_t)cap);
+    for (int64_t e = 0; e < d->n; e++) {{
+        if (!d->alive[e]) continue;
+        keys[m] = d->keys[e]; vals[m] = d->vals[e]; hashes[m] = d->hashes[e]; alive[m] = true; m++;
+    }}
+    d->keys = keys; d->vals = vals; d->hashes = hashes; d->alive = alive; d->n = m; d->cap = cap;
+    {D}_reindex(d);
+}}
+static void {D}_put({D} *d, {K} k, {V} v) {{
+    uint64_t h = {HASH};
+    int64_t e = {D}_lookup(d, k, h);
+    if (e >= 0) {{ d->vals[e] = v; return; }}
+    if (d->n == d->cap) {D}_grow(d);
+    e = d->n++;
+    d->keys[e] = k; d->vals[e] = v; d->hashes[e] = h; d->alive[e] = true; d->len++;
+    int64_t p = (int64_t)(h & (uint64_t)(d->slots - 1));
+    while (d->index[p] >= 0) p = (p + 1) & (d->slots - 1);
+    d->index[p] = e;
+}}
+static {D} *{D}_from(int64_t n, const {K} *ks, const {V} *vs) {{
+    {D} *d = {D}_new();
+    for (int64_t i = 0; i < n; i++) {D}_put(d, ks[i], vs[i]);
+    return d;
+}}
+static {V} {D}_get(const {D} *d, {K} k, int line) {{
+    int64_t e = {D}_lookup(d, k, {HASH});
+    if (e < 0) dan_key_error({СТРОКА_К}(k), line);
+    return d->vals[e];
+}}
+static {V} *{D}_at({D} *d, {K} k, int line) {{
+    int64_t e = {D}_lookup(d, k, {HASH});
+    if (e < 0) dan_key_error({СТРОКА_К}(k), line);
+    return &d->vals[e];
+}}
+static bool {D}_contains(const {D} *d, {K} k) {{ return {D}_lookup(d, k, {HASH}) >= 0; }}
+static {O} {D}_find(const {D} *d, {K} k) {{
+    int64_t e = {D}_lookup(d, k, {HASH});
+    return e < 0 ? {O}_none() : {O_SOME}(d->vals[e]);
+}}
+static {V} {D}_get_or(const {D} *d, {K} k, {V} v) {{
+    int64_t e = {D}_lookup(d, k, {HASH});
+    return e < 0 ? v : d->vals[e];
+}}
+static void {D}_remove({D} *d, {K} k) {{
+    int64_t e = {D}_lookup(d, k, {HASH});
+    if (e >= 0) {{ d->alive[e] = false; d->len--; }}
+}}
+static {LK} *{D}_keys(const {D} *d) {{
+    {LK} *r = {LK}_from(0, NULL);
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {LK}_push(r, d->keys[e]);
+    return r;
+}}
+static {LV} *{D}_values(const {D} *d) {{
+    {LV} *r = {LV}_from(0, NULL);
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {LV}_push(r, {ПОДЕЛИТЬ}(d->vals[e]));
+    return r;
+}}
+static {D} *{D}_copy(const {D} *d) {{
+    {D} *r = {D}_new();
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {D}_put(r, d->keys[e], {ПОДЕЛИТЬ}(d->vals[e]));
+    return r;
+}}
+static {D} *{D}_mut({D} **pp) {{
+    {D} *d = *pp;
+    if (d->rc > 1) {{ {D} *r = {D}_copy(d); r->rc = 1; d->rc--; *pp = r; return r; }}
+    return d;
+}}
+static dan_str {D}_str(const {D} *d) {{
+    dan_buf b = {{ NULL, 0, 0 }};
+    dan_buf_add(&b, "{{");
+    bool first = true;
+    for (int64_t e = 0; e < d->n; e++) {{
+        if (!d->alive[e]) continue;
+        if (!first) dan_buf_add(&b, ", ");
+        first = false;
+        dan_buf_add(&b, {СТРОКА_К}(d->keys[e]));
+        dan_buf_add(&b, ": ");
+        dan_buf_add(&b, {СТРОКА_З}(d->vals[e]));
+    }}
+    dan_buf_add(&b, "}}");
+    return b.s;
+}}
+static void {D}_write(const {D} *d) {{ fputs({D}_str(d), stdout); }}
+"""
+
+ШАБЛОН_РАВЕНСТВА_СЛОВАРЯ = """
+static bool {D}_eq(const {D} *x, const {D} *y) {{
+    if (x->len != y->len) return false;
+    for (int64_t e = 0; e < x->n; e++) {{
+        if (!x->alive[e]) continue;
+        int64_t f = {D}_lookup(y, x->keys[e], x->hashes[e]);
+        if (f < 0) return false;
+        {V} a = x->vals[e]; {V} b = y->vals[f];
+        if (!({EQ_V})) return false;
+    }}
+    return true;
+}}
+"""
+
 # Равенство элементов списка (для «содержит» и «найти»).
 РАВЕНСТВО = {ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
              РАЦ: "(dan_rat_cmp(a, b) == 0)", МН: "dan_poly_eq(a, b)", БАЙТЫ: "dan_bytes_eq(a, b)"}
@@ -987,12 +1158,15 @@ class Генератор:
         self.поля_c = {}           # (тип, поле) -> имя поля в C
         self.значимые = {}         # собственные и необязательные типы -> имя типа C
         self.расширения = {}       # (тип списка, более широкий тип) -> функция C
+        self.словари = {}          # тип словаря -> имя структуры C
         self.написания = {}
 
     def код_типа(self, тип):
         """Короткий код типа для имён в C: [цел] -> Li, стр? -> Os, [Сотрудник] -> LTSotrudnik."""
         if это_список(тип):
             return "L" + self.код_типа(элемент(тип))
+        if это_словарь(тип):
+            return "D" + self.код_типа(ключ_словаря(тип)) + self.код_типа(значение_словаря(тип))
         if это_необяз(тип):
             return "O" + self.код_типа(основа(тип))
         if тип in self.собственные:
@@ -1078,11 +1252,22 @@ class Генератор:
                           f"    return r;\n}}")
         return "\n".join(строки) + "\n"
 
+    def словарь_c(self, тип):
+        """Имя структуры C словаря; регистрирует нужные ему типы."""
+        if тип not in self.словари:
+            self.словари[тип] = "dm_" + self.код_типа(тип)
+            к, з = ключ_словаря(тип), значение_словаря(тип)
+            self.структура("[" + к + "]")
+            self.структура("[" + з + "]")
+            self.тип_c(з if это_необяз(з) else з + "?")
+            self.тип_c(з)
+        return self.словари[тип]
+
     def содержит_списки(self, тип, в_работе=None):
         """Хранит ли значение типа списки, за местами хранения которых нужно следить.
         Необязательное значение рекурсивного типа неизменяемо и не считается."""
         в_работе = в_работе if в_работе is not None else set()
-        if это_список(тип):
+        if это_список(тип) or это_словарь(тип):
             return True
         if self.по_ссылке(тип):
             return False
@@ -1099,6 +1284,8 @@ class Генератор:
             return None
         if это_список(тип):
             return self.структура(тип) + "_share"
+        if это_словарь(тип):
+            return self.словарь_c(тип) + "_share"
         return self.значимый(тип) + "_share"
 
     @staticmethod
@@ -1111,7 +1298,7 @@ class Генератор:
         """Код значения, которое кладётся в новое место хранения (переменную,
         поле, элемент списка)."""
         функция = self.поделить(тип)
-        if функция is None or (not это_список(тип) and self.владеющее(узел)):
+        if функция is None or (not (это_список(тип) or это_словарь(тип)) and self.владеющее(узел)):
             return код
         return f"{функция}({код})"
 
@@ -1121,6 +1308,8 @@ class Генератор:
             return РАВЕНСТВО[тип]
         if это_список(тип):
             return f"{self.структура(тип)}_eq(a, b)" if self.сравнимый(тип) else None
+        if это_словарь(тип):
+            return f"{self.словарь_c(тип)}_eq(a, b)" if self.сравнимый(тип) else None
         if это_необяз(тип) or тип in self.собственные:
             if self.сравнимый(тип):
                 return f"{self.значимый(тип)}_eq(a, b)"
@@ -1132,6 +1321,8 @@ class Генератор:
             return True
         if это_список(тип):
             return self.сравнимый(элемент(тип), в_работе)
+        if это_словарь(тип):
+            return self.сравнимый(значение_словаря(тип), в_работе)
         if это_необяз(тип):
             return self.сравнимый(основа(тип), в_работе)
         if тип in self.собственные:
@@ -1147,6 +1338,8 @@ class Генератор:
             return код
         if это_список(тип):
             return f"{self.структура(тип)}_str({код})"
+        if это_словарь(тип):
+            return f"{self.словарь_c(тип)}_str({код})"
         if это_необяз(тип) or тип in self.собственные:
             return f"{self.значимый(тип)}_str({код})"
         return self._преобразование(СТР, тип, код, 0)
@@ -1155,6 +1348,8 @@ class Генератор:
     def тип_c(self, тип):
         if это_список(тип):
             return self.структура(тип) + "*"
+        if это_словарь(тип):
+            return self.словарь_c(тип) + "*"
         if это_необяз(тип) or тип in self.собственные:
             return self.значимый(тип)
         if тип == МН:
@@ -1190,6 +1385,8 @@ class Генератор:
         """Функция C, которая печатает значение этого типа без перевода строки."""
         if это_список(тип):
             return self.структура(тип) + "_write"
+        if это_словарь(тип):
+            return self.словарь_c(тип) + "_write"
         if это_необяз(тип):
             return self.значимый(тип) + ("_qwrite" if в_списке else "_write")
         if тип in self.собственные:
@@ -1202,6 +1399,8 @@ class Генератор:
         """Функция C, которая превращает элемент списка в строку (как при выводе)."""
         if это_список(тип):
             return self.структура(тип) + "_str"
+        if это_словарь(тип):
+            return self.словарь_c(тип) + "_str"
         if это_необяз(тип):
             return self.значимый(тип) + "_qstr"
         if тип in self.собственные:
@@ -1276,6 +1475,11 @@ class Генератор:
         части = ["\n".join(шапка), СРЕДА]
         self._собрать_все_типы()
         части.append(self._определения_типов())
+        for имя in self.словари.values():
+            части.append(ОБЪЯВЛЕНИЯ_СЛОВАРЯ.format(D=имя))
+            for тип, и in self.словари.items():
+                if и == имя and self.сравнимый(тип):
+                    части.append(f"static bool {имя}_eq(const {имя} *x, const {имя} *y);")
         for тип, имя in self.списки.items():
             тип_эл = элемент(тип)
             поделить = self.поделить(тип_эл)
@@ -1291,6 +1495,21 @@ class Генератор:
                 части.append(ШАБЛОН_ПОИСКА.format(S=имя, T=self.тип_c(тип_эл), EQ=равенство))
             if тип_эл == СТР:
                 части.append(КОД_СТРОК_СО_СПИСКАМИ)
+        if self.словари:
+            части.append(КОД_ХЕШЕЙ)
+        for тип, имя in self.словари.items():
+            к, з = ключ_словаря(тип), значение_словаря(тип)
+            необяз = з if это_необяз(з) else з + "?"
+            поделить = self.поделить(з)
+            части.append(ШАБЛОН_СЛОВАРЯ.format(
+                описание=тип, D=имя, K=self.тип_c(к), V=self.тип_c(з),
+                EQ_K=self.равенство(к), HASH=ХЕШИ[к], СТРОКА_К=self.строка_элемента(к),
+                СТРОКА_З=self.строка_элемента(з), O=self.тип_c(необяз),
+                O_SOME=(self.тип_c(необяз) + "_some") if not это_необяз(з) else "",
+                LK=self.структура("[" + к + "]"), LV=self.структура("[" + з + "]"),
+                ПОДЕЛИТЬ=поделить or ""))
+            if self.сравнимый(тип):
+                части.append(ШАБЛОН_РАВЕНСТВА_СЛОВАРЯ.format(D=имя, V=self.тип_c(з), EQ_V=self.равенство(з)))
         части.append(self._функции_типов())
         части.append(self._функции_расширения())
         if self.нужны_данные:
@@ -1309,7 +1528,13 @@ class Генератор:
     def _собрать_все_типы(self):
         """Регистрирует все типы, которые понадобятся определениям (до неподвижной точки)."""
         while True:
-            размер = (len(self.списки), len(self.значимые))
+            размер = (len(self.списки), len(self.значимые), len(self.словари))
+            for тип in list(self.словари):
+                for т in (ключ_словаря(тип), значение_словаря(тип)):
+                    self.тип_c(т)
+                    self.строка_элемента(т)
+                    self.равенство(т)
+                    self.поделить(т)
             for тип in list(self.списки):
                 тип_эл = элемент(тип)
                 self.тип_c(тип_эл)
@@ -1324,12 +1549,12 @@ class Генератор:
                     self.в_строку(т, "x")
                     self.равенство(т)
                     self.поделить(т)
-            if (len(self.списки), len(self.значимые)) == размер:
+            if (len(self.списки), len(self.значимые), len(self.словари)) == размер:
                 return
 
     def _определения_типов(self):
         строки = ["/* ---- types of the program ---- */"]
-        for имя in self.списки.values():
+        for имя in list(self.списки.values()) + list(self.словари.values()):
             строки.append(f"typedef struct {имя} {имя};")
         готовые = set()
         for тип, имя in self.значимые.items():
@@ -1517,6 +1742,8 @@ class Генератор:
         self.пиши(f"{цель} = {результат};")
 
     def и_ПрисваиваниеЭлемента(self, и):
+        if getattr(и, "словарь", False):
+            return self._присвоить_в_словарь(и)
         тип_списка = и.объект.тип_выр
         структура = self.структура(тип_списка)
         объект = self.служебное_имя("list")
@@ -1534,6 +1761,26 @@ class Генератор:
         self.отступ -= 1
         self.пиши("}")
 
+    def _присвоить_в_словарь(self, и):
+        тип = и.объект.тип_выр
+        D = self.словарь_c(тип)
+        словарь = self.служебное_имя("dict")
+        ключ = self.служебное_имя("key")
+        self.пиши("{")
+        self.отступ += 1
+        self.пиши(f"{D}* const {словарь} = {D}_mut(&{self.место(и.объект)});")
+        self.пиши(f"const {self.тип_c(ключ_словаря(тип))} {ключ} = {self.выр(и.индекс)};")
+        значение = self.сохранить(и.значение, self.выр(и.значение), и.тип_элемента)
+        if и.оператор == "=":
+            self.пиши(f"{D}_put({словарь}, {ключ}, {значение});")
+        else:
+            место = self.служебное_имя("p")
+            self.пиши(f"{self.тип_c(и.тип_элемента)} *const {место} = {D}_at({словарь}, {ключ}, {и.строка});")
+            результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка)
+            self.пиши(f"*{место} = {результат};")
+        self.отступ -= 1
+        self.пиши("}")
+
     def и_ОбъявлениеТипа(self, и):
         pass                       # определение типа выводится в начале файла C
 
@@ -1543,6 +1790,9 @@ class Генератор:
             return self.имя(в.имя)
         if isinstance(в, у.Поле):
             return f"{self.место(в.объект)}.{self.поле_c(в.объект.тип_выр, в.имя)}"
+        if это_словарь(в.объект.тип_выр):
+            D = self.словарь_c(в.объект.тип_выр)
+            return f"(*{D}_at({D}_mut(&{self.место(в.объект)}), {self.выр(в.индекс)}, {в.строка}))"
         структура = self.структура(в.объект.тип_выр)
         return (f"(*{структура}_at({структура}_mut(&{self.место(в.объект)}), "
                 f"{self.выр(в.индекс)}, {в.строка}))")
@@ -1647,6 +1897,10 @@ class Генератор:
         if getattr(и, "по_строке", False):
             структура = self.структура("[стр]")
             источник = f"dan_str_chars({self.выр(и.источник)})"
+        elif getattr(и, "по_словарю", False):
+            тип = и.источник.тип_выр
+            структура = self.структура("[" + ключ_словаря(тип) + "]")
+            источник = f"{self.словарь_c(тип)}_keys({self.выр(и.источник)})"
         else:
             структура = self.структура(и.источник.тип_выр)
             источник = self.выр(и.источник)
@@ -1791,6 +2045,9 @@ class Генератор:
             функция = "dan_str_eq" if в.левый.тип_выр == СТР else "dan_bytes_eq"
             равно = f"{функция}({л}, {п})"
             return равно if оп == "==" else f"(!{равно})"
+        if это_словарь(getattr(в, "тип_операндов", None) or ""):
+            равно = f"{self.словарь_c(в.тип_операндов)}_eq({л}, {п})"
+            return равно if оп == "==" else f"(!{равно})"
         if это_список(getattr(в, "тип_операндов", None) or ""):
             равно = f"{self.структура(в.тип_операндов)}_eq({л}, {п})"
             return равно if оп == "==" else f"(!{равно})"
@@ -1831,8 +2088,21 @@ class Генератор:
         элементы = ", ".join(self.сохранить(э, self.выр(э), тип_эл) for э in в.элементы)
         return f"{структура}_from({len(в.элементы)}, ({self.тип_c(элемент(тип))}[]){{{элементы}}})"
 
+    def в_Словарь(self, в):
+        тип = в.тип_выр
+        D = self.словарь_c(тип)
+        if not в.ключи:
+            return f"{D}_new()"
+        к, з = ключ_словаря(тип), значение_словаря(тип)
+        ключи = ", ".join(self.выр(у_) for у_ in в.ключи)
+        значения = ", ".join(self.сохранить(у_, self.выр(у_), з) for у_ in в.значения)
+        return (f"{D}_from({len(в.ключи)}, ({self.тип_c(к)}[]){{{ключи}}}, "
+                f"({self.тип_c(з)}[]){{{значения}}})")
+
     def в_Индекс(self, в):
         тип = в.объект.тип_выр
+        if это_словарь(тип):
+            return f"{self.словарь_c(тип)}_get({self.выр(в.объект)}, {self.выр(в.индекс)}, {в.строка})"
         if getattr(в, "срез", False):
             объект = self.выр(в.объект)
             а, б = self.выр(в.индекс.начало), self.выр(в.индекс.конец)
@@ -1863,6 +2133,8 @@ class Генератор:
             return f"dan_str_len({self.выр(в.объект)})"
         if тип == БАЙТЫ:
             return f"({self.выр(в.объект)})->len"
+        if это_словарь(тип):
+            return f"({self.выр(в.объект)})->len"
         if not это_список(тип):           # литерал «[]»
             return "INT64_C(0)"
         return f"({self.выр(в.объект)})->len"
@@ -1871,6 +2143,13 @@ class Генератор:
         if isinstance(в.функция, у.Поле):    # метод: список.добавить(х), строка.найти(т)
             объект = в.функция.объект
             аргументы = [self.выр(объект)] + [self.выр(а) for а in в.аргументы]
+            if getattr(в, "метод_словаря", None):
+                тип = объект.тип_выр
+                D = self.словарь_c(тип)
+                суффикс = в.метод_словаря
+                if суффикс == "remove":
+                    аргументы[0] = f"{D}_mut(&{self.место(объект)})"
+                return f"{D}_{суффикс}({', '.join(аргументы)})"
             if getattr(в, "метод_c", None):
                 функция, нужна_строка = в.метод_c
                 self.структура("[стр]")       # некоторые методы строк возвращают списки строк
@@ -1925,6 +2204,8 @@ class Генератор:
             return значение
         if куда == СТР and (это_необяз(откуда) or откуда in self.собственные):
             return self.в_строку(откуда, значение)
+        if куда == СТР and это_словарь(откуда):
+            return f"{self.словарь_c(откуда)}_str({значение})"
         if куда == СТР and это_список(откуда):
             return f"{self.структура(откуда)}_str({значение})"
         if куда == БАЙТЫ:
