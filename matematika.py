@@ -797,3 +797,824 @@ static double dan_convert_units(double v, dan_str from, dan_str to, int line) {
 
 def код_c_дополнения():
     return "\n".join([_код_единиц(), ДОП_КОД_C_РУЧНОЙ, _код_списков(), *ДОП_КОД_C])
+
+
+# =====================================================================
+# Шаги 39-75: многочлены, уравнения, системы, неравенства, модуль.
+# =====================================================================
+
+МН = "мн"
+СПИСОК_МН = "[мн]"
+КОНСТАНТЫ["х"] = (МН, "dan_poly_x()")      # кириллическая «х»
+КОНСТАНТЫ["x"] = (МН, "dan_poly_x()")      # латинская «x»
+
+_добавить("многочлен", [
+    ([СПИСОК_РАЦ], МН, "dan_poly_from_list", True),
+], "многочлен по коэффициентам от старшей степени: многочлен([1, -3, 2]) = х² - 3х + 2")
+_добавить("значение", [
+    ([МН, РАЦ], РАЦ, "dan_poly_eval_rat", True),
+    ([МН, ДРОБ], ДРОБ, "dan_poly_eval_float", False),
+], "значение многочлена при данном х: значение(х² - 1, 3) = 8")
+_добавить("решить", [
+    ([МН], СПИСОК_РАЦ, "dan_solve_rat", True),
+    ([МН, МН], СПИСОК_РАЦ, "dan_solve_rat2", True),
+], "рациональные корни уравнения: решить(2*х + 3, 7) = [2]")
+ФУНКЦИИ["корни"] = ФУНКЦИИ["решить"]
+_добавить("решить_приближённо", [
+    ([МН], СПИСОК_ДРОБ, "dan_solve_real", True),
+    ([МН, МН], СПИСОК_ДРОБ, "dan_solve_real2", True),
+], "все действительные корни, в том числе иррациональные: решить_приближённо(х² - 2)")
+ФУНКЦИИ["решить_приближенно"] = ФУНКЦИИ["решить_приближённо"]
+_добавить("разложить", [([МН], СТР, "dan_factor_str", True)],
+          "разложение многочлена на множители: разложить(х² - 3*х + 2) = \"(х - 2)(х - 1)\"")
+_добавить("вынести_общий_множитель", [([МН], СТР, "dan_common_factor_str", True)],
+          "вынесение общего множителя за скобки: 2х² + 6х = \"2х(х + 3)\"")
+_добавить("решить_неравенство", [([МН, СТР, МН], СТР, "dan_ineq_str", True)],
+          "решение неравенства методом интервалов: решить_неравенство(2*х - 4, \">\", 0) = \"(2; +∞)\"")
+_добавить("решить_систему_неравенств", [([СПИСОК_МН, СПИСОК_СТР, СПИСОК_МН], СТР, "dan_ineq_system_str", True)],
+          "решение системы неравенств с одной переменной")
+_добавить("решить_с_модулем", [([МН, МН], СТР, "dan_abs_eq_str", True)],
+          "решение уравнения |левая| = правая: решить_с_модулем(2*х - 3, 5) = \"{-1; 4}\"")
+_добавить("решить_неравенство_с_модулем", [([МН, СТР, МН], СТР, "dan_abs_ineq_str", True)],
+          "решение неравенства |левая| знак правая методом интервалов")
+_добавить("решить_систему", [
+    (["[[рац]]"], СПИСОК_РАЦ, "dan_solve_system", True),
+], "решение системы линейных уравнений методом Гаусса; каждая строка: коэффициенты и свободный член")
+_добавить("корни_квадратного", [([ДРОБ, ДРОБ, ДРОБ], СПИСОК_ДРОБ, "dan_quadratic_roots", True)],
+          "действительные корни уравнения а·х² + б·х + в = 0 по возрастанию")
+_формула("дискриминант", "абв", ("-", умн(А(1), А(1)), умн(умн(Ч(4), А(0)), А(2))), ТОЧНЫЕ,
+         "дискриминант квадратного уравнения: D = б² - 4ав")
+ФУНКЦИИ["дискриминант"]["варианты"].insert(0, ([МН], РАЦ))
+ФУНКЦИИ["дискриминант"]["c"].insert(0, "dan_poly_discriminant")
+ФУНКЦИИ["дискриминант"]["строка"].insert(0, True)
+
+СООБЩЕНИЯ.update({
+    "DAN_MSG_POLY_NEG_POW": "многочлен нельзя возводить в отрицательную степень",
+    "DAN_MSG_POLY_BIG": "многочлен слишком сложен: степень или коэффициенты слишком велики",
+    "DAN_MSG_ANY_X": "уравнение верно при любом значении х",
+    "DAN_MSG_BAD_REL": "неизвестный знак сравнения \"%s\"; используйте <, <=, >, >=, =, !=",
+    "DAN_MSG_SYS_SHAPE": "в системе из N уравнений каждая строка должна содержать N коэффициентов "
+                         "и свободный член",
+    "DAN_MSG_SYS_NONE": "система не имеет решений",
+    "DAN_MSG_SYS_MANY": "система имеет бесконечно много решений",
+    "DAN_MSG_NOT_QUADRATIC": "это не квадратное уравнение: коэффициент при х² равен нулю",
+    "DAN_MSG_DEG_TWO": "дискриминант определён для многочлена второй степени",
+    "DAN_MSG_INEQ_LISTS": "списки левых частей, знаков и правых частей должны быть одной длины",
+    "DAN_TXT_NONE": "нет решений",
+    "DAN_TXT_X": "х",
+    "DAN_TXT_MINF": "-∞",
+    "DAN_TXT_PINF": "+∞",
+    "DAN_TXT_UNION": " ∪ ",
+    "DAN_TXT_LE": "≤",
+    "DAN_TXT_GE": "≥",
+    "DAN_TXT_NE": "≠",
+})
+
+_НАДСТРОЧНЫЕ = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+
+
+def _код_многочленов_строки():
+    return ("static const char *const dan_sup[10] = {"
+            + ", ".join(_строка_c(с) for с in _НАДСТРОЧНЫЕ) + "};")
+
+
+КОД_МНОГОЧЛЕНОВ = r"""
+/* ---- polynomials in х with exact rational coefficients ---- */
+
+struct dan_poly { int64_t deg; dan_rat *c; };   /* c[i] - coefficient of х^i; zero polynomial: deg = -1 */
+
+static dan_poly *dan_poly_alloc(int64_t deg) {
+    dan_poly *p = dan_alloc(sizeof *p);
+    p->deg = deg;
+    p->c = dan_alloc(sizeof(dan_rat) * (size_t)(deg < 0 ? 1 : deg + 1));
+    for (int64_t i = 0; i <= deg; i++) { p->c[i].n = 0; p->c[i].d = 1; }
+    return p;
+}
+
+static dan_mn dan_poly_trim(dan_poly *p) {
+    while (p->deg >= 0 && p->c[p->deg].n == 0) p->deg--;
+    return p;
+}
+
+static dan_rat dan_poly_coef(dan_mn p, int64_t i) {
+    dan_rat z = { 0, 1 };
+    return (i >= 0 && i <= p->deg) ? p->c[i] : z;
+}
+
+static dan_mn dan_poly_const(dan_rat r) {
+    dan_poly *p = dan_poly_alloc(0);
+    p->c[0] = r;
+    return dan_poly_trim(p);
+}
+
+static dan_mn dan_poly_from_int(int64_t x, int line) { return dan_poly_const(dan_rat_from_int(x, line)); }
+
+static dan_mn dan_poly_x(void) {
+    dan_poly *p = dan_poly_alloc(1);
+    p->c[1].n = 1;
+    return p;
+}
+
+static dan_mn dan_poly_from_list(const dl_Lr *l, int line) {
+    (void)line;
+    dan_poly *p = dan_poly_alloc(l->len - 1);
+    for (int64_t i = 0; i < l->len; i++) p->c[l->len - 1 - i] = l->items[i];
+    return dan_poly_trim(p);
+}
+
+static dl_Lr *dan_poly_coeffs(dan_mn p) {
+    dl_Lr *r = dl_Lr_from(0, NULL);
+    if (p->deg < 0) { dan_rat z = { 0, 1 }; dl_Lr_push(r, z); }
+    for (int64_t i = p->deg; i >= 0; i--) dl_Lr_push(r, p->c[i]);
+    return r;
+}
+
+static dan_mn dan_poly_add(dan_mn a, dan_mn b, int line) {
+    int64_t d = a->deg > b->deg ? a->deg : b->deg;
+    dan_poly *r = dan_poly_alloc(d);
+    for (int64_t i = 0; i <= d; i++) r->c[i] = dan_rat_add(dan_poly_coef(a, i), dan_poly_coef(b, i), line);
+    return dan_poly_trim(r);
+}
+
+static dan_mn dan_poly_neg(dan_mn a, int line) {
+    dan_poly *r = dan_poly_alloc(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) r->c[i] = dan_rat_neg(a->c[i], line);
+    return r;
+}
+
+static dan_mn dan_poly_sub(dan_mn a, dan_mn b, int line) { return dan_poly_add(a, dan_poly_neg(b, line), line); }
+
+static dan_mn dan_poly_mul(dan_mn a, dan_mn b, int line) {
+    if (a->deg < 0 || b->deg < 0) return dan_poly_alloc(-1);
+    if (a->deg + b->deg > 100000) dan_error(DAN_MSG_POLY_BIG, line);
+    dan_poly *r = dan_poly_alloc(a->deg + b->deg);
+    for (int64_t i = 0; i <= a->deg; i++)
+        for (int64_t j = 0; j <= b->deg; j++)
+            r->c[i + j] = dan_rat_add(r->c[i + j], dan_rat_mul(a->c[i], b->c[j], line), line);
+    return dan_poly_trim(r);
+}
+
+static dan_mn dan_poly_scale(dan_mn a, dan_rat k, int line) { return dan_poly_mul(a, dan_poly_const(k), line); }
+
+static dan_mn dan_poly_pow(dan_mn a, int64_t e, int line) {
+    if (e < 0) dan_error(DAN_MSG_POLY_NEG_POW, line);
+    if (a->deg > 0 && e > 100000 / a->deg) dan_error(DAN_MSG_POLY_BIG, line);
+    dan_mn r = dan_poly_from_int(1, line);
+    while (e > 0) {
+        if (e & 1) r = dan_poly_mul(r, a, line);
+        e >>= 1;
+        if (e > 0) a = dan_poly_mul(a, a, line);
+    }
+    return r;
+}
+
+static void dan_poly_divmod(dan_mn a, dan_mn b, dan_mn *q, dan_mn *rem, int line) {
+    if (b->deg < 0) dan_error(DAN_MSG_DIV_ZERO, line);
+    dan_poly *r = dan_poly_alloc(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) r->c[i] = a->c[i];
+    int64_t qd = a->deg - b->deg;
+    dan_poly *qq = dan_poly_alloc(qd < 0 ? -1 : qd);
+    for (int64_t k = qd; k >= 0; k--) {
+        dan_rat coef = dan_rat_div(r->c[b->deg + k], b->c[b->deg], line);
+        qq->c[k] = coef;
+        if (coef.n == 0) continue;
+        for (int64_t j = 0; j <= b->deg; j++)
+            r->c[j + k] = dan_rat_sub(r->c[j + k], dan_rat_mul(coef, b->c[j], line), line);
+    }
+    *q = dan_poly_trim(qq);
+    *rem = dan_poly_trim(r);
+}
+
+static dan_mn dan_poly_div(dan_mn a, dan_mn b, int line) { dan_mn q, r; dan_poly_divmod(a, b, &q, &r, line); return q; }
+static dan_mn dan_poly_mod(dan_mn a, dan_mn b, int line) { dan_mn q, r; dan_poly_divmod(a, b, &q, &r, line); return r; }
+
+static bool dan_poly_eq(dan_mn a, dan_mn b) {
+    if (a->deg != b->deg) return false;
+    for (int64_t i = 0; i <= a->deg; i++)
+        if (a->c[i].n != b->c[i].n || a->c[i].d != b->c[i].d) return false;
+    return true;
+}
+
+static dan_rat dan_poly_eval_rat(dan_mn p, dan_rat x, int line) {
+    dan_rat v = { 0, 1 };
+    for (int64_t i = p->deg; i >= 0; i--) v = dan_rat_add(dan_rat_mul(v, x, line), p->c[i], line);
+    return v;
+}
+
+static double dan_poly_eval_float(dan_mn p, double x) {
+    double v = 0;
+    for (int64_t i = p->deg; i >= 0; i--) v = v * x + dan_rat_to_float(p->c[i]);
+    return v;
+}
+
+static dan_mn dan_poly_derivative(dan_mn p, int line) {
+    if (p->deg <= 0) return dan_poly_alloc(-1);
+    dan_poly *r = dan_poly_alloc(p->deg - 1);
+    for (int64_t i = 1; i <= p->deg; i++) r->c[i - 1] = dan_rat_mul(p->c[i], dan_rat_from_int(i, line), line);
+    return dan_poly_trim(r);
+}
+
+/* ---- text ---- */
+
+static void dan_buf_rat(dan_buf *b, dan_rat r) {
+    char t[48];
+    if (r.d == 1) snprintf(t, sizeof t, "%" PRId64, r.n);
+    else snprintf(t, sizeof t, "%" PRId64 "/%" PRId64, r.n, r.d);
+    dan_buf_add(b, t);
+}
+
+static void dan_buf_power(dan_buf *b, int64_t k) {
+    dan_buf_add(b, DAN_TXT_X);
+    if (k < 2) return;
+    char digits[24];
+    snprintf(digits, sizeof digits, "%" PRId64, k);
+    for (char *p = digits; *p; p++) dan_buf_add(b, dan_sup[*p - '0']);
+}
+
+/* 2х² - (1/2)х + 3 */
+static void dan_buf_poly(dan_buf *b, dan_mn p) {
+    if (p->deg < 0) { dan_buf_add(b, "0"); return; }
+    bool first = true;
+    for (int64_t i = p->deg; i >= 0; i--) {
+        dan_rat c = p->c[i];
+        if (c.n == 0) continue;
+        bool neg = c.n < 0;
+        dan_rat a = c;
+        if (neg) a.n = -a.n;
+        if (first) { if (neg) dan_buf_add(b, "-"); }
+        else dan_buf_add(b, neg ? " - " : " + ");
+        first = false;
+        if (i == 0) dan_buf_rat(b, a);
+        else {
+            if (!(a.n == 1 && a.d == 1)) {
+                if (a.d != 1) dan_buf_add(b, "(");
+                dan_buf_rat(b, a);
+                if (a.d != 1) dan_buf_add(b, ")");
+            }
+            dan_buf_power(b, i);
+        }
+    }
+}
+
+static dan_str dan_poly_to_str(dan_mn p) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "");
+    dan_buf_poly(&b, p);
+    return b.s;
+}
+
+static void dan_write_poly(dan_mn p) { fputs(dan_poly_to_str(p), stdout); }
+
+/* ---- integer form and exact rational roots ---- */
+
+static dan_i128 dan_abs128(dan_i128 a) { return a < 0 ? -a : a; }
+
+static dan_i128 dan_gcd_i128(dan_i128 a, dan_i128 b) {
+    return (dan_i128)dan_gcd128((dan_u128)dan_abs128(a), (dan_u128)dan_abs128(b));
+}
+
+/* Integer coefficients of a polynomial proportional to p: common factor 1, leading > 0.
+   *scale receives p / integer_form (the rational common factor). */
+static dan_i128 *dan_poly_integer(dan_mn p, dan_rat *scale, int line) {
+    dan_i128 l = 1;
+    for (int64_t i = 0; i <= p->deg; i++) {
+        dan_i128 d = p->c[i].d;
+        l = l / dan_gcd_i128(l, d) * d;
+        if (l > ((dan_i128)1 << 62)) dan_error(DAN_MSG_POLY_BIG, line);
+    }
+    dan_i128 *z = dan_alloc(sizeof(dan_i128) * (size_t)(p->deg + 1));
+    dan_i128 g = 0;
+    for (int64_t i = 0; i <= p->deg; i++) {
+        z[i] = (dan_i128)p->c[i].n * (l / p->c[i].d);
+        g = dan_gcd_i128(g, z[i]);
+    }
+    if (g == 0) g = 1;
+    if (z[p->deg] < 0) g = -g;
+    for (int64_t i = 0; i <= p->deg; i++) z[i] /= g;
+    if (scale) *scale = dan_rat_make(g, l, line);
+    return z;
+}
+
+typedef struct { dan_i128 *z; int64_t deg; } dan_zpoly;
+
+static bool dan_zpoly_has_root(const dan_zpoly *f, dan_i128 p, dan_i128 q) {
+    /* q^n f(p/q) = sum z_i p^i q^(n-i); overflow means the value is far from zero */
+    dan_i128 v = f->z[f->deg], qp = 1, t;
+    for (int64_t i = f->deg - 1; i >= 0; i--) {
+        if (__builtin_mul_overflow(qp, q, &qp)) return false;
+        if (__builtin_mul_overflow(v, p, &v)) return false;
+        if (__builtin_mul_overflow(f->z[i], qp, &t)) return false;
+        if (__builtin_add_overflow(v, t, &v)) return false;
+    }
+    return v == 0;
+}
+
+static void dan_zpoly_divide(dan_zpoly *f, dan_i128 p, dan_i128 q) {
+    /* f = (q х - p) * g, exact over the integers */
+    int64_t n = f->deg;
+    dan_i128 *g = dan_alloc(sizeof(dan_i128) * (size_t)n);
+    g[n - 1] = f->z[n] / q;
+    for (int64_t k = n - 1; k >= 1; k--) g[k - 1] = (f->z[k] + p * g[k]) / q;
+    free(f->z);
+    f->z = g;
+    f->deg = n - 1;
+}
+
+static int64_t dan_divisors128(dan_i128 n, dan_i128 **out, int line) {
+    if (n > (dan_i128)1000000000000LL) dan_error(DAN_MSG_POLY_BIG, line);
+    int64_t cap = 64, k = 0;
+    dan_i128 *d = dan_alloc(sizeof(dan_i128) * (size_t)cap);
+    for (dan_i128 i = 1; i * i <= n; i++) {
+        if (n % i) continue;
+        if (k + 2 > cap) { cap *= 2; d = dan_realloc(d, sizeof(dan_i128) * (size_t)cap); }
+        d[k++] = i;
+        if (i != n / i) d[k++] = n / i;
+    }
+    *out = d;
+    return k;
+}
+
+typedef struct { dan_rat r; int64_t mult; } dan_rroot;
+
+/* Exact rational roots with multiplicities; f is reduced by every root found. */
+static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
+    int64_t cap = 8, k = 0;
+    dan_rroot *roots = dan_alloc(sizeof(dan_rroot) * (size_t)cap);
+    int64_t zero_mult = 0;
+    while (f->deg > 0 && f->z[0] == 0) {           /* root 0 */
+        for (int64_t i = 0; i < f->deg; i++) f->z[i] = f->z[i + 1];
+        f->deg--;
+        zero_mult++;
+    }
+    if (zero_mult) { roots[k].r.n = 0; roots[k].r.d = 1; roots[k].mult = zero_mult; k++; }
+    if (f->deg > 0) {
+        dan_i128 *dp, *dq;
+        int64_t np = dan_divisors128(dan_abs128(f->z[0]), &dp, line);
+        int64_t nq = dan_divisors128(dan_abs128(f->z[f->deg]), &dq, line);
+        for (int64_t i = 0; i < np && f->deg > 0; i++)
+            for (int64_t j = 0; j < nq && f->deg > 0; j++) {
+                if (dan_gcd_i128(dp[i], dq[j]) != 1) continue;
+                for (int s = 0; s < 2 && f->deg > 0; s++) {
+                    dan_i128 p = s ? -dp[i] : dp[i], q = dq[j];
+                    int64_t m = 0;
+                    while (f->deg > 0 && dan_zpoly_has_root(f, p, q)) { dan_zpoly_divide(f, p, q); m++; }
+                    if (m) {
+                        if (k == cap) { cap *= 2; roots = dan_realloc(roots, sizeof(dan_rroot) * (size_t)cap); }
+                        roots[k].r = dan_rat_make(p, q, line);
+                        roots[k].mult = m;
+                        k++;
+                    }
+                }
+            }
+    }
+    *out = roots;
+    return k;
+}
+
+static int dan_qcmp_rroot(const void *a, const void *b) {
+    return dan_rat_cmp(((const dan_rroot *)a)->r, ((const dan_rroot *)b)->r);
+}
+
+static dan_zpoly dan_zpoly_of(dan_mn p, dan_rat *scale, int line) {
+    dan_zpoly f;
+    f.z = dan_poly_integer(p, scale, line);
+    f.deg = p->deg;
+    return f;
+}
+
+static dl_Lr *dan_solve_rat(dan_mn p, int line) {
+    if (p->deg < 0) dan_error(DAN_MSG_ANY_X, line);
+    dl_Lr *r = dl_Lr_from(0, NULL);
+    if (p->deg == 0) return r;
+    dan_zpoly f = dan_zpoly_of(p, NULL, line);
+    dan_rroot *roots;
+    int64_t k = dan_rational_roots(&f, &roots, line);
+    qsort(roots, (size_t)k, sizeof(dan_rroot), dan_qcmp_rroot);
+    for (int64_t i = 0; i < k; i++) dl_Lr_push(r, roots[i].r);
+    return r;
+}
+
+static dl_Lr *dan_solve_rat2(dan_mn a, dan_mn b, int line) { return dan_solve_rat(dan_poly_sub(a, b, line), line); }
+
+/* ---- real roots ---- */
+
+typedef struct { double v; int exact; dan_rat r; } dan_root;
+
+/* Newton steps in extended precision from a bracketed root; the result is
+   the double closest to the true root. */
+static double dan_polish(const double *c, int n, double x0) {
+    long double x = x0;
+    for (int it = 0; it < 10; it++) {
+        long double f = 0, d = 0;
+        for (int j = n; j >= 0; j--) { d = d * x + f; f = f * x + c[j]; }
+        if (f == 0 || d == 0) break;
+        long double y = x - f / d;
+        if (y == x) break;
+        x = y;
+    }
+    double r = (double)x;
+    /* if the Newton step went astray, keep the bracketed value */
+    if (r != r || fabs(r - x0) > 1e-6 * (fabs(x0) + 1)) return x0;
+    return r;
+}
+
+/* Real roots of a polynomial with double coefficients c[0..n] that have
+   simple roots: the polynomial is monotone between roots of its derivative. */
+static int dan_real_roots_d(const double *c, int n, double *out) {
+    while (n > 0 && c[n] == 0) n--;
+    if (n <= 0) return 0;
+    if (n == 1) { out[0] = -c[0] / c[1]; return 1; }
+    double *d = dan_alloc(sizeof(double) * (size_t)n);
+    for (int i = 1; i <= n; i++) d[i - 1] = c[i] * i;
+    double *crit = dan_alloc(sizeof(double) * (size_t)(n + 1));
+    int nc = dan_real_roots_d(d, n - 1, crit);
+    double bound = 0;
+    for (int i = 0; i < n; i++) { double t = fabs(c[i] / c[n]); if (t > bound) bound = t; }
+    bound += 1;
+    double *pts = dan_alloc(sizeof(double) * (size_t)(nc + 2));
+    int np = 0;
+    pts[np++] = -bound;
+    for (int i = 0; i < nc; i++) if (crit[i] > -bound && crit[i] < bound) pts[np++] = crit[i];
+    pts[np++] = bound;
+    int k = 0;
+    for (int i = 0; i + 1 < np; i++) {
+        double lo = pts[i], hi = pts[i + 1];
+        double flo = 0, fhi = 0;
+        for (int j = n; j >= 0; j--) { flo = flo * lo + c[j]; fhi = fhi * hi + c[j]; }
+        if (flo == 0) { if (k == 0 || out[k - 1] != lo) out[k++] = lo; continue; }
+        if ((flo < 0) == (fhi < 0)) continue;
+        for (int it = 0; it < 200; it++) {
+            double mid = lo + (hi - lo) / 2, fm = 0;
+            if (mid <= lo || mid >= hi) break;
+            for (int j = n; j >= 0; j--) fm = fm * mid + c[j];
+            if (fm == 0) { lo = hi = mid; break; }
+            if ((fm < 0) == (flo < 0)) { lo = mid; flo = fm; } else hi = mid;
+        }
+        out[k++] = dan_polish(c, n, lo + (hi - lo) / 2);
+    }
+    free(d); free(crit); free(pts);
+    return k;
+}
+
+static dan_mn dan_poly_gcd(dan_mn a, dan_mn b, int line) {
+    while (b->deg >= 0) { dan_mn r = dan_poly_mod(a, b, line); a = b; b = r; }
+    return a;
+}
+
+static int dan_qcmp_root(const void *a, const void *b) {
+    double x = ((const dan_root *)a)->v, y = ((const dan_root *)b)->v;
+    return (x > y) - (x < y);
+}
+
+/* All real roots: rational ones exactly, the others numerically. */
+static int64_t dan_poly_real_roots(dan_mn p, dan_root **out, int line) {
+    if (p->deg < 0) dan_error(DAN_MSG_ANY_X, line);
+    dan_root *roots = dan_alloc(sizeof(dan_root) * (size_t)(p->deg + 2));
+    int64_t k = 0;
+    if (p->deg <= 0) { *out = roots; return 0; }
+    dan_zpoly f = dan_zpoly_of(p, NULL, line);
+    dan_rroot *rr;
+    int64_t nr = dan_rational_roots(&f, &rr, line);
+    for (int64_t i = 0; i < nr; i++) {
+        roots[k].v = dan_rat_to_float(rr[i].r);
+        roots[k].exact = 1;
+        roots[k].r = rr[i].r;
+        k++;
+    }
+    if (f.deg >= 2) {                     /* the rest has no rational roots */
+        dan_poly *rest = dan_poly_alloc(f.deg);
+        for (int64_t i = 0; i <= f.deg; i++) {
+            if (f.z[i] > INT64_MAX || f.z[i] < -INT64_MAX) dan_error(DAN_MSG_POLY_BIG, line);
+            rest->c[i] = dan_rat_from_int((int64_t)f.z[i], line);
+        }
+        dan_mn g = dan_poly_gcd(rest, dan_poly_derivative(rest, line), line);
+        dan_mn sf = dan_poly_div(rest, g, line);          /* square-free part */
+        double *c = dan_alloc(sizeof(double) * (size_t)(sf->deg + 1));
+        for (int64_t i = 0; i <= sf->deg; i++) c[i] = dan_rat_to_float(sf->c[i]);
+        double *v = dan_alloc(sizeof(double) * (size_t)(sf->deg + 1));
+        int nv = dan_real_roots_d(c, (int)sf->deg, v);
+        for (int i = 0; i < nv; i++) { roots[k].v = v[i]; roots[k].exact = 0; k++; }
+    }
+    qsort(roots, (size_t)k, sizeof(dan_root), dan_qcmp_root);
+    *out = roots;
+    return k;
+}
+
+static dl_Lf *dan_solve_real(dan_mn p, int line) {
+    dan_root *roots;
+    int64_t k = dan_poly_real_roots(p, &roots, line);
+    dl_Lf *r = dl_Lf_from(0, NULL);
+    for (int64_t i = 0; i < k; i++) dl_Lf_push(r, roots[i].v);
+    return r;
+}
+
+static dl_Lf *dan_solve_real2(dan_mn a, dan_mn b, int line) { return dan_solve_real(dan_poly_sub(a, b, line), line); }
+
+static dl_Lf *dan_quadratic_roots(double a, double b, double c, int line) {
+    if (a == 0) dan_error(DAN_MSG_NOT_QUADRATIC, line);
+    dl_Lf *r = dl_Lf_from(0, NULL);
+    double d = b * b - 4 * a * c;
+    if (d < 0) return r;
+    if (d == 0) { dl_Lf_push(r, -b / (2 * a)); return r; }
+    double s = sqrt(d);
+    /* numerically stable form */
+    double q = -0.5 * (b + (b >= 0 ? s : -s));
+    double coef[3] = { c, b, a };
+    double x1 = dan_polish(coef, 2, q / a), x2 = dan_polish(coef, 2, c / q);
+    if (x1 > x2) { double t = x1; x1 = x2; x2 = t; }
+    dl_Lf_push(r, x1);
+    dl_Lf_push(r, x2);
+    return r;
+}
+
+static dan_rat dan_poly_discriminant(dan_mn p, int line) {
+    if (p->deg != 2) dan_error(DAN_MSG_DEG_TWO, line);
+    dan_rat a = p->c[2], b = p->c[1], c = p->c[0];
+    return dan_rat_sub(dan_rat_mul(b, b, line),
+                       dan_rat_mul(dan_rat_from_int(4, line), dan_rat_mul(a, c, line), line), line);
+}
+
+/* ---- factorization ---- */
+
+static void dan_buf_factor(dan_buf *b, dan_rat r, int64_t mult) {
+    /* root p/q -> (qх - p) */
+    dan_buf_add(b, "(");
+    if (r.d != 1) { char t[32]; snprintf(t, sizeof t, "%" PRId64, r.d); dan_buf_add(b, t); }
+    dan_buf_add(b, DAN_TXT_X);
+    char t[32];
+    snprintf(t, sizeof t, " %c %" PRId64, r.n > 0 ? '-' : '+', r.n > 0 ? r.n : -r.n);
+    dan_buf_add(b, t);
+    dan_buf_add(b, ")");
+    if (mult > 1) {
+        char digits[24];
+        snprintf(digits, sizeof digits, "%" PRId64, mult);
+        for (char *p = digits; *p; p++) dan_buf_add(b, dan_sup[*p - '0']);
+    }
+}
+
+static void dan_buf_const_factor(dan_buf *b, dan_rat c, bool alone) {
+    if (alone) { dan_buf_rat(b, c); return; }
+    if (c.n == 1 && c.d == 1) return;
+    if (c.n == -1 && c.d == 1) { dan_buf_add(b, "-"); return; }
+    if (c.d != 1) { dan_buf_add(b, "("); dan_buf_rat(b, c); dan_buf_add(b, ")"); }
+    else dan_buf_rat(b, c);
+}
+
+static dan_str dan_factor_str(dan_mn p, int line) {
+    if (p->deg <= 0) return dan_poly_to_str(p);
+    dan_rat scale;
+    dan_zpoly f = dan_zpoly_of(p, &scale, line);
+    dan_rroot *roots;
+    int64_t k = dan_rational_roots(&f, &roots, line);
+    if (k == 0 && scale.n == 1 && scale.d == 1) return dan_poly_to_str(p);   /* does not factor */
+    qsort(roots, (size_t)k, sizeof(dan_rroot), dan_qcmp_rroot);
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "");
+    dan_buf_const_factor(&b, scale, false);
+    for (int64_t i = 0; i < k; i++) {
+        if (roots[i].r.n == 0) dan_buf_power(&b, roots[i].mult);      /* х^m */
+        else dan_buf_factor(&b, roots[i].r, roots[i].mult);
+    }
+    if (f.deg > 0) {
+        dan_poly *rest = dan_poly_alloc(f.deg);
+        for (int64_t i = 0; i <= f.deg; i++) rest->c[i] = dan_rat_from_int((int64_t)f.z[i], line);
+        dan_buf_add(&b, "(");
+        dan_buf_poly(&b, rest);
+        dan_buf_add(&b, ")");
+    }
+    return b.s;
+}
+
+/* 2х² + 6х -> 2х(х + 3) */
+static dan_str dan_common_factor_str(dan_mn p, int line) {
+    if (p->deg < 0) return dan_poly_to_str(p);
+    int64_t low = 0, terms = 0;
+    while (p->c[low].n == 0) low++;
+    for (int64_t i = 0; i <= p->deg; i++) if (p->c[i].n != 0) terms++;
+    dan_rat scale;
+    dan_i128 *z = dan_poly_integer(p, &scale, line);
+    if (terms == 1 || (low == 0 && scale.n == 1 && scale.d == 1)) return dan_poly_to_str(p);
+    dan_poly *rest = dan_poly_alloc(p->deg - low);
+    for (int64_t i = low; i <= p->deg; i++) rest->c[i - low] = dan_rat_from_int((int64_t)z[i], line);
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "");
+    dan_buf_const_factor(&b, scale, false);
+    if (low > 0) dan_buf_power(&b, low);
+    dan_buf_add(&b, "(");
+    dan_buf_poly(&b, rest);
+    dan_buf_add(&b, ")");
+    return b.s;
+}
+
+/* ---- inequalities: the interval method ---- */
+
+enum { DAN_LT, DAN_LE, DAN_GT, DAN_GE, DAN_EQ, DAN_NE };
+
+static int dan_parse_rel(dan_str s, int line) {
+    if (!strcmp(s, "<")) return DAN_LT;
+    if (!strcmp(s, "<=") || !strcmp(s, DAN_TXT_LE)) return DAN_LE;
+    if (!strcmp(s, ">")) return DAN_GT;
+    if (!strcmp(s, ">=") || !strcmp(s, DAN_TXT_GE)) return DAN_GE;
+    if (!strcmp(s, "=") || !strcmp(s, "==")) return DAN_EQ;
+    if (!strcmp(s, "!=") || !strcmp(s, DAN_TXT_NE)) return DAN_NE;
+    dan_conv_error(DAN_MSG_BAD_REL, s, line);
+    return 0;
+}
+
+typedef struct { dan_mn p; int rel; dan_root *roots; int64_t nroots; } dan_atom;
+/* A condition is an OR of groups; a group is an AND of atoms. */
+typedef struct { dan_atom *atoms; int64_t n; } dan_group;
+
+static bool dan_same_point(const dan_root *a, const dan_root *b) {
+    if (a->exact && b->exact) return dan_rat_cmp(a->r, b->r) == 0;
+    double m = fabs(a->v) > 1 ? fabs(a->v) : 1;
+    return fabs(a->v - b->v) <= 1e-9 * m;
+}
+
+static bool dan_rel_holds(int rel, int sign) {
+    switch (rel) {
+        case DAN_LT: return sign < 0;
+        case DAN_LE: return sign <= 0;
+        case DAN_GT: return sign > 0;
+        case DAN_GE: return sign >= 0;
+        case DAN_EQ: return sign == 0;
+        default: return sign != 0;
+    }
+}
+
+/* sign of the atom polynomial at a sample point (or at a breakpoint) */
+static int dan_atom_sign(const dan_atom *a, const dan_root *pt, double x) {
+    if (a->p->deg < 0) return 0;
+    if (pt) {
+        for (int64_t i = 0; i < a->nroots; i++) if (dan_same_point(&a->roots[i], pt)) return 0;
+        x = pt->v;
+    }
+    double v = dan_poly_eval_float(a->p, x);
+    return (v > 0) - (v < 0);
+}
+
+static bool dan_condition_holds(dan_group *g, int64_t ng, const dan_root *pt, double x) {
+    for (int64_t i = 0; i < ng; i++) {
+        bool all = true;
+        for (int64_t j = 0; j < g[i].n && all; j++)
+            all = dan_rel_holds(g[i].atoms[j].rel, dan_atom_sign(&g[i].atoms[j], pt, x));
+        if (all) return true;
+    }
+    return false;
+}
+
+static void dan_buf_point(dan_buf *b, const dan_root *r) {
+    if (r->exact) { dan_buf_rat(b, r->r); return; }
+    char t[64];
+    double v = dan_round_decimal(r->v, 4);
+    snprintf(t, sizeof t, "%.4f", v);
+    char *e = t + strlen(t) - 1;                 /* drop trailing zeros */
+    while (*e == '0') *e-- = 0;
+    if (*e == '.') *e = 0;
+    for (char *p = t; *p; p++) if (*p == '.') *p = ',';
+    if (!strcmp(t, "-0")) strcpy(t, "0");
+    dan_buf_add(b, t);
+}
+
+static dan_str dan_solve_condition(dan_group *g, int64_t ng, int line) {
+    /* breakpoints: roots of every polynomial */
+    int64_t cap = 16, nb = 0;
+    dan_root *bp = dan_alloc(sizeof(dan_root) * (size_t)cap);
+    for (int64_t i = 0; i < ng; i++)
+        for (int64_t j = 0; j < g[i].n; j++) {
+            dan_atom *a = &g[i].atoms[j];
+            a->nroots = 0;
+            a->roots = NULL;
+            if (a->p->deg <= 0) continue;
+            a->nroots = dan_poly_real_roots(a->p, &a->roots, line);
+            for (int64_t k = 0; k < a->nroots; k++) {
+                bool dup = false;
+                for (int64_t m = 0; m < nb && !dup; m++) dup = dan_same_point(&bp[m], &a->roots[k]);
+                if (dup) continue;
+                if (nb == cap) { cap *= 2; bp = dan_realloc(bp, sizeof(dan_root) * (size_t)cap); }
+                bp[nb++] = a->roots[k];
+            }
+        }
+    qsort(bp, (size_t)nb, sizeof(dan_root), dan_qcmp_root);
+    /* pieces: segment 0, point 0, segment 1, ..., point nb-1, segment nb */
+    int64_t np = 2 * nb + 1;
+    bool *in = dan_alloc(sizeof(bool) * (size_t)np);
+    for (int64_t s = 0; s <= nb; s++) {
+        double x;
+        if (nb == 0) x = 0;
+        else if (s == 0) x = bp[0].v - 1 - fabs(bp[0].v);
+        else if (s == nb) x = bp[nb - 1].v + 1 + fabs(bp[nb - 1].v);
+        else x = bp[s - 1].v + (bp[s].v - bp[s - 1].v) / 2;
+        in[2 * s] = dan_condition_holds(g, ng, NULL, x);
+        if (s < nb) in[2 * s + 1] = dan_condition_holds(g, ng, &bp[s], 0);
+    }
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "");
+    bool only_points = true, any = false;
+    for (int64_t i = 0; i < np; i++) if (in[i]) { any = true; if (i % 2 == 0) only_points = false; }
+    if (!any) { dan_buf_add(&b, DAN_TXT_NONE); return b.s; }
+    if (only_points) {                           /* {a; b; c} */
+        dan_buf_add(&b, "{");
+        bool first = true;
+        for (int64_t i = 1; i < np; i += 2) if (in[i]) {
+            if (!first) dan_buf_add(&b, "; ");
+            dan_buf_point(&b, &bp[i / 2]);
+            first = false;
+        }
+        dan_buf_add(&b, "}");
+        return b.s;
+    }
+    bool first = true;
+    for (int64_t i = 0; i < np;) {
+        if (!in[i]) { i++; continue; }
+        int64_t j = i;
+        while (j + 1 < np && in[j + 1]) j++;
+        if (!first) dan_buf_add(&b, DAN_TXT_UNION);
+        first = false;
+        if (i == j && i % 2 == 1) {              /* isolated point */
+            dan_buf_add(&b, "{");
+            dan_buf_point(&b, &bp[i / 2]);
+            dan_buf_add(&b, "}");
+        } else {
+            /* piece i starts at: segment -> open at its left breakpoint; point -> closed */
+            if (i % 2 == 0) {
+                dan_buf_add(&b, "(");
+                if (i == 0) dan_buf_add(&b, DAN_TXT_MINF); else dan_buf_point(&b, &bp[i / 2 - 1]);
+            } else { dan_buf_add(&b, "["); dan_buf_point(&b, &bp[i / 2]); }
+            dan_buf_add(&b, "; ");
+            if (j % 2 == 0) {
+                if (j == np - 1) dan_buf_add(&b, DAN_TXT_PINF); else dan_buf_point(&b, &bp[j / 2]);
+                dan_buf_add(&b, ")");
+            } else { dan_buf_point(&b, &bp[j / 2]); dan_buf_add(&b, "]"); }
+        }
+        i = j + 1;
+    }
+    return b.s;
+}
+
+static dan_str dan_ineq_str(dan_mn left, dan_str rel, dan_mn right, int line) {
+    dan_atom a = { dan_poly_sub(left, right, line), dan_parse_rel(rel, line), NULL, 0 };
+    dan_group g = { &a, 1 };
+    return dan_solve_condition(&g, 1, line);
+}
+
+static dan_str dan_ineq_system_str(const dl_Lp *lefts, const dl_Ls *rels, const dl_Lp *rights, int line) {
+    if (lefts->len != rels->len || lefts->len != rights->len) dan_error(DAN_MSG_INEQ_LISTS, line);
+    dan_atom *atoms = dan_alloc(sizeof(dan_atom) * (size_t)(lefts->len + 1));
+    for (int64_t i = 0; i < lefts->len; i++) {
+        atoms[i].p = dan_poly_sub(lefts->items[i], rights->items[i], line);
+        atoms[i].rel = dan_parse_rel(rels->items[i], line);
+    }
+    dan_group g = { atoms, lefts->len };
+    return dan_solve_condition(&g, 1, line);
+}
+
+/* |p| rel c  <=>  (p >= 0 and p - c rel 0) or (p < 0 and -p - c rel 0) */
+static dan_str dan_abs_condition(dan_mn p, int rel, dan_mn c, int line) {
+    dan_atom g1[2] = { { p, DAN_GE, NULL, 0 }, { dan_poly_sub(p, c, line), rel, NULL, 0 } };
+    dan_atom g2[2] = { { p, DAN_LT, NULL, 0 }, { dan_poly_sub(dan_poly_neg(p, line), c, line), rel, NULL, 0 } };
+    dan_group g[2] = { { g1, 2 }, { g2, 2 } };
+    return dan_solve_condition(g, 2, line);
+}
+
+static dan_str dan_abs_eq_str(dan_mn p, dan_mn c, int line) { return dan_abs_condition(p, DAN_EQ, c, line); }
+static dan_str dan_abs_ineq_str(dan_mn p, dan_str rel, dan_mn c, int line) {
+    return dan_abs_condition(p, dan_parse_rel(rel, line), c, line);
+}
+
+/* ---- systems of linear equations: Gaussian elimination with exact fractions ---- */
+
+static dl_Lr *dan_solve_system(const dl_LLr *m, int line) {
+    int64_t n = m->len;
+    for (int64_t i = 0; i < n; i++) if (m->items[i]->len != n + 1) dan_error(DAN_MSG_SYS_SHAPE, line);
+    dan_rat *a = dan_alloc(sizeof(dan_rat) * (size_t)(n * (n + 1) + 1));
+    for (int64_t i = 0; i < n; i++)
+        for (int64_t j = 0; j <= n; j++) a[i * (n + 1) + j] = m->items[i]->items[j];
+#define A(i, j) a[(i) * (n + 1) + (j)]
+    int64_t row = 0;
+    int64_t *where = dan_alloc(sizeof(int64_t) * (size_t)(n + 1));
+    for (int64_t j = 0; j < n; j++) where[j] = -1;
+    for (int64_t col = 0; col < n && row < n; col++) {
+        int64_t piv = -1;
+        for (int64_t i = row; i < n; i++) if (A(i, col).n != 0) { piv = i; break; }
+        if (piv < 0) continue;
+        for (int64_t j = 0; j <= n; j++) { dan_rat t = A(row, j); A(row, j) = A(piv, j); A(piv, j) = t; }
+        dan_rat lead = A(row, col);
+        for (int64_t j = 0; j <= n; j++) A(row, j) = dan_rat_div(A(row, j), lead, line);
+        for (int64_t i = 0; i < n; i++) {
+            if (i == row || A(i, col).n == 0) continue;
+            dan_rat f = A(i, col);
+            for (int64_t j = 0; j <= n; j++)
+                A(i, j) = dan_rat_sub(A(i, j), dan_rat_mul(f, A(row, j), line), line);
+        }
+        where[col] = row;
+        row++;
+    }
+    for (int64_t i = row; i < n; i++) if (A(i, n).n != 0) dan_error(DAN_MSG_SYS_NONE, line);
+    if (row < n) dan_error(DAN_MSG_SYS_MANY, line);
+    dl_Lr *r = dl_Lr_from(0, NULL);
+    for (int64_t j = 0; j < n; j++) dl_Lr_push(r, A(where[j], n));
+#undef A
+    return r;
+}
+"""

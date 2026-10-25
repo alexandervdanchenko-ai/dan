@@ -27,13 +27,15 @@ C независимо от его настроек кодировки.
 
 import uzly as у
 import matematika
-from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, ПУСТО, это_список, элемент
+from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, ПУСТО, это_список, элемент
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
-             ПУСТО: "void"}
-КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r"}
+             МН: "dan_mn", ПУСТО: "void"}
+КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p"}
 ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool",
-          РАЦ: "dan_write_rat"}
+          РАЦ: "dan_write_rat", МН: "dan_write_poly"}
+ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
+               "%": "dan_poly_mod"}
 ОПЕРАЦИИ_РАЦ = {"+": "dan_rat_add", "-": "dan_rat_sub", "*": "dan_rat_mul", "/": "dan_rat_div"}
 
 СООБЩЕНИЯ = {
@@ -128,6 +130,27 @@ static dan_str dan_concat(dan_str a, dan_str b) {
 }
 
 static bool dan_str_eq(dan_str a, dan_str b) { return strcmp(a, b) == 0; }
+
+/* Growing text buffer. */
+typedef struct { char *s; size_t len, cap; } dan_buf;
+
+static void dan_buf_add(dan_buf *b, const char *t) {
+    size_t n = strlen(t);
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2 + 16;
+        b->s = dan_realloc(b->s, b->cap);
+    }
+    memcpy(b->s + b->len, t, n + 1);
+    b->len += n;
+}
+
+static dan_str dan_quote_str(dan_str s) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "\"");
+    dan_buf_add(&b, s);
+    dan_buf_add(&b, "\"");
+    return b.s;
+}
 
 /* Number of characters (not bytes) in a UTF-8 string. */
 static int64_t dan_str_len(dan_str s) {
@@ -415,6 +438,12 @@ static dan_rat dan_rat_from_float(double v, int line) {
     return dan_rat_make(neg ? -n : n, d, line);
 }
 
+/* ---- polynomials: defined after the list types ---- */
+typedef struct dan_poly dan_poly;
+typedef const dan_poly *dan_mn;
+static void dan_write_poly(dan_mn p);
+static dan_str dan_poly_to_str(dan_mn p);
+
 static void dan_start(void) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -461,6 +490,17 @@ static void {S}_write(const {S} *l) {{
         {запись_элемента}(l->items[i]);
     }}
     putchar(']');
+}}
+
+static dan_str {S}_str(const {S} *l) {{
+    dan_buf b = {{ NULL, 0, 0 }};
+    dan_buf_add(&b, "[");
+    for (int64_t i = 0; i < l->len; i++) {{
+        if (i) dan_buf_add(&b, ", ");
+        dan_buf_add(&b, {строка_элемента}(l->items[i]));
+    }}
+    dan_buf_add(&b, "]");
+    return b.s;
 }}
 """
 
@@ -539,7 +579,17 @@ class Генератор:
     def тип_c(self, тип):
         if это_список(тип):
             return self.структура(тип) + "*"
+        if тип == МН:
+            self.включить_математику()
         return БАЗОВЫЕ_C[тип]
+
+    def включить_математику(self):
+        """Библиотека и многочлены нужны: регистрируются все используемые ими типы списков."""
+        if self.нужна_математика:
+            return
+        self.нужна_математика = True
+        for тип_списка in ("[цел]", "[рац]", "[дроб]", "[стр]", "[мн]", "[[рац]]"):
+            self.структура(тип_списка)
 
     def структура(self, тип):
         if тип not in self.списки:
@@ -556,6 +606,13 @@ class Генератор:
         if тип == СТР and в_списке:
             return "dan_write_quoted"
         return ЗАПИСЬ[тип]
+
+    def строка_элемента(self, тип):
+        """Функция C, которая превращает элемент списка в строку (как при выводе)."""
+        if это_список(тип):
+            return self.структура(тип) + "_str"
+        return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
+                ЛОГ: "dan_bool_to_str", СТР: "dan_quote_str", МН: "dan_poly_to_str"}[тип]
 
     # ---------- имена и вывод ----------
 
@@ -619,10 +676,13 @@ class Генератор:
             тип_эл = элемент(тип)
             части.append(ШАБЛОН_СПИСКА.format(
                 описание=тип, S=имя, T=self.тип_c(тип_эл),
-                запись_элемента=self.запись(тип_эл, в_списке=True)))
+                запись_элемента=self.запись(тип_эл, в_списке=True),
+                строка_элемента=self.строка_элемента(тип_эл)))
         if self.нужна_математика:
             части.append(matematika.КОД_C)
             части.append(matematika.код_c_дополнения())
+            части.append(matematika._код_многочленов_строки())
+            части.append(matematika.КОД_МНОГОЧЛЕНОВ)
         части.append("\n".join(self.строки))
         return "\n".join(части) + "\n"
 
@@ -750,9 +810,13 @@ class Генератор:
             код = self.привести(код, в.тип_выр, к_типу, в.строка)
         return код
 
-    @staticmethod
-    def привести(код, из_типа, в_тип, строка):
-        """Числовое преобразование цел -> рац -> дроб."""
+    def привести(self, код, из_типа, в_тип, строка):
+        """Числовое преобразование цел -> рац -> дроб, а также цел, рац -> мн."""
+        if в_тип == МН:
+            self.включить_математику()
+            if из_типа == ЦЕЛ:
+                return f"dan_poly_from_int({код}, {строка})"
+            return f"dan_poly_const({код})"
         if в_тип == ДРОБ:
             return f"dan_rat_to_float({код})" if из_типа == РАЦ else f"((double)({код}))"
         if в_тип == РАЦ and из_типа == ЦЕЛ:
@@ -773,12 +837,15 @@ class Генератор:
 
     def в_Имя(self, в):
         if getattr(в, "константа", None):
+            self.тип_c(в.тип_выр)
             return matematika.КОНСТАНТЫ[в.константа][1]
         return self.имя(в.имя)
 
     def в_Унарная(self, в):
         if в.оператор == "-" and в.тип_выр == РАЦ:
             return f"dan_rat_neg({self.выр(в.операнд)}, {в.строка})"
+        if в.оператор == "-" and в.тип_выр == МН:
+            return f"dan_poly_neg({self.выр(в.операнд)}, {в.строка})"
         оп = "-" if в.оператор == "-" else "!"
         return f"({оп}{self.выр(в.операнд)})"
 
@@ -792,6 +859,8 @@ class Генератор:
                 return f"dan_pow_int({л}, {п}, {в.строка})"
             if в.тип_выр == РАЦ:
                 return f"dan_rat_pow({л}, {п}, {в.строка})"
+            if в.тип_выр == МН:
+                return f"dan_poly_pow({л}, {п}, {в.строка})"
             return f"pow({л}, {п})"
         if оп == "и":
             return f"({л} && {п})"
@@ -802,6 +871,9 @@ class Генератор:
             return равно if оп == "==" else f"(!{равно})"
         if getattr(в, "тип_операндов", None) == РАЦ:
             return f"(dan_rat_cmp({л}, {п}) {оп} 0)"
+        if getattr(в, "тип_операндов", None) == МН:
+            равно = f"dan_poly_eq({л}, {п})"
+            return равно if оп == "==" else f"(!{равно})"
         return f"({л} {оп} {п})"
 
     def _арифметика(self, оп, л, п, тип, строка):
@@ -810,6 +882,8 @@ class Генератор:
             return f"dan_concat({л}, {п})"
         if тип == РАЦ:
             return f"{ОПЕРАЦИИ_РАЦ[оп]}({л}, {п}, {строка})"
+        if тип == МН:
+            return f"{ОПЕРАЦИИ_МН[оп]}({л}, {п}, {строка})"
         if тип == ЦЕЛ:
             if оп == "/":
                 return f"dan_div({л}, {п}, {строка})"
@@ -833,6 +907,10 @@ class Генератор:
         тип = в.объект.тип_выр
         if тип == РАЦ:
             return f"({self.выр(в.объект)}).{'n' if в.имя == 'числитель' else 'd'}"
+        if тип == МН:
+            if в.имя == "степень":
+                return f"({self.выр(в.объект)})->deg"
+            return f"dan_poly_coeffs({self.выр(в.объект)})"
         if тип == СТР:
             return f"dan_str_len({self.выр(в.объект)})"
         if not это_список(тип):           # литерал «[]»
@@ -851,9 +929,7 @@ class Генератор:
         if getattr(в, "библиотека", None):
             каноническое, вариант = в.библиотека
             описание = matematika.ФУНКЦИИ[каноническое]
-            self.нужна_математика = True
-            for тип_списка in ("[цел]", "[рац]", "[дроб]", "[стр]"):
-                self.структура(тип_списка)   # библиотека работает со списками этих типов
+            self.включить_математику()
             if описание["строка"][вариант]:
                 аргументы.append(str(в.строка))
             return f"{описание['c'][вариант]}({', '.join(аргументы)})"
@@ -869,13 +945,14 @@ class Генератор:
             return self._преобразование(имя, в.аргументы[0].тип_выр, аргументы[0], в.строка)
         return f"{self.имя(имя)}({', '.join(аргументы)})"
 
-    @staticmethod
-    def _преобразование(куда, откуда, значение, строка):
+    def _преобразование(self, куда, откуда, значение, строка):
         if куда == откуда:
             return значение
+        if куда == СТР and это_список(откуда):
+            return f"{self.структура(откуда)}_str({значение})"
         if куда == СТР:
             return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
-                    ЛОГ: "dan_bool_to_str"}[откуда] + f"({значение})"
+                    ЛОГ: "dan_bool_to_str", МН: "dan_poly_to_str"}[откуда] + f"({значение})"
         if куда == ЦЕЛ:
             if откуда == РАЦ:
                 return f"dan_rat_to_int({значение})"
