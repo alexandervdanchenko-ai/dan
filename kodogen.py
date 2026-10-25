@@ -37,6 +37,7 @@ from proverka import ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ,
           РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes"}
 ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
                "%": "dan_poly_mod"}
+ЦЕЛЫЕ_ДЕЙСТВИЯ = {"+": "dan_add", "-": "dan_sub", "*": "dan_mul"}
 ОПЕРАЦИИ_РАЦ = {"+": "dan_rat_add", "-": "dan_rat_sub", "*": "dan_rat_mul", "/": "dan_rat_div"}
 
 СООБЩЕНИЯ = {
@@ -96,6 +97,31 @@ static void dan_conv_error(const char *fmt, dan_str s, int line) {
 }
 
 /* ---- arithmetic ---- */
+
+/* Integer overflow is never silent: the result is either exact or the
+   program stops with a message (no undefined behaviour, no wraparound). */
+static inline int64_t dan_add(int64_t a, int64_t b, int line) {
+    int64_t r;
+    if (__builtin_add_overflow(a, b, &r)) dan_error(DAN_MSG_TOO_BIG, line);
+    return r;
+}
+
+static inline int64_t dan_sub(int64_t a, int64_t b, int line) {
+    int64_t r;
+    if (__builtin_sub_overflow(a, b, &r)) dan_error(DAN_MSG_TOO_BIG, line);
+    return r;
+}
+
+static inline int64_t dan_mul(int64_t a, int64_t b, int line) {
+    int64_t r;
+    if (__builtin_mul_overflow(a, b, &r)) dan_error(DAN_MSG_TOO_BIG, line);
+    return r;
+}
+
+static inline int64_t dan_neg(int64_t a, int line) {
+    if (a == INT64_MIN) dan_error(DAN_MSG_TOO_BIG, line);
+    return -a;
+}
 
 /* Division with remainder as defined in school mathematics:
    a = b * q + r, where 0 <= r < |b|. The remainder is never negative,
@@ -1053,13 +1079,26 @@ class Генератор:
     def и_Для(self, и):
         перем = self.имя(и.переменная)
         if и.тип_элемента is None:
-            конец = self.служебное_имя("end")
+            первое = self.служебное_имя("from")
+            число = self.служебное_имя("count")
+            шаг = self.служебное_имя("k")
             начало = self.выр(и.источник.начало)
             граница = self.выр(и.источник.конец)
-            # Граница вычисляется один раз до начала цикла.
-            self.пиши(f"for (int64_t {перем} = {начало}, {конец} = {граница}; "
-                      f"{перем} <= {конец}; {перем}++) {{")
+            # Границы вычисляются один раз до начала цикла. Счёт идёт по
+            # беззнаковому номеру шага, поэтому цикл до самого большого
+            # целого числа завершается, а не переполняется.
+            self.пиши("{")
+            self.отступ += 1
+            self.пиши(f"const int64_t {первое} = {начало}, {число}_last = {граница};")
+            self.пиши(f"const uint64_t {число} = {число}_last < {первое} ? 0 : "
+                      f"(uint64_t){число}_last - (uint64_t){первое} + 1;")
+            self.пиши(f"for (uint64_t {шаг} = 0; {шаг} < {число}; {шаг}++) {{")
+            self.отступ += 1
+            self.пиши(f"const int64_t {перем} = (int64_t)((uint64_t){первое} + {шаг});")
+            self.отступ -= 1
             self.блок(и.тело)
+            self.пиши("}")
+            self.отступ -= 1
             self.пиши("}")
             return
         if getattr(и, "по_строке", False):
@@ -1139,6 +1178,8 @@ class Генератор:
             return f"dan_rat_neg({self.выр(в.операнд)}, {в.строка})"
         if в.оператор == "-" and в.тип_выр == МН:
             return f"dan_poly_neg({self.выр(в.операнд)}, {в.строка})"
+        if в.оператор == "-" and в.тип_выр == ЦЕЛ:
+            return f"dan_neg({self.выр(в.операнд)}, {в.строка})"
         оп = "-" if в.оператор == "-" else "!"
         return f"({оп}{self.выр(в.операнд)})"
 
@@ -1187,6 +1228,7 @@ class Генератор:
                 return f"dan_div({л}, {п}, {строка})"
             if оп == "%":
                 return f"dan_mod({л}, {п}, {строка})"
+            return f"{ЦЕЛЫЕ_ДЕЙСТВИЯ[оп]}({л}, {п}, {строка})"
         return f"({л} {оп} {п})"
 
     def в_Список(self, в):

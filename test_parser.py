@@ -209,5 +209,13 @@ class ТестыПримеров(unittest.TestCase):
                 разобрать(ф.read())
 
 
+class ТестыСоветов(unittest.TestCase):
+
+    def test_присваивание_вместо_сравнения(self):
+        with self.assertRaises(ОшибкаРазбора) as к:
+            разобрать("перем а = 1\nесли а = 1 { вывод(а) }")
+        self.assertIn("используйте «==»", str(к.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
