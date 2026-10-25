@@ -35,7 +35,9 @@ import uzly
                "-Wl,--gc-sections", "-fno-asynchronous-unwind-tables", "-fno-ident"]
 ФЛАГИ_СКОРОСТЬ = ["-O2"]
 ФЛАГИ_РАЗМЕР = ["-Os"]
-БИБЛИОТЕКИ = ["-lm"]
+# Размер стека в Windows по умолчанию 1 МБ, в Linux обычно 8 МБ; 64 МБ дают
+# глубину рекурсии порядка сотен тысяч вызовов.
+БИБЛИОТЕКИ = ["-lm"] + (["-Wl,--stack,67108864"] if os.name == "nt" else [])
 
 
 class ОшибкаСборки(Exception):

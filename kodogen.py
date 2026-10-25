@@ -47,6 +47,11 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_MSG_DIV_ZERO": "деление на ноль",
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
+    "DAN_MSG_RUNTIME_NOLINE": "Ошибка выполнения: %s\n",
+    "DAN_MSG_DEEP_DATA": "значение собственного типа вложено слишком глубоко (например, очень длинная "
+                         "цепочка звеньев), и его нельзя целиком сравнить, вывести или скопировать",
+    "DAN_MSG_DEEP": "слишком глубокая рекурсия: функция из этой строки вызвала себя слишком много раз, "
+                    "не завершившись; проверьте условие остановки рекурсии или замените её циклом",
     "DAN_MSG_TOO_BIG": "результат слишком велик для типа цел",
     "DAN_MSG_INDEX": "индекс %lld за пределами (длина %lld)",
     "DAN_MSG_EMPTY_SEARCH": "искомая строка не может быть пустой",
@@ -65,6 +70,42 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_FALSE": "ложь",
 }
 
+def _вызываемые(узел, имена, найдено):
+    """Имена функций программы, которые вызываются внутри узла."""
+    if isinstance(узел, у.Вызов) and isinstance(узел.функция, у.Имя) and узел.функция.имя in имена:
+        найдено.add(узел.функция.имя)
+    if isinstance(узел, list):
+        for ч in узел:
+            _вызываемые(ч, имена, найдено)
+    elif isinstance(узел, у.Узел):
+        for значение in vars(узел).values():
+            if isinstance(значение, (у.Узел, list)):
+                _вызываемые(значение, имена, найдено)
+    return найдено
+
+
+def рекурсивные_функции(функции):
+    """Функции, которые могут вызвать сами себя (прямо или через другие функции).
+
+    Только их рекурсия может быть неограниченной, поэтому проверка глубины
+    стека ставится лишь в них, а остальные функции работают без издержек.
+    """
+    имена = {ф.имя for ф in функции}
+    вызовы = {ф.имя: _вызываемые(ф.тело, имена, set()) for ф in функции}
+    рекурсивные = set()
+    for начало in имена:
+        увиденные, очередь = set(), list(вызовы[начало])
+        while очередь:
+            имя = очередь.pop()
+            if имя == начало:
+                рекурсивные.add(начало)
+                break
+            if имя not in увиденные:
+                увиденные.add(имя)
+                очередь.extend(вызовы[имя])
+    return рекурсивные
+
+
 СРЕДА = r"""
 typedef const char *dan_str;
 
@@ -73,6 +114,30 @@ static void dan_error(const char *text, int line) {
     fprintf(stderr, DAN_MSG_RUNTIME, line, text);
     exit(1);
 }
+
+/* Защита от переполнения стека при глубокой рекурсии. Вместо аварийного
+   завершения без сообщения программа останавливается с ошибкой выполнения.
+   Стек растёт вниз (x86, ARM); в начале каждой функции программы сравнивается
+   глубина стека с пределом, вычисленным в dan_start по размеру стека потока. */
+static uintptr_t dan_stack_base, dan_stack_limit;
+
+static void dan_stack_error(int line) __attribute__((noinline, cold));
+static void dan_stack_error(int line) {
+    if (line > 0) dan_error(DAN_MSG_DEEP, line);
+    fflush(stdout);
+    fprintf(stderr, DAN_MSG_RUNTIME_NOLINE, DAN_MSG_DEEP_DATA);
+    exit(1);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+#define DAN_FRAME() ((uintptr_t)__builtin_frame_address(0))
+#define DAN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define DAN_FRAME() ((uintptr_t)&dan_probe_)
+#define DAN_UNLIKELY(x) (x)
+#endif
+#define DAN_STACK_CHECK(line) do { char dan_probe_; (void)dan_probe_; \
+    if (DAN_UNLIKELY(DAN_FRAME() < dan_stack_base - dan_stack_limit)) dan_stack_error(line); } while (0)
 
 static void *dan_alloc(size_t n) {
     void *p = malloc(n ? n : 1);
@@ -655,10 +720,25 @@ static dan_str dan_poly_to_str(dan_mn p);
 static bool dan_poly_eq(dan_mn a, dan_mn b);
 
 static void dan_start(void) {
+    char here;
+    uintptr_t size = 1024 * 1024;
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(&here, &mbi, sizeof mbi))
+        size = (uintptr_t)&here - (uintptr_t)mbi.AllocationBase;
+#else
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+        size = (uintptr_t)rl.rlim_cur;
+    else
+        size = (uintptr_t)256 * 1024 * 1024;
 #endif
+    dan_stack_base = (uintptr_t)&here;
+    if (size > dan_stack_base) size = dan_stack_base;
+    /* Запас на функции библиотеки выполнения и самой системы. */
+    dan_stack_limit = size / 4 * 3 > 256 * 1024 ? size / 4 * 3 - 256 * 1024 : size / 2;
 }
 """
 
@@ -1156,6 +1236,7 @@ class Генератор:
         self.собственные = getattr(программа, "типы", {}) or {}
         self.написания = getattr(программа, "написания", {}) or {}
         функции = [и for и in программа.инструкции if isinstance(и, у.Функция)]
+        self.рекурсивные = рекурсивные_функции(функции)
         прочие = [и for и in программа.инструкции if not isinstance(и, у.Функция)]
 
         # Сначала генерируется тело программы: при этом выясняется,
@@ -1183,7 +1264,7 @@ class Генератор:
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
-            "#ifndef _WIN32", "#include <dirent.h>", "#endif",
+            "#ifndef _WIN32", "#include <dirent.h>", "#include <sys/resource.h>", "#endif",
             "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
         ]
         шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
@@ -1304,8 +1385,32 @@ class Генератор:
                 строки.append(f"static {имя} {имя}_share({имя} v);")
         return "\n".join(строки) + "\n"
 
+    def _рекурсивные_типы(self):
+        """Собственные типы, значения которых могут содержать значения того же типа."""
+        def прямые(тип):
+            итог = set()
+            for _, т, _ in self.собственные[тип]:
+                while это_список(т) or это_необяз(т):
+                    т = элемент(т) if это_список(т) else основа(т)
+                if т in self.собственные:
+                    итог.add(т)
+            return итог
+        рекурсивные = set()
+        for начало in self.собственные:
+            увиденные, очередь = set(), list(прямые(начало))
+            while очередь:
+                т = очередь.pop()
+                if т == начало:
+                    рекурсивные.add(начало)
+                    break
+                if т not in увиденные:
+                    увиденные.add(т)
+                    очередь.extend(прямые(т))
+        return рекурсивные
+
     def _функции_типов(self):
         строки = []
+        рекурсивные = self._рекурсивные_типы()
         ничего = строка_c("ничего")
         for тип, имя in self.значимые.items():
             строки.append(f"/* ---- {тип} ---- */")
@@ -1321,7 +1426,10 @@ class Генератор:
                                   f"&& (!{имя}_has(a) || {равно}); }}")
             else:
                 поля = self.собственные[тип]
+                проверка = "DAN_STACK_CHECK(0); " if тип in рекурсивные else ""
                 строки.append(f"static dan_str {имя}_str({имя} v) {{")
+                if проверка:
+                    строки.append("    DAN_STACK_CHECK(0);")
                 строки.append("    dan_buf b = { NULL, 0, 0 };")
                 строки.append(f"    dan_buf_add(&b, {строка_c(self.написания.get(тип, тип) + '(')});")
                 for номер, (поле, т, _) in enumerate(поля):
@@ -1336,7 +1444,7 @@ class Генератор:
                     for поле, т, _ in поля:
                         ф = self.поле_c(тип, поле)
                         части.append(self._подставить(self.равенство(т), f"a.{ф}", f"b.{ф}"))
-                    строки.append(f"static bool {имя}_eq({имя} a, {имя} b) {{ return {' && '.join(части)}; }}")
+                    строки.append(f"static bool {имя}_eq({имя} a, {имя} b) {{ {проверка}return {' && '.join(части)}; }}")
             строки.append(f"static void {имя}_write({имя} v) {{ fputs({имя}_str(v), stdout); }}")
             if self.поделить(тип):
                 if это_необяз(тип):
@@ -1345,7 +1453,8 @@ class Генератор:
                 else:
                     поля = [(self.поле_c(тип, п), self.поделить(т)) for п, т, _ in self.собственные[тип]]
                     тело = " ".join(f"v.{ф} = {д}(v.{ф});" for ф, д in поля if д)
-                    строки.append(f"static {имя} {имя}_share({имя} v) {{ {тело} return v; }}")
+                    проверка = "DAN_STACK_CHECK(0); " if тип in рекурсивные else ""
+                    строки.append(f"static {имя} {имя}_share({имя} v) {{ {проверка}{тело} return v; }}")
         return "\n".join(строки) + "\n"
 
     @staticmethod
@@ -1368,6 +1477,8 @@ class Генератор:
         self.пиши(f"/* line {ф.строка} */")
         self.пиши(self._заголовок(ф) + " {")
         self.отступ += 1
+        if ф.имя in self.рекурсивные:
+            self.пиши(f"DAN_STACK_CHECK({ф.строка});")
         for и in ф.тело.инструкции:
             self.инструкция(и)
         self.отступ -= 1
