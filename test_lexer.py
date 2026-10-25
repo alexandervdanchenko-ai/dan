@@ -106,5 +106,48 @@ class ТестыНадёжностиИмён(unittest.TestCase):
         self.assertEqual(имена, ["счетчик", "счетчик", "Еж"])
 
 
+class ТестыНевидимыхСимволов(unittest.TestCase):
+    """Защита от атаки Trojan Source (CVE-2021-42574)."""
+
+    def test_смена_направления_в_комментарии_запрещена(self):
+        with self.assertRaises(ОшибкаЛексера) as к:
+            разобрать("пусть а = 1 // проверка ‮ }; ложь\nвывод(а)")
+        текст = str(к.exception)
+        self.assertIn("U+202E", текст)
+        self.assertIn("справа налево", текст)
+        self.assertEqual((к.exception.строка, к.exception.столбец), (1, 25))
+
+    def test_смена_направления_в_строке_запрещена(self):
+        with self.assertRaises(ОшибкаЛексера) as к:
+            разобрать('пусть а = 1\nпусть с = "доступ⁦ разрешён"')
+        self.assertIn("U+2066", str(к.exception))
+        self.assertEqual(к.exception.строка, 2)
+
+    def test_все_символы_направления_запрещены(self):
+        for с in "؜‎‏‪‫‬‭‮⁦⁧⁨⁩":
+            with self.subTest(код=f"U+{ord(с):04X}"):
+                with self.assertRaises(ОшибкаЛексера):
+                    разобрать(f'// {с}\nпусть а = 1')
+
+    def test_невидимый_символ_назван_кодом(self):
+        with self.assertRaises(ОшибкаЛексера) as к:
+            разобрать("пусть а​б = 1")
+        self.assertIn("U+200B (пробел нулевой ширины)", str(к.exception))
+
+    def test_обычный_символ_назван_видимо(self):
+        with self.assertRaises(ОшибкаЛексера) as к:
+            разобрать("х = 5 @ 3")
+        self.assertIn("«@» (U+0040)", str(к.exception))
+
+    def test_соединитель_в_строке_допустим(self):
+        # Соединитель нулевой ширины нужен в составных значках и ряде письменностей.
+        значения = [з for в, з in виды_и_значения('"👨‍👩"') if в == Т.СТРОКА]
+        self.assertEqual(значения, ["👨‍👩"])
+
+    def test_метка_порядка_байтов_в_начале_файла(self):
+        self.assertEqual(виды_и_значения("﻿пусть а = 1")[:2],
+                         виды_и_значения("пусть а = 1")[:2])
+
+
 if __name__ == "__main__":
     unittest.main()
