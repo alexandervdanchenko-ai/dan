@@ -25,13 +25,14 @@ C независимо от его настроек кодировки.
 программы их не видят, как и требует спецификация.
 """
 
+from dataclasses import fields
 import uzly as у
 import matematika
 import vysshaya  # регистрирует функции высшей и прикладной математики
 import dannye
 from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, НИЧЕГО, это_список, элемент,
                       это_необяз, основа, найти_в_библиотеке, это_словарь, ключ_словаря, значение_словаря,
-                      это_результат, ОШИБКА, это_функция, разобрать_тип_функции)
+                      это_результат, ОШИБКА, это_функция, разобрать_тип_функции, ДИАПАЗОН, НЕИЗВ)
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
              МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void"}
@@ -157,6 +158,116 @@ static void *dan_realloc(void *p, size_t n) {
     return p;
 }
 
+/* ---- memory: reference counting ----
+   Every value kept in memory (string, list, dictionary, bytes, variant cell,
+   environment of a closure) starts with a header. rc is the number of places
+   (variables, fields, elements) that hold the value; a value that is only in
+   use as a temporary has rc == 0. A new value is put into the table of
+   temporaries (ZCT); at the end of each statement the table is swept, and
+   values that no place holds are freed. A value whose last place lets it go
+   is freed at once. Freeing is iterative, so long chains do not overflow
+   the stack. Values never form cycles (they are values, not shared objects),
+   so no garbage collector is needed. */
+typedef struct { int32_t rc; uint16_t flags; uint16_t magic; } dan_hdr;
+#define DAN_MAGIC 0xDA4E
+#define DAN_IN_ZCT 1u
+#define DAN_IMMORTAL 2u
+#define DAN_HDR_INIT { 0, DAN_IMMORTAL, DAN_MAGIC }
+typedef void (*dan_destroy_fn)(dan_hdr *);
+typedef struct { dan_hdr *h; dan_destroy_fn d; } dan_zent;
+static dan_zent *dan_zct, *dan_dead;
+static size_t dan_zct_n, dan_zct_cap, dan_dead_n, dan_dead_cap;
+static int dan_draining;
+
+static void dan_zct_push(dan_hdr *h, dan_destroy_fn d) {
+    if (h->flags & (DAN_IN_ZCT | DAN_IMMORTAL)) return;
+    h->flags |= DAN_IN_ZCT;
+    if (dan_zct_n == dan_zct_cap) {
+        dan_zct_cap = dan_zct_cap ? dan_zct_cap * 2 : 256;
+        dan_zct = dan_realloc(dan_zct, dan_zct_cap * sizeof *dan_zct);
+    }
+    dan_zct[dan_zct_n].h = h;
+    dan_zct[dan_zct_n].d = d;
+    dan_zct_n++;
+}
+
+static void dan_kill(dan_hdr *h, dan_destroy_fn d) {
+    if (dan_dead_n == dan_dead_cap) {
+        dan_dead_cap = dan_dead_cap ? dan_dead_cap * 2 : 256;
+        dan_dead = dan_realloc(dan_dead, dan_dead_cap * sizeof *dan_dead);
+    }
+    dan_dead[dan_dead_n].h = h;
+    dan_dead[dan_dead_n].d = d;
+    dan_dead_n++;
+    if (dan_draining) return;
+    dan_draining = 1;
+    while (dan_dead_n) {
+        dan_zent e = dan_dead[--dan_dead_n];
+        e.d(e.h);
+    }
+    dan_draining = 0;
+}
+
+static inline size_t dan_mark(void) { return dan_zct_n; }
+
+static void dan_sweep_slow(size_t m) {
+    while (dan_zct_n > m) {
+        dan_zent e = dan_zct[--dan_zct_n];
+        e.h->flags &= (uint16_t)~DAN_IN_ZCT;
+        if (e.h->rc == 0) dan_kill(e.h, e.d);
+    }
+}
+static inline void dan_sweep(size_t m) { if (dan_zct_n > m) dan_sweep_slow(m); }
+
+static inline void dan_hdr_new(dan_hdr *h, dan_destroy_fn d) {
+    h->rc = 0; h->flags = 0; h->magic = DAN_MAGIC;
+    dan_zct_push(h, d);
+}
+static inline void dan_hdr_share(dan_hdr *h) { if (!(h->flags & DAN_IMMORTAL)) h->rc++; }
+static inline void dan_hdr_release(dan_hdr *h, dan_destroy_fn d) {
+    if (h->flags & DAN_IMMORTAL) return;
+    if (--h->rc <= 0) { h->rc = 0; if (!(h->flags & DAN_IN_ZCT)) dan_kill(h, d); }
+}
+/* the place passes the value on (to the caller): it becomes a temporary */
+static inline void dan_hdr_give(dan_hdr *h, dan_destroy_fn d) {
+    if (h->flags & DAN_IMMORTAL) return;
+    if (--h->rc <= 0) { h->rc = 0; dan_zct_push(h, d); }
+}
+
+#define DAN_ID(x) (x)
+#define DAN_NOREL(x) ((void)0)
+
+/* environment of a closure: header, its own way to free the captured values */
+typedef struct { dan_hdr h; dan_destroy_fn d; } dan_envb;
+static inline void dan_env_share(void *e) { if (e) dan_hdr_share(&((dan_envb *)e)->h); }
+static inline void dan_env_release(void *e) { if (e) dan_hdr_release(&((dan_envb *)e)->h, ((dan_envb *)e)->d); }
+static inline void dan_env_give(void *e) { if (e) dan_hdr_give(&((dan_envb *)e)->h, ((dan_envb *)e)->d); }
+
+/* Strings: the header is right before the characters. Text that did not
+   come from dan_str_new (a C literal) has no header and is never freed. */
+static void dan_str_destroy(dan_hdr *h) { free(h); }
+static char *dan_str_new(size_t n) {
+    dan_hdr *h = dan_alloc(sizeof *h + n + 1);
+    dan_hdr_new(h, dan_str_destroy);
+    char *s = (char *)(h + 1);
+    s[n] = 0;
+    return s;
+}
+static inline dan_hdr *dan_str_hdr(dan_str s) {
+    uint16_t m;
+    if (!s) return NULL;
+    memcpy(&m, s - 2, 2);
+    return m == DAN_MAGIC ? (dan_hdr *)(void *)(s - sizeof(dan_hdr)) : NULL;
+}
+static inline dan_str dan_str_share(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_share(h); return s; }
+static inline void dan_str_release(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_release(h, dan_str_destroy); }
+static inline void dan_str_give(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_give(h, dan_str_destroy); }
+#define DAN_STATIC_STR(name, text) \
+    static const struct { dan_hdr h; char s[sizeof(text)]; } name = { DAN_HDR_INIT, text }
+DAN_STATIC_STR(dan_true_s, DAN_TRUE);
+DAN_STATIC_STR(dan_false_s, DAN_FALSE);
+DAN_STATIC_STR(dan_empty_s, "");
+
 static void dan_index_error(int64_t i, int64_t len, int line) {
     char buf[200];
     snprintf(buf, sizeof buf, DAN_MSG_INDEX, (long long)i, (long long)len);
@@ -219,14 +330,14 @@ static int64_t dan_mod(int64_t a, int64_t b, int line) {
 
 static dan_str dan_strdup(const char *s) {
     size_t n = strlen(s);
-    char *r = dan_alloc(n + 1);
+    char *r = dan_str_new(n);
     memcpy(r, s, n + 1);
     return r;
 }
 
 static dan_str dan_concat(dan_str a, dan_str b) {
     size_t la = strlen(a), lb = strlen(b);
-    char *r = dan_alloc(la + lb + 1);
+    char *r = dan_str_new(la + lb);
     memcpy(r, a, la);
     memcpy(r + la, b, lb + 1);
     return r;
@@ -249,7 +360,7 @@ static int64_t dan_str_len(dan_str s);
 
 static dan_str dan_str_sub(const char *a, const char *b) {
     size_t n = (size_t)(b - a);
-    char *r = dan_alloc(n + 1);
+    char *r = dan_str_new(n);
     memcpy(r, a, n);
     r[n] = 0;
     return r;
@@ -297,7 +408,7 @@ static dan_str dan_str_trim(dan_str s) {
 /* upper and lower case for Latin and Cyrillic letters (including ё) */
 static dan_str dan_str_case(dan_str s, int upper) {
     size_t n = strlen(s);
-    unsigned char *r = dan_alloc(n + 1);
+    unsigned char *r = (unsigned char *)dan_str_new(n);
     memcpy(r, s, n + 1);
     for (size_t i = 0; i < n;) {
         unsigned char c = r[i];
@@ -328,18 +439,32 @@ static dan_str dan_str_case(dan_str s, int upper) {
 static dan_str dan_str_upper(dan_str s) { return dan_str_case(s, 1); }
 static dan_str dan_str_lower(dan_str s) { return dan_str_case(s, 0); }
 
-/* Growing text buffer. */
+/* Growing text buffer. Room for a string header is kept before the text:
+   dan_buf_str makes the text an ordinary string. Until then the header
+   says «never free», so a buffer returned as is stays valid forever. */
 typedef struct { char *s; size_t len, cap; } dan_buf;
 
 static void dan_buf_add(dan_buf *b, const char *t) {
     size_t n = strlen(t);
     if (b->len + n + 1 > b->cap) {
         b->cap = (b->len + n + 1) * 2 + 16;
-        b->s = dan_realloc(b->s, b->cap);
+        dan_hdr *h = dan_realloc(b->s ? (dan_hdr *)(void *)b->s - 1 : NULL, sizeof(dan_hdr) + b->cap);
+        if (!b->s) { h->rc = 0; h->flags = DAN_IMMORTAL; h->magic = DAN_MAGIC; }
+        b->s = (char *)(h + 1);
     }
     memcpy(b->s + b->len, t, n + 1);
     b->len += n;
 }
+
+static dan_str dan_buf_str(dan_buf *b) {
+    if (!b->s) return dan_strdup("");
+    dan_hdr *h = (dan_hdr *)(void *)b->s - 1;
+    h->flags = 0;
+    dan_zct_push(h, dan_str_destroy);
+    return b->s;
+}
+
+static void dan_buf_free(dan_buf *b) { if (b->s) free((dan_hdr *)(void *)b->s - 1); b->s = NULL; }
 
 static dan_str dan_str_replace(dan_str s, dan_str a, dan_str b, int line) {
     if (!*a) dan_error(DAN_MSG_EMPTY_SEARCH, line);
@@ -348,13 +473,17 @@ static dan_str dan_str_replace(dan_str s, dan_str a, dan_str b, int line) {
     size_t la = strlen(a);
     const char *p = s, *f;
     while ((f = strstr(p, a)) != NULL) {
-        dan_str part = dan_str_sub(p, f);
+        size_t n = (size_t)(f - p);
+        char *part = dan_alloc(n + 1);
+        memcpy(part, p, n);
+        part[n] = 0;
         dan_buf_add(&r, part);
+        free(part);
         dan_buf_add(&r, b);
         p = f + la;
     }
     dan_buf_add(&r, p);
-    return r.s;
+    return dan_buf_str(&r);
 }
 
 static dan_str dan_str_repeat(dan_str s, int64_t k, int line) {
@@ -362,7 +491,7 @@ static dan_str dan_str_repeat(dan_str s, int64_t k, int line) {
     dan_buf r = { NULL, 0, 0 };
     dan_buf_add(&r, "");
     for (int64_t i = 0; i < k; i++) dan_buf_add(&r, s);
-    return r.s;
+    return dan_buf_str(&r);
 }
 
 static dan_str dan_quote_str(dan_str s) {
@@ -370,7 +499,7 @@ static dan_str dan_quote_str(dan_str s) {
     dan_buf_add(&b, "\"");
     dan_buf_add(&b, s);
     dan_buf_add(&b, "\"");
-    return b.s;
+    return dan_buf_str(&b);
 }
 
 /* Number of characters (not bytes) in a UTF-8 string. */
@@ -399,6 +528,7 @@ static void dan_format_float(char *buf, size_t size, double v) {
 static void dan_write_int(int64_t v) { printf("%" PRId64, v); }
 static void dan_write_float(double v) { char b[64]; dan_format_float(b, sizeof b, v); fputs(b, stdout); }
 static void dan_write_bool(bool v) { fputs(v ? DAN_TRUE : DAN_FALSE, stdout); }
+
 static void dan_write_str(dan_str v) { fputs(v, stdout); }
 static void dan_write_quoted(dan_str v) { putchar('"'); fputs(v, stdout); putchar('"'); }
 static void dan_newline(void) { putchar('\n'); }
@@ -417,7 +547,7 @@ static dan_str dan_float_to_str(double v) {
     return dan_strdup(b);
 }
 
-static dan_str dan_bool_to_str(bool v) { return v ? DAN_TRUE : DAN_FALSE; }
+static dan_str dan_bool_to_str(bool v) { return v ? dan_true_s.s : dan_false_s.s; }
 
 static int64_t dan_str_to_int(dan_str s, int line) {
     const char *p = s;
@@ -476,7 +606,7 @@ static dan_str dan_input(dan_str prompt) {
             if (w[len] != L'\r') len++;
         }
         int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)len, NULL, 0, NULL, NULL);
-        char *r = dan_alloc((size_t)n + 1);
+        char *r = dan_str_new((size_t)n);
         WideCharToMultiByte(CP_UTF8, 0, w, (int)len, r, n, NULL, NULL);
         r[n] = 0;
         free(w);
@@ -492,7 +622,9 @@ static dan_str dan_input(dan_str prompt) {
     }
     if (len && r[len - 1] == '\r') len--;
     r[len] = 0;
-    return r;
+    dan_str s = dan_strdup(r);
+    free(r);
+    return s;
 }
 
 /* ---- integer power ---- */
@@ -661,11 +793,17 @@ static dan_rat dan_rat_from_float(double v, int line) {
 
 /* ---- bytes ---- */
 
-typedef struct { int64_t len; uint8_t *data; } dan_bytes_s;
+typedef struct { dan_hdr h; int64_t len; uint8_t *data; } dan_bytes_s;
 typedef const dan_bytes_s *dan_bytes;
+
+static void dan_bytes_destroy(dan_hdr *h) { dan_bytes_s *b = (dan_bytes_s *)(void *)h; free(b->data); free(b); }
+static inline dan_bytes dan_bytes_share(dan_bytes b) { if (b) dan_hdr_share((dan_hdr *)&b->h); return b; }
+static inline void dan_bytes_release(dan_bytes b) { if (b) dan_hdr_release((dan_hdr *)&b->h, dan_bytes_destroy); }
+static inline void dan_bytes_give(dan_bytes b) { if (b) dan_hdr_give((dan_hdr *)&b->h, dan_bytes_destroy); }
 
 static dan_bytes_s *dan_bytes_alloc(int64_t len) {
     dan_bytes_s *b = dan_alloc(sizeof *b);
+    dan_hdr_new(&b->h, dan_bytes_destroy);
     b->len = len;
     b->data = dan_alloc((size_t)len + 1);
     b->data[len] = 0;
@@ -681,7 +819,7 @@ static dan_bytes dan_bytes_from_str(dan_str s) {
 
 /* Text from bytes in UTF-8; the text ends at the first zero byte. */
 static dan_str dan_bytes_to_str(dan_bytes b) {
-    char *s = dan_alloc((size_t)b->len + 1);
+    char *s = dan_str_new((size_t)b->len);
     memcpy(s, b->data, (size_t)b->len);
     s[b->len] = 0;
     return s;
@@ -713,7 +851,7 @@ static dan_str dan_bytes_show(dan_bytes b) {
     if (b->len) dan_buf_add(&s, ":");
     for (int64_t i = 0; i < b->len && i < 32; i++) { snprintf(t, sizeof t, " %02x", b->data[i]); dan_buf_add(&s, t); }
     if (b->len > 32) dan_buf_add(&s, " ...");
-    return s.s;
+    return dan_buf_str(&s);
 }
 
 static void dan_write_bytes(dan_bytes b) { fputs(dan_bytes_show(b), stdout); }
@@ -750,17 +888,26 @@ static void dan_start(void) {
 
 ШАБЛОН_СПИСКА = """
 /* ---- list {описание} ---- */
-/* rc - число мест (переменных, полей, элементов), где хранится список.
-   Список - значение: если мест несколько, перед изменением делается копия. */
-struct {S} {{ int64_t len, cap, rc; {T} *items; }};
+/* h.rc - число мест (переменных, полей, элементов), где хранится список.
+   Список - значение: если мест несколько, перед изменением делается копия.
+   Список сам учитывает свои элементы: при добавлении элемент получает ещё
+   одно место хранения, при удалении - теряет его. */
+struct {S} {{ dan_hdr h; int64_t len, cap; {T} *items; }};
+
+static void {S}_destroy(dan_hdr *h) {{
+    {S} *l = ({S} *)(void *)h;
+    for (int64_t i = 0; i < l->len; i++) {RL}(l->items[i]);
+    free(l->items);
+    free(l);
+}}
 
 static {S} *{S}_from(int64_t n, {T} const *src) {{
     {S} *l = dan_alloc(sizeof *l);
-    l->rc = 0;
+    dan_hdr_new(&l->h, {S}_destroy);
     l->len = n;
     l->cap = n < 4 ? 4 : n;
     l->items = dan_alloc((size_t)l->cap * sizeof({T}));
-    if (n) memcpy(l->items, src, (size_t)n * sizeof({T}));
+    for (int64_t i = 0; i < n; i++) l->items[i] = {SH}(src[i]);
     return l;
 }}
 
@@ -769,7 +916,7 @@ static void {S}_push({S} *l, {T} v) {{
         l->cap *= 2;
         l->items = dan_realloc(l->items, (size_t)l->cap * sizeof({T}));
     }}
-    l->items[l->len++] = v;
+    l->items[l->len++] = {SH}(v);
 }}
 
 static {T} {S}_get(const {S} *l, int64_t i, int line) {{
@@ -784,7 +931,10 @@ static {T} *{S}_at({S} *l, int64_t i, int line) {{
 
 static void {S}_set({S} *l, int64_t i, {T} v, int line) {{
     if (i < 0 || i >= l->len) dan_index_error(i, l->len, line);
-    l->items[i] = v;
+    {T} old = l->items[i];
+    l->items[i] = {SH}(v);
+    {RL}(old);
+    (void)old;
 }}
 
 static void {S}_write(const {S} *l) {{
@@ -799,34 +949,37 @@ static void {S}_write(const {S} *l) {{
 static void {S}_insert({S} *l, int64_t i, {T} v, int line) {{
     if (i < 0 || i > l->len) dan_index_error(i, l->len, line);
     {S}_push(l, v);
+    {T} last = l->items[l->len - 1];
     memmove(&l->items[i + 1], &l->items[i], (size_t)(l->len - 1 - i) * sizeof({T}));
-    l->items[i] = v;
+    l->items[i] = last;
 }}
 
 static void {S}_remove({S} *l, int64_t i, int line) {{
     if (i < 0 || i >= l->len) dan_index_error(i, l->len, line);
+    {T} old = l->items[i];
     memmove(&l->items[i], &l->items[i + 1], (size_t)(l->len - i - 1) * sizeof({T}));
     l->len--;
+    {RL}(old);
+    (void)old;
 }}
 
 /* новый список с теми же элементами; элементы получают ещё одно место хранения */
 static {S} *{S}_copy(const {S} *l) {{
-    {S} *r = {S}_from(l->len, l->items);
-    {поделить_элементы}
-    return r;
+    return {S}_from(l->len, l->items);
 }}
 
-static {S} *{S}_share({S} *l) {{ l->rc++; return l; }}
-static {S} *{S}_release({S} *l) {{ if (l->rc > 0) l->rc--; return l; }}
+static inline {S} *{S}_share({S} *l) {{ if (l) dan_hdr_share(&l->h); return l; }}
+static inline void {S}_release({S} *l) {{ if (l) dan_hdr_release(&l->h, {S}_destroy); }}
+static inline void {S}_give({S} *l) {{ if (l) dan_hdr_give(&l->h, {S}_destroy); }}
 
 /* место *pp собирается изменить список: если список хранится и в других
    местах, место получает собственную копию */
 static {S} *{S}_mut({S} **pp) {{
     {S} *l = *pp;
-    if (l->rc > 1) {{
+    if (l->h.rc > 1) {{
         {S} *r = {S}_copy(l);
-        r->rc = 1;
-        l->rc--;
+        r->h.rc = 1;
+        l->h.rc--;
         *pp = r;
         return r;
     }}
@@ -843,9 +996,7 @@ static {S} *{S}_reversed(const {S} *l) {{
 static {S} *{S}_slice(const {S} *l, int64_t a, int64_t b, int line) {{
     if (a < 0 || a > l->len) dan_index_error(a, l->len, line);
     if (b < a - 1 || b >= l->len) dan_index_error(b, l->len, line);
-    {S} *r = {S}_from(b - a + 1, l->items + a);
-    {поделить_элементы}
-    return r;
+    return {S}_from(b - a + 1, l->items + a);
 }}
 
 static dan_str {S}_str(const {S} *l) {{
@@ -856,7 +1007,7 @@ static dan_str {S}_str(const {S} *l) {{
         dan_buf_add(&b, {строка_элемента}(l->items[i]));
     }}
     dan_buf_add(&b, "]");
-    return b.s;
+    return dan_buf_str(&b);
 }}
 """
 
@@ -888,26 +1039,37 @@ static void dan_key_error(dan_str key, int line) {
 
 ОБЪЯВЛЕНИЯ_СЛОВАРЯ = """
 static {D} *{D}_share({D} *d);
+static void {D}_release({D} *d);
+static void {D}_give({D} *d);
 static dan_str {D}_str(const {D} *d);
 static void {D}_write(const {D} *d);
 """
 
 ШАБЛОН_СЛОВАРЯ = """
 /* ---- dictionary {описание} ---- */
-struct {D} {{ int64_t len, n, cap, rc, slots; {K} *keys; {V} *vals; uint64_t *hashes; bool *alive; int64_t *index; }};
+struct {D} {{ dan_hdr h; int64_t len, n, cap, slots; {K} *keys; {V} *vals; uint64_t *hashes; bool *alive; int64_t *index; }};
 
+static void {D}_destroy(dan_hdr *h) {{
+    {D} *d = ({D} *)(void *)h;
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {{ {RK}(d->keys[e]); {RV}(d->vals[e]); }}
+    free(d->keys); free(d->vals); free(d->hashes); free(d->alive); free(d->index);
+    free(d);
+}}
 static {D} *{D}_new(void) {{
     {D} *d = dan_alloc(sizeof *d);
-    d->len = d->n = d->cap = d->rc = d->slots = 0;
+    dan_hdr_new(&d->h, {D}_destroy);
+    d->len = d->n = d->cap = d->slots = 0;
     d->keys = NULL; d->vals = NULL; d->hashes = NULL; d->alive = NULL; d->index = NULL;
     return d;
 }}
-static {D} *{D}_share({D} *d) {{ d->rc++; return d; }}
-static {D} *{D}_release({D} *d) {{ if (d->rc > 0) d->rc--; return d; }}
+static {D} *{D}_share({D} *d) {{ if (d) dan_hdr_share(&d->h); return d; }}
+static void {D}_release({D} *d) {{ if (d) dan_hdr_release(&d->h, {D}_destroy); }}
+static void {D}_give({D} *d) {{ if (d) dan_hdr_give(&d->h, {D}_destroy); }}
 
 static void {D}_reindex({D} *d) {{
     int64_t s = 8;
     while (s < 2 * d->cap) s *= 2;
+    free(d->index);
     d->index = dan_alloc(sizeof(int64_t) * (size_t)s);
     for (int64_t i = 0; i < s; i++) d->index[i] = -1;
     d->slots = s;
@@ -936,16 +1098,17 @@ static void {D}_grow({D} *d) {{   /* убирает удалённые запи�
         if (!d->alive[e]) continue;
         keys[m] = d->keys[e]; vals[m] = d->vals[e]; hashes[m] = d->hashes[e]; alive[m] = true; m++;
     }}
+    free(d->keys); free(d->vals); free(d->hashes); free(d->alive);
     d->keys = keys; d->vals = vals; d->hashes = hashes; d->alive = alive; d->n = m; d->cap = cap;
     {D}_reindex(d);
 }}
 static void {D}_put({D} *d, {K} k, {V} v) {{
     uint64_t h = {HASH};
     int64_t e = {D}_lookup(d, k, h);
-    if (e >= 0) {{ d->vals[e] = v; return; }}
+    if (e >= 0) {{ {V} old = d->vals[e]; d->vals[e] = {SV}(v); {RV}(old); (void)old; return; }}
     if (d->n == d->cap) {D}_grow(d);
     e = d->n++;
-    d->keys[e] = k; d->vals[e] = v; d->hashes[e] = h; d->alive[e] = true; d->len++;
+    d->keys[e] = {SK}(k); d->vals[e] = {SV}(v); d->hashes[e] = h; d->alive[e] = true; d->len++;
     int64_t p = (int64_t)(h & (uint64_t)(d->slots - 1));
     while (d->index[p] >= 0) p = (p + 1) & (d->slots - 1);
     d->index[p] = e;
@@ -972,7 +1135,7 @@ static bool {D}_contains(const {D} *d, {K} k) {{ return {D}_lookup(d, k, {HASH})
 }}
 static void {D}_remove({D} *d, {K} k) {{
     int64_t e = {D}_lookup(d, k, {HASH});
-    if (e >= 0) {{ d->alive[e] = false; d->len--; }}
+    if (e >= 0) {{ d->alive[e] = false; d->len--; {RK}(d->keys[e]); {RV}(d->vals[e]); }}
 }}
 static {LK} *{D}_keys(const {D} *d) {{
     {LK} *r = {LK}_from(0, NULL);
@@ -981,17 +1144,17 @@ static {LK} *{D}_keys(const {D} *d) {{
 }}
 static {LV} *{D}_values(const {D} *d) {{
     {LV} *r = {LV}_from(0, NULL);
-    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {LV}_push(r, {ПОДЕЛИТЬ}(d->vals[e]));
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {LV}_push(r, d->vals[e]);
     return r;
 }}
 static {D} *{D}_copy(const {D} *d) {{
     {D} *r = {D}_new();
-    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {D}_put(r, d->keys[e], {ПОДЕЛИТЬ}(d->vals[e]));
+    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {D}_put(r, d->keys[e], d->vals[e]);
     return r;
 }}
 static {D} *{D}_mut({D} **pp) {{
     {D} *d = *pp;
-    if (d->rc > 1) {{ {D} *r = {D}_copy(d); r->rc = 1; d->rc--; *pp = r; return r; }}
+    if (d->h.rc > 1) {{ {D} *r = {D}_copy(d); r->h.rc = 1; d->h.rc--; *pp = r; return r; }}
     return d;
 }}
 static dan_str {D}_str(const {D} *d) {{
@@ -1007,7 +1170,7 @@ static dan_str {D}_str(const {D} *d) {{
         dan_buf_add(&b, {СТРОКА_З}(d->vals[e]));
     }}
     dan_buf_add(&b, "}}");
-    return b.s;
+    return dan_buf_str(&b);
 }}
 static void {D}_write(const {D} *d) {{ fputs({D}_str(d), stdout); }}
 """
@@ -1093,7 +1256,7 @@ static dan_str dl_Ls_join(const dl_Ls *l, dan_str sep) {
         if (i) dan_buf_add(&b, sep);
         dan_buf_add(&b, l->items[i]);
     }
-    return b.s;
+    return dan_buf_str(&b);
 }
 """
 
@@ -1174,6 +1337,10 @@ class Генератор:
         self.перечисления = {}     # перечисление -> [(вариант, [(поле, тип)])]
         self.перечисления_c = {}   # перечисление, используемое в программе -> имя типа C
         self.написания = {}
+        self.литералы = {}         # текст строковой постоянной -> имя в C
+        self.области = []          # места хранения (переменные), которые нужно освободить при выходе
+        self.метка_функции = None  # отметка таблицы временных значений в начале функции
+        self.метки_циклов = []     # отметки в начале шага каждого вложенного цикла
 
     def код_типа(self, тип):
         """Короткий код типа для имён в C: [цел] -> Li, стр? -> Os, [Сотрудник] -> LTSotrudnik."""
@@ -1276,8 +1443,6 @@ class Генератор:
         for (из_типа, в_тип), имя in self.расширения.items():
             S_из, S_в = self.структура(из_типа), self.структура(в_тип)
             эл = self.привести("l->items[i]", элемент(из_типа), элемент(в_тип), "line")
-            if это_список(элемент(в_тип)):
-                эл = f"{self.структура(элемент(в_тип))}_share({эл})"
             строки.append(f"static {S_в} *{имя}(const {S_из} *l, int line) {{\n"
                           f"    (void)line;\n    {S_в} *r = {S_в}_from(0, NULL);\n"
                           f"    for (int64_t i = 0; i < l->len; i++) {S_в}_push(r, {эл});\n"
@@ -1296,46 +1461,58 @@ class Генератор:
             self.тип_c(з)
         return self.словари[тип]
 
-    def содержит_списки(self, тип, в_работе=None):
-        """Хранит ли значение типа списки, за местами хранения которых нужно следить.
-        Необязательное значение рекурсивного типа неизменяемо и не считается."""
+    def куча(self, тип, в_работе=None):
+        """Хранит ли значение типа ссылки на значения в памяти, у которых
+        учитываются места хранения (строки, списки, словари, ячейки и т.п.)."""
         в_работе = в_работе if в_работе is not None else set()
-        if это_список(тип) or это_словарь(тип):
+        if тип in (СТР, БАЙТЫ) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
+                or тип in self.перечисления or это_результат(тип) or self.по_ссылке(тип):
             return True
-        if self.по_ссылке(тип) or это_функция(тип) or тип in self.перечисления:
-            return False
-        if это_результат(тип):
-            return основа(тип) != ПУСТО and self.содержит_списки(основа(тип), в_работе)
         if это_необяз(тип):
-            return self.содержит_списки(основа(тип), в_работе)
-        if тип in self.собственные and тип not in в_работе:
+            return self.куча(основа(тип), в_работе)
+        if тип in self.собственные:
+            if тип in в_работе:
+                return False
             в_работе.add(тип)
-            return any(self.содержит_списки(т, в_работе) for _, т, _ in self.собственные[тип])
+            return any(self.куча(т, в_работе) for _, т, _ in self.собственные[тип])
         return False
 
-    def поделить(self, тип):
-        """Функция C, которая отмечает новое место хранения значения (или None)."""
-        if not self.содержит_списки(тип):
-            return None
-        if это_список(тип):
-            return self.структура(тип) + "_share"
-        if это_словарь(тип):
-            return self.словарь_c(тип) + "_share"
-        return self.значимый(тип) + "_share"
+    # прежнее название проверки
+    содержит_списки = куча
 
-    @staticmethod
-    def владеющее(узел):
-        """Значение только что создано (вызовом функции, конструктором): места
-        хранения вложенных в него списков уже учтены, копировать учёт не нужно."""
-        return isinstance(узел, (у.Вызов, у.Ничего, у.Список))
+    def _учёт(self, тип, действие):
+        if not self.куча(тип):
+            return None
+        if тип == СТР:
+            return "dan_str_" + действие
+        if тип == БАЙТЫ:
+            return "dan_bytes_" + действие
+        if это_список(тип):
+            return self.структура(тип) + "_" + действие
+        if это_словарь(тип):
+            return self.словарь_c(тип) + "_" + действие
+        if тип in self.перечисления:
+            return self.перечисление_c(тип) + "_" + действие
+        return self.значимый(тип) + "_" + действие
+
+    def удержать(self, тип):
+        """Функция C: значение получает ещё одно место хранения (или None)."""
+        return self._учёт(тип, "share")
+
+    def отпустить(self, тип):
+        """Функция C: значение теряет место хранения и освобождается, если мест не осталось."""
+        return self._учёт(тип, "release")
+
+    def отдать(self, тип):
+        """Функция C: место передаёт значение дальше (например, вызывающей функции)."""
+        return self._учёт(тип, "give")
+
+    поделить = удержать
 
     def сохранить(self, узел, код, тип):
-        """Код значения, которое кладётся в новое место хранения (переменную,
-        поле, элемент списка)."""
-        функция = self.поделить(тип)
-        if функция is None or (not (это_список(тип) or это_словарь(тип)) and self.владеющее(узел)):
-            return код
-        return f"{функция}({код})"
+        """Код значения, которое кладётся в переменную: значение получает место хранения."""
+        функция = self.удержать(тип)
+        return f"{функция}({код})" if функция else код
 
     def равенство(self, тип):
         """Выражение C «a равно b» для значений типа или None, если сравнивать нельзя."""
@@ -1516,8 +1693,12 @@ class Генератор:
         self.пиши("int main(void) {")
         self.отступ += 1
         self.пиши("dan_start();")
+        self.метка_функции, self.области, self.метки_циклов = "dan_main_mark", [[]], []
+        self.текущий_результат = None
+        self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
         for и in прочие:
             self.инструкция(и)
+        self._выход_из_функции()
         self.пиши("return 0;")
         self.отступ -= 1
         self.пиши("}")
@@ -1527,7 +1708,7 @@ class Генератор:
         шапка = [
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
-            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>",
+            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
             "#ifndef _WIN32", "#include <dirent.h>", "#include <sys/resource.h>", "#endif",
             "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
@@ -1551,14 +1732,11 @@ class Генератор:
                     части.append(f"static bool {имя}_eq(const {имя} *x, const {имя} *y);")
         for тип, имя in self.списки.items():
             тип_эл = элемент(тип)
-            поделить = self.поделить(тип_эл)
-            поделить_элементы = (f"for (int64_t i = 0; i < r->len; i++) r->items[i] = {поделить}(r->items[i]);"
-                                 if поделить else "")
             части.append(ШАБЛОН_СПИСКА.format(
                 описание=тип, S=имя, T=self.тип_c(тип_эл),
                 запись_элемента=self.запись(тип_эл, в_списке=True),
                 строка_элемента=self.строка_элемента(тип_эл),
-                поделить_элементы=поделить_элементы))
+                SH=self.удержать(тип_эл) or "DAN_ID", RL=self.отпустить(тип_эл) or "DAN_NOREL"))
             равенство = self.равенство(тип_эл)
             if равенство:
                 части.append(ШАБЛОН_ПОИСКА.format(S=имя, T=self.тип_c(тип_эл), EQ=равенство))
@@ -1569,7 +1747,6 @@ class Генератор:
         for тип, имя in self.словари.items():
             к, з = ключ_словаря(тип), значение_словаря(тип)
             необяз = з if это_необяз(з) else з + "?"
-            поделить = self.поделить(з)
             найти = "" if это_функция(з) else ШАБЛОН_ПОИСКА_В_СЛОВАРЕ.format(
                 D=имя, K=self.тип_c(к), HASH=ХЕШИ[к], O=self.тип_c(необяз),
                 O_SOME=(self.тип_c(необяз) + "_some") if not это_необяз(з) else "")
@@ -1578,7 +1755,8 @@ class Генератор:
                 EQ_K=self.равенство(к), HASH=ХЕШИ[к], СТРОКА_К=self.строка_элемента(к),
                 СТРОКА_З=self.строка_элемента(з), НАЙТИ=найти,
                 LK=self.структура("[" + к + "]"), LV=self.структура("[" + з + "]"),
-                ПОДЕЛИТЬ=поделить or ""))
+                SK=self.удержать(к) or "DAN_ID", RK=self.отпустить(к) or "DAN_NOREL",
+                SV=self.удержать(з) or "DAN_ID", RV=self.отпустить(з) or "DAN_NOREL"))
             if self.сравнимый(тип):
                 части.append(ШАБЛОН_РАВЕНСТВА_СЛОВАРЯ.format(D=имя, V=self.тип_c(з), EQ_V=self.равенство(з)))
         части.append(self._функции_типов())
@@ -1594,6 +1772,8 @@ class Генератор:
             части.append(matematika.КОД_МНОГОЧЛЕНОВ)
             части.append(vysshaya.КОД_C)
         части.append("\n".join(self.строки))
+        постоянные = [f"DAN_STATIC_STR({имя}, {строка_c(текст)});" for текст, имя in self.литералы.items()]
+        части.insert(2, "\n".join(["/* ---- string constants ---- */"] + постоянные) + "\n")
         return "\n".join(части) + "\n"
 
     # ---------- собственные и необязательные типы ----------
@@ -1669,8 +1849,11 @@ class Генератор:
                 передать = "".join(f", a{и}" for и in range(len(параметры)))
                 возврат = "" if р == "void" else "return "
                 строки.append(f"static inline {р} {имя}_call({имя} v{аргументы}) {{ {возврат}v.f(v.env{передать}); }}")
-                строки.append(f"static inline dan_str {имя}_str({имя} v) {{ (void)v; return {строка_c('<функция>')}; }}")
+                строки.append(f"static inline dan_str {имя}_str({имя} v) {{ (void)v; return {self.литерал('<функция>')}; }}")
                 строки.append(f"static inline void {имя}_write({имя} v) {{ fputs({имя}_str(v), stdout); }}")
+                строки.append(f"static inline {имя} {имя}_share({имя} v) {{ dan_env_share(v.env); return v; }}")
+                строки.append(f"static inline void {имя}_release({имя} v) {{ dan_env_release(v.env); }}")
+                строки.append(f"static inline void {имя}_give({имя} v) {{ dan_env_give(v.env); }}")
                 return
             if это_необяз(тип) or это_результат(тип):
                 зависимости = [основа(тип)]
@@ -1698,13 +1881,14 @@ class Генератор:
                     содержимое = " ".join(f"{self.тип_c(т)} {self.поле_c((тип, вариант), п)};" for п, т in поля)
                     варианты.append(f"struct {{ {содержимое} }} v{номер};")
             объединение = f" union {{ {' '.join(варианты)} }} u;" if варианты else ""
-            строки.append(f"struct {имя}_s {{ int tag;{объединение} }};")
+            строки.append(f"struct {имя}_s {{ dan_hdr h; int tag;{объединение} }};")
             for номер, (вариант, поля) in enumerate(self.перечисления[тип]):
                 параметры = ", ".join(f"{self.тип_c(т)} a{и}" for и, (_, т) in enumerate(поля)) or "void"
-                присвоить = " ".join(f"c->u.v{номер}.{self.поле_c((тип, вариант), п)} = a{и};"
-                                     for и, (п, _) in enumerate(поля))
-                строки.append(f"static {имя} {имя}_mk{номер}({параметры}) {{ {имя}_s *c = dan_alloc(sizeof *c); "
-                              f"c->tag = {номер}; {присвоить} return c; }}")
+                строки.append(f"static {имя} {имя}_mk{номер}({параметры});")
+            строки.append(f"static void {имя}_destroy(dan_hdr *h);")
+            строки.append(f"static inline {имя} {имя}_share({имя} v) {{ if (v) dan_hdr_share((dan_hdr *)&v->h); return v; }}")
+            строки.append(f"static inline void {имя}_release({имя} v) {{ if (v) dan_hdr_release((dan_hdr *)&v->h, {имя}_destroy); }}")
+            строки.append(f"static inline void {имя}_give({имя} v) {{ if (v) dan_hdr_give((dan_hdr *)&v->h, {имя}_destroy); }}")
             строки.append(f"static dan_str {имя}_str({имя} v);")
             строки.append(f"static void {имя}_write({имя} v);")
             if self.сравнимый(тип):
@@ -1727,17 +1911,20 @@ class Генератор:
                     ]
                 строки.append(f"static inline {имя} {имя}_err(dan_str e, int line) {{ {имя} r; memset(&r, 0, sizeof r); "
                               f"r.ok = false; r.err = e; r.line = line; return r; }}")
-                if self.поделить(тип):
-                    строки.append(f"static {имя} {имя}_share({имя} v);")
+                строки += [f"static {имя} {имя}_share({имя} v);", f"static void {имя}_release({имя} v);",
+                           f"static void {имя}_give({имя} v);"]
                 continue
             if это_необяз(тип):
                 т_c = self.тип_c(основа(тип))
                 if self.по_ссылке(тип):
                     строки += [
+                        f"typedef struct {{ dan_hdr h; {т_c} v; }} {имя}_cell;",
                         f"static inline bool {имя}_has({имя} o) {{ return o != NULL; }}",
                         f"static inline {т_c} {имя}_val({имя} o) {{ return *o; }}",
                         f"static inline {имя} {имя}_none(void) {{ return NULL; }}",
-                        f"static {имя} {имя}_some({т_c} v) {{ {т_c} *p = dan_alloc(sizeof *p); *p = v; return p; }}",
+                        f"static inline dan_hdr *{имя}_hdr({имя} o) {{ return (dan_hdr *)(void *)((char *)(void *)o - offsetof({имя}_cell, v)); }}",
+                        f"static void {имя}_destroy(dan_hdr *h);",
+                        f"static {имя} {имя}_some({т_c} v);",
                     ]
                 else:
                     строки += [
@@ -1755,8 +1942,9 @@ class Генератор:
                 строки.append(f"static void {имя}_qwrite({имя} v);")
             if self.сравнимый(тип):
                 строки.append(f"static bool {имя}_eq({имя} a, {имя} b);")
-            if self.поделить(тип):
-                строки.append(f"static {имя} {имя}_share({имя} v);")
+            if self.куча(тип):
+                строки += [f"static {имя} {имя}_share({имя} v);", f"static void {имя}_release({имя} v);",
+                           f"static void {имя}_give({имя} v);"]
         return "\n".join(строки) + "\n"
 
     def _рекурсивные_типы(self):
@@ -1785,6 +1973,26 @@ class Генератор:
     def _функции_перечислений(self):
         строки = []
         for тип, имя in self.перечисления_c.items():
+            # Ячейка варианта учитывает свои поля: при создании они получают
+            # место хранения, при освобождении ячейки - теряют его.
+            for номер, (вариант, поля) in enumerate(self.перечисления[тип]):
+                параметры = ", ".join(f"{self.тип_c(т)} a{и}" for и, (_, т) in enumerate(поля)) or "void"
+                присвоить = " ".join(f"c->u.v{номер}.{self.поле_c((тип, вариант), п)} = "
+                                     f"{self._учесть(т, f'a{и}')};" for и, (п, т) in enumerate(поля))
+                строки.append(f"static {имя} {имя}_mk{номер}({параметры}) {{ {имя}_s *c = dan_alloc(sizeof *c); "
+                              f"dan_hdr_new(&c->h, {имя}_destroy); c->tag = {номер}; {присвоить} return c; }}")
+            строки.append(f"static void {имя}_destroy(dan_hdr *h) {{")
+            строки.append(f"    {имя}_s *c = ({имя}_s *)(void *)h;")
+            строки.append("    switch (c->tag) {")
+            for номер, (вариант, поля) in enumerate(self.перечисления[тип]):
+                освободить = " ".join(f"{self.отпустить(т)}(c->u.v{номер}.{self.поле_c((тип, вариант), п)});"
+                                      for п, т in поля if self.отпустить(т))
+                if освободить:
+                    строки.append(f"    case {номер}: {освободить} break;")
+            строки.append("    default: break;")
+            строки.append("    }")
+            строки.append("    free(c);")
+            строки.append("}")
             строки.append(f"static dan_str {имя}_str({имя} v) {{")
             строки.append("    DAN_STACK_CHECK(0);")
             строки.append("    dan_buf b = { NULL, 0, 0 };")
@@ -1804,7 +2012,7 @@ class Генератор:
                     строки.append('        dan_buf_add(&b, ")");')
                 строки.append("        break;")
             строки.append("    }")
-            строки.append("    return b.s;")
+            строки.append("    return dan_buf_str(&b);")
             строки.append("}")
             строки.append(f"static void {имя}_write({имя} v) {{ fputs({имя}_str(v), stdout); }}")
             if self.сравнимый(тип):
@@ -1826,20 +2034,28 @@ class Генератор:
         строки = []
         рекурсивные = self._рекурсивные_типы()
         ничего = строка_c("ничего")
+        ничего_значение = self.литерал("ничего")
         for тип, имя in self.значимые.items():
             if это_функция(тип):
                 continue
             if это_результат(тип):
-                if self.поделить(тип):
-                    строки.append(f"static {имя} {имя}_share({имя} v) {{ if (v.ok) v.value = "
-                                  f"{self.поделить(основа(тип))}(v.value); return v; }}")
+                т = основа(тип)
+                for действие in ("share", "release", "give"):
+                    ф = self._учёт(т, действие) if т != ПУСТО else None
+                    знач = (f"v.value = {ф}(v.value);" if действие == "share" else f"{ф}(v.value);") if ф else ""
+                    ошибка = (f"v.err = dan_str_share(v.err);" if действие == "share"
+                              else f"dan_str_{действие}(v.err);")
+                    возврат = f"{имя}" if действие == "share" else "void"
+                    конец = " return v;" if действие == "share" else ""
+                    строки.append(f"static {возврат} {имя}_{действие}({имя} v) {{ if (v.ok) {{ {знач} }} "
+                                  f"else {{ {ошибка} }}{конец} }}")
                 continue
             строки.append(f"/* ---- {тип} ---- */")
             if это_необяз(тип):
                 т = основа(тип)
                 знач = f"{имя}_val(v)"
-                строки.append(f"static dan_str {имя}_str({имя} v) {{ return {имя}_has(v) ? {self.в_строку(т, знач)} : {ничего}; }}")
-                строки.append(f"static dan_str {имя}_qstr({имя} v) {{ return {имя}_has(v) ? {self.строка_элемента(т)}({знач}) : {ничего}; }}")
+                строки.append(f"static dan_str {имя}_str({имя} v) {{ return {имя}_has(v) ? {self.в_строку(т, знач)} : {ничего_значение}; }}")
+                строки.append(f"static dan_str {имя}_qstr({имя} v) {{ return {имя}_has(v) ? {self.строка_элемента(т)}({знач}) : {ничего_значение}; }}")
                 строки.append(f"static void {имя}_qwrite({имя} v) {{ fputs({имя}_qstr(v), stdout); }}")
                 if self.сравнимый(тип):
                     равно = self._подставить(self.равенство(т), f"{имя}_val(a)", f"{имя}_val(b)")
@@ -1869,7 +2085,7 @@ class Генератор:
                 строки.append('    dan_buf_add(b, ")");')
                 строки.append("}")
                 строки.append(f"static dan_str {имя}_str({имя} v) {{ dan_buf b = {{ NULL, 0, 0 }}; "
-                              f"{имя}_strb(v, &b); return b.s; }}")
+                              f"{имя}_strb(v, &b); return dan_buf_str(&b); }}")
                 if self.сравнимый(тип):
                     части = []
                     for поле, т, _ in поля:
@@ -1877,16 +2093,52 @@ class Генератор:
                         части.append(self._подставить(self.равенство(т), f"a.{ф}", f"b.{ф}"))
                     строки.append(f"static bool {имя}_eq({имя} a, {имя} b) {{ {проверка}return {' && '.join(части)}; }}")
             строки.append(f"static void {имя}_write({имя} v) {{ fputs({имя}_str(v), stdout); }}")
-            if self.поделить(тип):
-                if это_необяз(тип):
-                    строки.append(f"static {имя} {имя}_share({имя} v) {{ if (v.has) v.value = "
-                                  f"{self.поделить(основа(тип))}(v.value); return v; }}")
-                else:
-                    поля = [(self.поле_c(тип, п), self.поделить(т)) for п, т, _ in self.собственные[тип]]
+            if not self.куча(тип):
+                continue
+            if self.по_ссылке(тип):
+                # необязательное значение рекурсивного типа: неизменяемая ячейка
+                т = основа(тип)
+                т_c = self.тип_c(т)
+                освободить = f"{self.отпустить(т)}(c->v);" if self.отпустить(т) else ""
+                строки += [
+                    f"static void {имя}_destroy(dan_hdr *h) {{ {имя}_cell *c = ({имя}_cell *)(void *)h; {освободить} free(c); }}",
+                    f"static {имя} {имя}_some({т_c} v) {{ {имя}_cell *c = dan_alloc(sizeof *c); "
+                    f"dan_hdr_new(&c->h, {имя}_destroy); c->v = {self._учесть(т, 'v')}; return &c->v; }}",
+                    f"static {имя} {имя}_share({имя} v) {{ if (v) dan_hdr_share({имя}_hdr(v)); return v; }}",
+                    f"static void {имя}_release({имя} v) {{ if (v) dan_hdr_release({имя}_hdr(v), {имя}_destroy); }}",
+                    f"static void {имя}_give({имя} v) {{ if (v) dan_hdr_give({имя}_hdr(v), {имя}_destroy); }}",
+                ]
+                continue
+            if это_необяз(тип):
+                т = основа(тип)
+                for действие in ("share", "release", "give"):
+                    ф = self._учёт(т, действие)
+                    if действие == "share":
+                        строки.append(f"static {имя} {имя}_share({имя} v) {{ if (v.has) v.value = {ф}(v.value); return v; }}")
+                    else:
+                        строки.append(f"static void {имя}_{действие}({имя} v) {{ if (v.has) {ф}(v.value); }}")
+                continue
+            проверка = "DAN_STACK_CHECK(0); " if тип in рекурсивные else ""
+            for действие in ("share", "release", "give"):
+                поля = [(self.поле_c(тип, п), self._учёт(т, действие)) for п, т, _ in self.собственные[тип]]
+                if действие == "share":
                     тело = " ".join(f"v.{ф} = {д}(v.{ф});" for ф, д in поля if д)
-                    проверка = "DAN_STACK_CHECK(0); " if тип in рекурсивные else ""
                     строки.append(f"static {имя} {имя}_share({имя} v) {{ {проверка}{тело} return v; }}")
+                else:
+                    тело = " ".join(f"{д}(v.{ф});" for ф, д in поля if д)
+                    строки.append(f"static void {имя}_{действие}({имя} v) {{ {проверка}{тело} }}")
         return "\n".join(строки) + "\n"
+
+    def _учесть(self, тип, код):
+        """Код значения, которое получает место хранения (удержанное значение)."""
+        ф = self.удержать(тип)
+        return f"{ф}({код})" if ф else код
+
+    def литерал(self, текст):
+        """Строковая постоянная программы: строка с заголовком, которая не освобождается."""
+        if текст not in self.литералы:
+            self.литералы[текст] = f"dan_lit_{len(self.литералы) + 1}"
+        return f"{self.литералы[текст]}.s"
 
     @staticmethod
     def _подставить(шаблон, а, б):
@@ -1911,8 +2163,15 @@ class Генератор:
         if ф.имя in self.рекурсивные:
             self.пиши(f"DAN_STACK_CHECK({ф.строка});")
         self.текущий_результат = ф.тип_результата
+        self.метка_функции, self.области, self.метки_циклов = "dan_fmark", [[]], []
+        if self._куча_в(ф.тело, глубоко=True) or self._куча_тип(ф.тип_результата or ПУСТО):
+            self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
+        else:
+            self.метка_функции = None      # функция не создаёт значений в памяти
         for и in ф.тело.инструкции:
             self.инструкция(и)
+        if ф.тип_результата in (None, ПУСТО, ПУСТО + "!") and not self._завершает(ф.тело):
+            self._выход_из_функции()
         if ф.тип_результата == ПУСТО + "!":
             self.пиши(f"return {self.тип_c(ф.тип_результата)}_some();")
         self.текущий_результат = None
@@ -1923,33 +2182,131 @@ class Генератор:
 
     def блок(self, блок):
         self.отступ += 1
+        self.области.append([])
         for и in блок.инструкции:
             self.инструкция(и)
+        область = self.области.pop()
+        if not self._завершает(блок):
+            self._освободить(область)
         self.отступ -= 1
 
+    @staticmethod
+    def _завершает(блок):
+        """Кончается ли блок переходом (вернуть, прервать, продолжить)."""
+        return bool(блок.инструкции) and isinstance(блок.инструкции[-1], (у.Вернуть, у.Прервать, у.Продолжить))
+
+    # ---------- память: места хранения и временные значения ----------
+
+    def _освободить(self, область):
+        for имя_c, тип in reversed(область):
+            self.пиши(f"{self.отпустить(тип)}({имя_c});")
+
+    def _код_освобождения(self, от=0):
+        """Код C, освобождающий переменные областей начиная с номера «от»."""
+        return " ".join(f"{self.отпустить(тип)}({имя_c});"
+                        for область in reversed(self.области[от:]) for имя_c, тип in reversed(область))
+
+    def _выход_из_функции(self):
+        код = self._код_освобождения()
+        if код:
+            self.пиши(код)
+        if self.метка_функции:
+            self.пиши(f"dan_sweep({self.метка_функции});")
+
+    def _код_возврата(self, код, тип):
+        """Код C возврата значения: значение переживает освобождение переменных функции."""
+        уборка = f"dan_sweep({self.метка_функции});" if self.метка_функции else ""
+        освободить = self._код_освобождения()
+        if тип in (None, ПУСТО):
+            return f"{освободить} {уборка} return;".strip()
+        if not освободить and not уборка:
+            return f"return {код};"
+        результат = self.служебное_имя("ret")
+        удержать, отдать = self.удержать(тип), self.отдать(тип)
+        if not удержать:
+            return (f"{{ {self.тип_c(тип)} const {результат} = {код}; {освободить} "
+                    f"{уборка} return {результат}; }}")
+        return (f"{{ {self.тип_c(тип)} const {результат} = {удержать}({код}); {освободить} "
+                f"{уборка} {отдать}({результат}); return {результат}; }}")
+
+    def _куча_в(self, узел, глубоко=False):
+        """Есть ли в выражении значения, которые могут оказаться временными в памяти;
+        «глубоко» - и во вложенных блоках инструкций."""
+        if isinstance(узел, list):
+            return any(self._куча_в(э, глубоко) for э in узел)
+        if not isinstance(узел, у.Узел):
+            return False
+        for признак in ("тип_выр", "привести_к", "в_необяз", "в_результат"):
+            т = getattr(узел, признак, None)
+            if isinstance(т, str) and т not in (ОШИБКА, НИЧЕГО, "функция", ДИАПАЗОН, ПУСТО) \
+                    and self._куча_тип(т):
+                return True
+        if isinstance(узел, у.Лямбда):
+            return True
+        return any(self._куча_в(getattr(узел, п.name), глубоко) for п in fields(узел)
+                   if (глубоко or п.name not in ("тело",)) and isinstance(getattr(узел, п.name), (у.Узел, list)))
+
+    def _куча_тип(self, тип):
+        try:
+            return self.куча(тип)
+        except (KeyError, ValueError, IndexError):
+            return True
+
+    def _выражения(self, и):
+        """Выражения, которые вычисляет сама инструкция (без вложенных блоков)."""
+        if isinstance(и, у.ОбъявлениеПеременной) or isinstance(и, у.Присваивание):
+            return [и.значение]
+        if isinstance(и, у.ПрисваиваниеЭлемента):
+            return [и.объект, и.индекс, и.значение]
+        if isinstance(и, у.ПрисваиваниеПоля):
+            return [и.объект, и.значение]
+        if isinstance(и, у.Выражение):
+            return [и.выражение]
+        if isinstance(и, у.Если):
+            итог = [и.условие]
+            while isinstance(и.иначе, у.Если):
+                и = и.иначе
+                итог.append(и.условие)
+            return итог
+        if isinstance(и, (у.ЕслиЕсть, у.ЕслиОшибка, у.Выбор)):
+            return [и.значение]
+        if isinstance(и, у.Для):
+            return [и.источник]
+        return []
+
     def инструкция(self, и):
+        метка = None
+        if self._куча_в(self._выражения(и)):
+            метка = self.служебное_имя("m")
+            self.пиши(f"const size_t {метка} = dan_mark();")
         getattr(self, "и_" + type(и).__name__)(и)
+        if метка:
+            self.пиши(f"dan_sweep({метка});")
 
     def и_ОбъявлениеПеременной(self, и):
         модификатор = "" if и.изменяемая else " const"
         значение = self.сохранить(и.значение, self.выр(и.значение), и.тип_итог)
         self.пиши(f"{self.тип_c(и.тип_итог)}{модификатор} {self.имя(и.имя)} = {значение};")
+        if self.куча(и.тип_итог):
+            self.области[-1].append((self.имя(и.имя), и.тип_итог))
+
+    def _заменить(self, место, значение, тип):
+        """Новое значение в месте хранения: сначала оно получает место, затем прежнее его теряет."""
+        if not self.куча(тип):
+            self.пиши(f"{место} = {значение};")
+            return
+        прежнее = self.служебное_имя("old")
+        self.пиши(f"{{ {self.тип_c(тип)} {прежнее} = {место}; {место} = {self.удержать(тип)}({значение}); "
+                  f"{self.отпустить(тип)}({прежнее}); }}")
 
     def и_Присваивание(self, и):
         цель = self.имя(и.имя)
         значение = self.выр(и.значение)
         if и.оператор == "=":
-            значение = self.сохранить(и.значение, значение, и.тип_цели)
-            if это_список(и.тип_цели):
-                # прежний список больше не хранится в этой переменной
-                прежний = self.служебное_имя("old")
-                self.пиши(f"{{ {self.тип_c(и.тип_цели)} {прежний} = {цель}; {цель} = {значение}; "
-                          f"{self.структура(и.тип_цели)}_release({прежний}); }}")
-            else:
-                self.пиши(f"{цель} = {значение};")
+            self._заменить(цель, значение, и.тип_цели)
             return
         результат = self._арифметика(и.оператор[0], цель, значение, и.тип_результата, и.строка)
-        self.пиши(f"{цель} = {результат};")
+        self._заменить(цель, результат, и.тип_цели)
 
     def и_ПрисваиваниеЭлемента(self, и):
         if getattr(и, "словарь", False):
@@ -1963,7 +2320,7 @@ class Генератор:
         self.отступ += 1
         self.пиши(f"{структура}* const {объект} = {структура}_mut(&{self.место(и.объект)});")
         self.пиши(f"const int64_t {индекс} = {self.выр(и.индекс)};")
-        значение = self.сохранить(и.значение, self.выр(и.значение), и.тип_элемента)
+        значение = self.выр(и.значение)
         if и.оператор != "=":
             текущее = f"{структура}_get({объект}, {индекс}, {и.строка})"
             значение = self._арифметика(и.оператор[0], текущее, значение, и.тип_результата, и.строка)
@@ -1980,14 +2337,14 @@ class Генератор:
         self.отступ += 1
         self.пиши(f"{D}* const {словарь} = {D}_mut(&{self.место(и.объект)});")
         self.пиши(f"const {self.тип_c(ключ_словаря(тип))} {ключ} = {self.выр(и.индекс)};")
-        значение = self.сохранить(и.значение, self.выр(и.значение), и.тип_элемента)
+        значение = self.выр(и.значение)
         if и.оператор == "=":
             self.пиши(f"{D}_put({словарь}, {ключ}, {значение});")
         else:
             место = self.служебное_имя("p")
             self.пиши(f"{self.тип_c(и.тип_элемента)} *const {место} = {D}_at({словарь}, {ключ}, {и.строка});")
             результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка)
-            self.пиши(f"*{место} = {результат};")
+            self._заменить(f"*{место}", результат, и.тип_элемента)
         self.отступ -= 1
         self.пиши("}")
 
@@ -2060,15 +2417,14 @@ class Генератор:
         self.отступ += 1
         # Сначала вычисляется новое значение, затем находится поле: вычисление
         # значения может, например, добавить элементы в список с этим полем.
-        self.пиши(f"__auto_type const {значение} = "
-                  f"{self.сохранить(и.значение, self.выр(и.значение), и.тип_поля)};")
+        self.пиши(f"__auto_type const {значение} = {self.выр(и.значение)};")
         поле = у.Поле(и.объект, и.имя, строка=и.строка, столбец=и.столбец)
         self.пиши(f"{self.тип_c(и.тип_поля)} *const {место} = &{self.место(поле)};")
         if и.оператор == "=":
-            self.пиши(f"*{место} = {значение};")
+            self._заменить(f"*{место}", значение, и.тип_поля)
         else:
             результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка)
-            self.пиши(f"*{место} = {результат};")
+            self._заменить(f"*{место}", результат, и.тип_поля)
         self.отступ -= 1
         self.пиши("}")
 
@@ -2144,9 +2500,38 @@ class Генератор:
         self.пиши("}")
 
     def и_Пока(self, и):
-        self.пиши(f"while ({self.выр(и.условие)}) {{")
-        self.блок(и.тело)
+        if self._куча_в(и.условие):
+            # значения, созданные при проверке условия, освобождаются на каждом шаге
+            self.пиши("for (;;) {")
+            метка, условие = self.служебное_имя("mc"), self.служебное_имя("c")
+            self.пиши(f"    const size_t {метка} = dan_mark();")
+            self.пиши(f"    const bool {условие} = {self.выр(и.условие)};")
+            self.пиши(f"    dan_sweep({метка});")
+            self.пиши(f"    if (!{условие}) break;")
+        else:
+            self.пиши(f"while ({self.выр(и.условие)}) {{")
+        self._тело_цикла(и.тело)
         self.пиши("}")
+
+    def _тело_цикла(self, тело):
+        метка = None
+        if self._есть_выход_из_шага(тело.инструкции):
+            метка = self.служебное_имя("ml")
+            self.пиши(f"    const size_t {метка} = dan_mark();")
+        self.метки_циклов.append((метка, len(self.области)))
+        self.блок(тело)
+        self.метки_циклов.pop()
+
+    def _есть_выход_из_шага(self, узел):
+        """Есть ли в теле цикла «прервать» или «продолжить» (не во вложенных циклах)."""
+        if isinstance(узел, list):
+            return any(self._есть_выход_из_шага(э) for э in узел)
+        if isinstance(узел, (у.Прервать, у.Продолжить)):
+            return True
+        if not isinstance(узел, у.Узел) or isinstance(узел, (у.Пока, у.Для, у.Лямбда)):
+            return False
+        return any(self._есть_выход_из_шага(getattr(узел, п.name)) for п in fields(узел)
+                   if isinstance(getattr(узел, п.name), (у.Узел, list)))
 
     def и_Для(self, и):
         перем = self.имя(и.переменная)
@@ -2168,7 +2553,7 @@ class Генератор:
             self.отступ += 1
             self.пиши(f"const int64_t {перем} = (int64_t)((uint64_t){первое} + {шаг});")
             self.отступ -= 1
-            self.блок(и.тело)
+            self._тело_цикла(и.тело)
             self.пиши("}")
             self.отступ -= 1
             self.пиши("}")
@@ -2190,45 +2575,44 @@ class Генератор:
         # Цикл перебирает значение списка на момент начала: если список
         # изменится в теле цикла, изменение получит собственную копию.
         self.пиши(f"{структура}* const {список} = {структура}_share({источник});")
+        тип_списка = "[" + и.тип_элемента + "]"
+        self.области.append([(список, тип_списка)])
         self.пиши(f"for (int64_t {номер} = 0; {номер} < {список}->len; {номер}++) {{")
         self.отступ += 1
         self.пиши(f"{self.тип_c(и.тип_элемента)} const {перем} = {список}->items[{номер}];")
         self.отступ -= 1
-        self.блок(и.тело)
+        self._тело_цикла(и.тело)
         self.пиши("}")
-        self.пиши(f"{структура}_release({список});")
+        self._освободить(self.области.pop())
         self.отступ -= 1
         self.пиши("}")
 
     def и_Вернуть(self, и):
+        результат = getattr(self, "текущий_результат", None)
         if и.значение is None:
-            if getattr(self, "текущий_результат", None) == ПУСТО + "!":
-                self.пиши(f"return {self.тип_c(ПУСТО + '!')}_some();")
+            if результат == ПУСТО + "!":
+                self.пиши(self._код_возврата(f"{self.тип_c(ПУСТО + '!')}_some()", результат))
             else:
-                self.пиши("return;")
+                self.пиши(self._код_возврата(None, None))
             return
-        код = self.выр(и.значение)
-        тип = getattr(и.значение, "привести_к", None) or и.значение.тип_выр
-        if getattr(и.значение, "в_необяз", None):
-            тип = и.значение.в_необяз
-        if getattr(и.значение, "в_результат", None):
-            тип = и.значение.в_результат
-        if тип == ОШИБКА:
-            pass
-        elif self.содержит_списки(тип):
-            if getattr(и, "перемещение", False) and not getattr(и.значение, "в_необяз", None) \
-                    and not getattr(и.значение, "в_результат", None):
-                # переменная функции перестаёт существовать: её место хранения освобождается
-                if это_список(тип):
-                    код = f"{self.структура(тип)}_release({код})"
-            elif not это_список(тип) and not self.владеющее(и.значение):
-                код = f"{self.поделить(тип)}({код})"
-        self.пиши(f"return {код};")
+        # Значение возврата удерживается, пока освобождаются переменные функции,
+        # и передаётся вызывающей стороне как временное.
+        self.пиши(self._код_возврата(self.выр(и.значение), результат))
+
+    def _выход_из_шага(self):
+        метка, от = self.метки_циклов[-1]
+        код = self._код_освобождения(от)
+        if код:
+            self.пиши(код)
+        if метка:
+            self.пиши(f"dan_sweep({метка});")
 
     def и_Прервать(self, и):
+        self._выход_из_шага()
         self.пиши("break;")
 
     def и_Продолжить(self, и):
+        self._выход_из_шага()
         self.пиши("continue;")
 
     # ---------- выражения ----------
@@ -2244,8 +2628,6 @@ class Генератор:
             if в.тип_выр == НИЧЕГО:
                 код = f"{тип_c}_none()"
             else:
-                if self.по_ссылке(необяз):   # значение помещается в неизменяемую ячейку
-                    код = self.сохранить(в, код, основа(необяз))
                 код = f"{тип_c}_some({код})"
         результат = getattr(в, "в_результат", None)
         if результат:
@@ -2262,7 +2644,7 @@ class Генератор:
         временное = self.служебное_имя("res")
         функция = getattr(в, "функция_результат", None)
         if функция:
-            при_ошибке = f"return {self.тип_c(функция)}_err({временное}.err, {временное}.line);"
+            при_ошибке = self._код_возврата(f"{self.тип_c(функция)}_err({временное}.err, {временное}.line)", функция)
         else:
             при_ошибке = f"dan_error({временное}.err, {временное}.line);"
         значение = "(void)0" if основа(тип) == ПУСТО else f"{временное}.value"
@@ -2277,37 +2659,45 @@ class Генератор:
         номер = self.счётчик
         имя_c = f"dan_lambda_{номер}"
         захваты = list(getattr(в, "захваты", {}).items())
-        сохр = (self.строки, self.отступ, getattr(self, "текущий_результат", None))
+        сохр = (self.строки, self.отступ, getattr(self, "текущий_результат", None),
+                self.области, self.метка_функции, self.метки_циклов)
         self.строки, self.отступ, self.текущий_результат = [], 1, результат
+        self.области, self.метка_функции, self.метки_циклов = [[]], "dan_fmark", []
         if захваты:
             self.пиши(f"const dan_env_{номер} *env = envp;")
             for имя, т in захваты:
                 self.пиши(f"{self.тип_c(т)} const {self.имя(имя)} = env->{self.имя(имя)};")
         else:
             self.пиши("(void)envp;")
+        if self._куча_в(в.тело if в.выражение is None else в.выражение, глубоко=True) or self._куча_тип(результат):
+            self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
+        else:
+            self.метка_функции = None
         if в.выражение is not None:
             код = self.выр(в.выражение)
             if результат == ПУСТО:
                 self.пиши(f"{код};")
+                self._выход_из_функции()
             else:
-                тип_з = getattr(в.выражение, "в_результат", None) or getattr(в.выражение, "в_необяз", None) \
-                    or getattr(в.выражение, "привести_к", None) or в.выражение.тип_выр
-                if not (это_список(тип_з) or это_словарь(тип_з)) and self.поделить(тип_з) \
-                        and not self.владеющее(в.выражение):
-                    код = f"{self.поделить(тип_з)}({код})"
-                self.пиши(f"return {код};")
+                self.пиши(self._код_возврата(код, результат))
         else:
             for и in в.тело.инструкции:
                 self.инструкция(и)
+            if результат in (ПУСТО, ПУСТО + "!") and not self._завершает(в.тело):
+                self._выход_из_функции()
             if результат == ПУСТО + "!":
                 self.пиши(f"return {self.тип_c(результат)}_some();")
         тело = self.строки
-        self.строки, self.отступ, self.текущий_результат = сохр
+        (self.строки, self.отступ, self.текущий_результат,
+         self.области, self.метка_функции, self.метки_циклов) = сохр
         параметры_c = "".join(f", {self.тип_c(т)} const {self.имя(п.имя)}" for п, т in zip(в.параметры, параметры))
         код = []
         if захваты:
             поля = " ".join(f"{self.тип_c(т)} {self.имя(имя)};" for имя, т in захваты)
-            код.append(f"typedef struct {{ {поля} }} dan_env_{номер};")
+            код.append(f"typedef struct {{ dan_hdr h; dan_destroy_fn d; {поля} }} dan_env_{номер};")
+            освободить = " ".join(f"{self.отпустить(т)}(e->{self.имя(имя)});" for имя, т in захваты if self.отпустить(т))
+            код.append(f"static void dan_env_{номер}_destroy(dan_hdr *h) {{ dan_env_{номер} *e = (dan_env_{номер} *)(void *)h; "
+                       f"{освободить} free(e); }}")
         код.append(f"static {self.тип_c(результат)} {имя_c}(void *envp{параметры_c}) {{")
         код += тело
         код.append("}")
@@ -2317,7 +2707,8 @@ class Генератор:
         окр = self.служебное_имя("env")
         присвоения = " ".join(f"{окр}->{self.имя(имя)} = {self.сохранить(у.Имя(имя), self.имя(имя), т)};"
                               for имя, т in захваты)
-        return (f"({{ dan_env_{номер} *{окр} = dan_alloc(sizeof *{окр}); {присвоения} "
+        return (f"({{ dan_env_{номер} *{окр} = dan_alloc(sizeof *{окр}); "
+                f"dan_hdr_new(&{окр}->h, dan_env_{номер}_destroy); {окр}->d = dan_env_{номер}_destroy; {присвоения} "
                 f"({df}){{ {имя_c}, {окр} }}; }})")
 
     def обёртка(self, имя_дан, тип):
@@ -2369,7 +2760,7 @@ class Генератор:
         return дробь_c(в.значение)
 
     def в_Строка(self, в):
-        return строка_c(в.значение)
+        return self.литерал(в.значение)
 
     def в_Логическое(self, в):
         return "true" if в.значение else "false"
@@ -2466,7 +2857,7 @@ class Генератор:
         if not в.элементы:
             return f"{структура}_from(0, NULL)"
         тип_эл = элемент(тип)
-        элементы = ", ".join(self.сохранить(э, self.выр(э), тип_эл) for э in в.элементы)
+        элементы = ", ".join(self.выр(э) for э in в.элементы)
         return f"{структура}_from({len(в.элементы)}, ({self.тип_c(элемент(тип))}[]){{{элементы}}})"
 
     def в_Словарь(self, в):
@@ -2476,7 +2867,7 @@ class Генератор:
             return f"{D}_new()"
         к, з = ключ_словаря(тип), значение_словаря(тип)
         ключи = ", ".join(self.выр(у_) for у_ in в.ключи)
-        значения = ", ".join(self.сохранить(у_, self.выр(у_), з) for у_ in в.значения)
+        значения = ", ".join(self.выр(у_) for у_ in в.значения)
         return (f"{D}_from({len(в.ключи)}, ({self.тип_c(к)}[]){{{ключи}}}, "
                 f"({self.тип_c(з)}[]){{{значения}}})")
 
@@ -2546,8 +2937,6 @@ class Генератор:
             структура = self.структура(объект.тип_выр)
             if в.метод in ("добавить", "вставить", "удалить"):
                 аргументы[0] = f"{структура}_mut(&{self.место(объект)})"
-                if в.метод != "удалить":
-                    аргументы[-1] = self.сохранить(в.аргументы[-1], аргументы[-1], элемент(объект.тип_выр))
             if нужна_строка:
                 аргументы.append(str(в.строка))
             return f"{структура}_{суффикс}({', '.join(аргументы)})"
@@ -2557,12 +2946,12 @@ class Генератор:
             тип, вариант = в.вариант
             варианты = self.перечисления[тип]
             номер = [и for и, (н, _) in enumerate(варианты) if н == вариант][0]
-            значения = ", ".join(self.сохранить(узел, self.выр(узел), т)
+            значения = ", ".join(self.выр(узел)
                                  for (_, т), узел in zip(варианты[номер][1], в.значения_полей))
             return f"{self.перечисление_c(тип)}_mk{номер}({значения})"
         if getattr(в, "конструктор", None):
             тип = в.конструктор
-            значения = ", ".join(f".{self.поле_c(тип, поле)} = {self.сохранить(узел, self.выр(узел), тип_поля)}"
+            значения = ", ".join(f".{self.поле_c(тип, поле)} = {self.выр(узел)}"
                                  for (поле, тип_поля, _), узел in zip(self.собственные[тип], в.значения_полей))
             return f"(({self.тип_c(тип)}){{ {значения} }})"
         аргументы = [self.выр(а) for а in в.аргументы]
@@ -2605,12 +2994,10 @@ class Генератор:
         if ключ not in self.помощники:
             имя = f"dan_{вид}_{len(self.помощники) + 1}"
             T = self.тип_c(т)
-            поделить_т = self.поделить(т)
-            эл = (lambda код: f"{поделить_т}({код})") if поделить_т else (lambda код: код)
+            эл = (lambda код: код)    # список сам учитывает добавленные элементы
             if вид == "преобразовать":
                 R = self.структура("[" + результат + "]")
-                поделить_р = self.поделить(результат) if (это_список(результат) or это_словарь(результат)) else None
-                знач = f"{поделить_р}({F}_call(f, l->items[i]))" if поделить_р else f"{F}_call(f, l->items[i])"
+                знач = f"{F}_call(f, l->items[i])"
                 код = (f"static {R} *{имя}(const {S} *l, {F} f) {{\n    {R} *r = {R}_from(0, NULL);\n"
                        f"    for (int64_t i = 0; i < l->len; i++) {R}_push(r, {знач});\n    return r;\n}}")
             elif вид == "отобрать":
@@ -2629,9 +3016,7 @@ class Генератор:
                        f"if ({F}_call(f, l->items[i])) return {some};\n    return {О}_none();\n}}")
             elif вид == "свернуть":
                 A = self.тип_c(результат)
-                поделить_а = self.поделить(результат)
-                начало = f"{поделить_а}(acc)" if поделить_а else "acc"
-                код = (f"static {A} {имя}(const {S} *l, {A} acc, {F} f) {{\n    {A} r = {начало};\n"
+                код = (f"static {A} {имя}(const {S} *l, {A} acc, {F} f) {{\n    {A} r = acc;\n"
                        f"    for (int64_t i = 0; i < l->len; i++) r = {F}_call(f, r, l->items[i]);\n    return r;\n}}")
             else:  # упорядочить_по: устойчивая сортировка слиянием по ключу
                 K = self.тип_c(результат)
@@ -2654,6 +3039,7 @@ class Генератор:
                        f"            for (int64_t i = lo; i < hi; i++) ix[i] = tmp[i];\n"
                        f"        }}\n"
                        f"    for (int64_t i = 0; i < n; i++) r->items[i] = l->items[ix[i]];\n"
+                       f"    free(k); free(ix); free(tmp);\n"
                        f"    return r;\n}}")
             self.помощники[ключ] = код
         имя = self.помощники[ключ].split("(", 1)[0].split()[-1].lstrip("*")

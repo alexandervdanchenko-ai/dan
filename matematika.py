@@ -524,6 +524,7 @@ static {S} *dan_set_{с}(const {S} *l) {{
     int64_t k = 0;
     for (int64_t i = 0; i < s->len; i++)
         if (k == 0 || dan_cmp_{с}(s->items[k - 1], s->items[i]) != 0) s->items[k++] = s->items[i];
+        else {"dan_str_release" if т == СТР else "DAN_NOREL"}(s->items[i]);
     s->len = k;
     return s;
 }}
@@ -679,7 +680,7 @@ static dan_str dan_periodic(dan_rat a, int line) {
         } while (r != start);
     }
     size_t hl = strlen(head);
-    char *out = dan_alloc(hl + len + 4);
+    char *out = dan_str_new(hl + len + 3);
     memcpy(out, head, hl);
     out[hl] = ',';
     memcpy(out + hl + 1, digits, period_start);
@@ -1063,7 +1064,7 @@ static dan_str dan_poly_to_str(dan_mn p) {
     dan_buf b = { NULL, 0, 0 };
     dan_buf_add(&b, "");
     dan_buf_poly(&b, p);
-    return b.s;
+    return dan_buf_str(&b);
 }
 
 static void dan_write_poly(dan_mn p) { fputs(dan_poly_to_str(p), stdout); }
@@ -1169,6 +1170,8 @@ static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
                     }
                 }
             }
+        free(dp);
+        free(dq);
     }
     *out = roots;
     return k;
@@ -1385,7 +1388,7 @@ static dan_str dan_factor_str(dan_mn p, int line) {
         dan_buf_poly(&b, rest);
         dan_buf_add(&b, ")");
     }
-    return b.s;
+    return dan_buf_str(&b);
 }
 
 /* 2х² + 6х -> 2х(х + 3) */
@@ -1406,7 +1409,7 @@ static dan_str dan_common_factor_str(dan_mn p, int line) {
     dan_buf_add(&b, "(");
     dan_buf_poly(&b, rest);
     dan_buf_add(&b, ")");
-    return b.s;
+    return dan_buf_str(&b);
 }
 
 /* ---- inequalities: the interval method ---- */
@@ -1515,7 +1518,7 @@ static dan_str dan_solve_condition(dan_group *g, int64_t ng, int line) {
     dan_buf_add(&b, "");
     bool only_points = true, any = false;
     for (int64_t i = 0; i < np; i++) if (in[i]) { any = true; if (i % 2 == 0) only_points = false; }
-    if (!any) { dan_buf_add(&b, DAN_TXT_NONE); return b.s; }
+    if (!any) { dan_buf_add(&b, DAN_TXT_NONE); return dan_buf_str(&b); }
     if (only_points) {                           /* {a; b; c} */
         dan_buf_add(&b, "{");
         bool first = true;
@@ -1525,7 +1528,7 @@ static dan_str dan_solve_condition(dan_group *g, int64_t ng, int line) {
             first = false;
         }
         dan_buf_add(&b, "}");
-        return b.s;
+        return dan_buf_str(&b);
     }
     bool first = true;
     for (int64_t i = 0; i < np;) {
@@ -1552,7 +1555,7 @@ static dan_str dan_solve_condition(dan_group *g, int64_t ng, int line) {
         }
         i = j + 1;
     }
-    return b.s;
+    return dan_buf_str(&b);
 }
 
 static dan_str dan_ineq_str(dan_mn left, dan_str rel, dan_mn right, int line) {
@@ -1618,6 +1621,8 @@ static dl_Lr *dan_solve_system(const dl_LLr *m, int line) {
     dl_Lr *r = dl_Lr_from(0, NULL);
     for (int64_t j = 0; j < n; j++) dl_Lr_push(r, A(where[j], n));
 #undef A
+    free(a);
+    free(where);
     return r;
 }
 """

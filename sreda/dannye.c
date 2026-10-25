@@ -17,7 +17,7 @@ static wchar_t *dan_wide(dan_str s) {
 
 static dan_str dan_narrow(const wchar_t *w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-    char *s = dan_alloc((size_t)(n > 0 ? n : 1));
+    char *s = dan_str_new((size_t)(n > 0 ? n : 1));
     if (n <= 0) { s[0] = 0; return s; }
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
     return s;
@@ -45,6 +45,7 @@ static void dan_path_error(const char *fmt, dan_str path, int line) {
 
 static dan_bytes_s *dan_bytes_wrap(uint8_t *data, int64_t len) {
     dan_bytes_s *b = dan_alloc(sizeof *b);
+    dan_hdr_new(&b->h, dan_bytes_destroy);
     data = dan_realloc(data, (size_t)len + 1);
     data[len] = 0;
     b->data = data;
@@ -75,7 +76,7 @@ static dan_str dan_read_text(dan_str path, int line) {
     const uint8_t *s = b->data;
     int64_t n = b->len;
     if (n >= 3 && s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) { s += 3; n -= 3; }
-    char *r = dan_alloc((size_t)n + 1);
+    char *r = dan_str_new((size_t)n);
     int64_t k = 0;
     for (int64_t i = 0; i < n; i++) {
         if (s[i] == '\r' && i + 1 < n && s[i + 1] == '\n') continue;
@@ -222,7 +223,7 @@ static dl_Li *dan_bytes_to_list(dan_bytes b) {
 
 static dan_str dan_hex(dan_bytes b) {
     static const char digits[] = "0123456789abcdef";
-    char *s = dan_alloc((size_t)b->len * 2 + 1);
+    char *s = dan_str_new((size_t)b->len * 2);
     for (int64_t i = 0; i < b->len; i++) {
         s[2 * i] = digits[b->data[i] >> 4];
         s[2 * i + 1] = digits[b->data[i] & 15];
@@ -504,7 +505,7 @@ static dan_str dan_sha256_hex(const uint8_t *p, size_t n) {
     dan_sha256_init(&c);
     dan_sha256_update(&c, p, n);
     dan_sha256_final(&c, h);
-    dan_bytes_s b = { 32, h };
+    dan_bytes_s b = { DAN_HDR_INIT, 32, h };
     return dan_hex(&b);
 }
 
@@ -1429,7 +1430,7 @@ static dan_zip_entry *dan_zip_entries(dan_bytes z, int64_t *count, int line) {
         uint16_t nlen = dan_le16(p + pos + 28), xlen = dan_le16(p + pos + 30), clen = dan_le16(p + pos + 32);
         x->offset = dan_le32(p + pos + 42);
         if (pos + 46 + nlen + xlen + clen > n) dan_error(DAN_MSG_CORRUPT, line);
-        char *name = dan_alloc((size_t)nlen + 1);
+        char *name = dan_str_new((size_t)nlen);
         memcpy(name, p + pos + 46, nlen);
         name[nlen] = 0;
         x->name = name;

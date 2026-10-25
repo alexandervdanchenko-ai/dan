@@ -738,12 +738,12 @@ static double *dan_mat_flat_f(const dl_LLf *m, int64_t c) {
 }
 static dl_LLr *dan_mat_from_r(const dan_rat *a, int64_t r, int64_t c) {
     dl_LLr *m = dl_LLr_from(0, NULL);
-    for (int64_t i = 0; i < r; i++) dl_LLr_push(m, dl_Lr_share(dl_Lr_from(c, a + i * c)));
+    for (int64_t i = 0; i < r; i++) dl_LLr_push(m, dl_Lr_from(c, a + i * c));
     return m;
 }
 static dl_LLf *dan_mat_from_f(const double *a, int64_t r, int64_t c) {
     dl_LLf *m = dl_LLf_from(0, NULL);
-    for (int64_t i = 0; i < r; i++) dl_LLf_push(m, dl_Lf_share(dl_Lf_from(c, a + i * c)));
+    for (int64_t i = 0; i < r; i++) dl_LLf_push(m, dl_Lf_from(c, a + i * c));
     return m;
 }
 /* Приведение к ступенчатому виду; возвращает ранг, в *det - определитель (для квадратной). */
@@ -966,14 +966,14 @@ static dan_str dan_line_str(dan_rat x1, dan_rat y1, dan_rat x2, dan_rat y2, int 
     if (dan_rat_cmp(x1, x2) == 0) {
         dan_buf_add(&b, "\321\205 = ");      /* «х = » */
         dan_buf_add(&b, dan_rat_to_str(x1));
-        return b.s;
+        return dan_buf_str(&b);
     }
     dan_rat k = dan_rat_div(dan_rat_sub(y2, y1, line), dan_rat_sub(x2, x1, line), line);
     dan_rat c = dan_rat_sub(y1, dan_rat_mul(k, x1, line), line);
     dan_mn p = dan_poly_add(dan_poly_scale(dan_poly_x(), k, line), dan_poly_const(c), line);
     dan_buf_add(&b, "\321\203 = ");          /* «у = » */
     dan_buf_add(&b, dan_poly_to_str(p));
-    return b.s;
+    return dan_buf_str(&b);
 }
 static do_Lr dan_line_intersection(dan_rat a1, dan_rat b1, dan_rat c1, dan_rat a2, dan_rat b2, dan_rat c2, int line) {
     dan_rat d = dan_rat_sub(dan_rat_mul(a1, b2, line), dan_rat_mul(a2, b1, line), line);
@@ -1084,7 +1084,7 @@ static dan_str dan_to_roman(int64_t n, int line) {
     if (n < 1 || n > 3999) dan_error(DAN_MSG_ROMAN_RANGE, line);
     dan_buf b = { NULL, 0, 0 };
     for (int i = 0; i < 13; i++) while (n >= dan_roman_v[i]) { dan_buf_add(&b, dan_roman_s[i]); n -= dan_roman_v[i]; }
-    return b.s;
+    return dan_buf_str(&b);
 }
 static int64_t dan_from_roman(dan_str s, int line) {
     const char *p = s;
@@ -1180,7 +1180,7 @@ static void dan_words_triad(dan_buf *b, unsigned t, int female) {
     dan_words_add(b, female ? dan_w_ones_f[r % 10] : dan_w_ones_m[r % 10]);
 }
 static dan_str dan_in_words(int64_t v) {
-    if (v == 0) return DAN_W_ZERO;
+    if (v == 0) return dan_strdup(DAN_W_ZERO);
     uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
     unsigned tri[7]; int k = 0;
     while (u) { tri[k++] = (unsigned)(u % 1000); u /= 1000; }
@@ -1193,8 +1193,8 @@ static dan_str dan_in_words(int64_t v) {
             dan_words_add(&b, f == 0 ? dan_w_scale1[i] : f == 1 ? dan_w_scale2[i] : dan_w_scale5[i]);
         }
     }
-    if (v < 0) { dan_buf m = { NULL, 0, 0 }; dan_buf_add(&m, DAN_W_MINUS); dan_buf_add(&m, b.s); return m.s; }
-    return b.s;
+    if (v < 0) { dan_buf m = { NULL, 0, 0 }; dan_buf_add(&m, DAN_W_MINUS); dan_buf_add(&m, b.s); dan_buf_free(&b); return dan_buf_str(&m); }
+    return dan_buf_str(&b);
 }
 static dan_str dan_money_words_kop(int64_t kop, int line) {
     if (kop < 0) dan_error(DAN_MSG_NEG_MONEY, line);
@@ -1209,7 +1209,7 @@ static dan_str dan_money_words_kop(int64_t kop, int line) {
     dan_buf_add(&b, num);
     f = dan_plural_form((uint64_t)k);
     dan_buf_add(&b, f == 0 ? DAN_W_KOP1 : f == 1 ? DAN_W_KOP2 : DAN_W_KOP5);
-    return b.s;
+    return dan_buf_str(&b);
 }
 static int64_t dan_to_kop_rat(dan_rat v, int line) {
     if (v.n < 0) dan_error(DAN_MSG_NEG_MONEY, line);
@@ -1334,7 +1334,7 @@ static dan_str dan_not_number_msg(dan_str s, const char *what) {
     dan_buf_add(&b, "\"");
     dan_buf_add(&b, s);
     dan_buf_add(&b, what);
-    return b.s;
+    return dan_buf_str(&b);
 }
 static dr_i dan_parse_int_res(dan_str s, int line) {
     const char *p = s;
@@ -1356,9 +1356,11 @@ static dr_f dan_parse_float_res(dan_str s, int line) {
     while (*p == ' ' || *p == '\t') p++;
     char *end;
     double v = strtod(p, &end);
-    if (end == p) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
+    bool bad = end == p;
     while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
-    if (*end) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
+    if (*end) bad = true;
+    free(t);
+    if (bad) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
     return dr_f_some(v);
 }
 
