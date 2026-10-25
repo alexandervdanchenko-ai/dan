@@ -1,0 +1,120 @@
+"""Единая точка запуска инструментов языка Дан.
+
+Использование:
+    python dan.py запустить программа.dan   - собрать программу и сразу выполнить
+    python dan.py собрать программа.dan     - собрать исполняемый файл
+    python dan.py проверить программа.dan   - найти ошибки в программе
+    python dan.py си программа.dan          - показать полученный код на C
+    python dan.py дерево программа.dan      - показать дерево программы
+    python dan.py токены программа.dan      - показать токены
+
+Для сборки нужен компилятор C: gcc или clang.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+
+from lexer import разобрать as токены, ОшибкаЛексера
+from parser import разобрать as дерево, ОшибкаРазбора
+from proverka import проверить, ОшибкаПроверки
+from kodogen import сгенерировать
+import uzly
+
+КОМАНДЫ = ("запустить", "собрать", "проверить", "си", "дерево", "токены")
+КОМПИЛЯТОРЫ = ("gcc", "clang", "cc")
+ФЛАГИ = ["-std=c11", "-O2", "-fwrapv", "-w"]
+
+
+class ОшибкаСборки(Exception):
+    pass
+
+
+def найти_компилятор():
+    for имя in КОМПИЛЯТОРЫ:
+        путь = shutil.which(имя)
+        if путь:
+            return путь
+    raise ОшибкаСборки(
+        "не найден компилятор C (gcc или clang).\n"
+        "  В Windows его можно установить командой: winget install BrechtSanders.WinLibs.POSIX.UCRT\n"
+        "  после установки откройте новое окно командной строки.")
+
+
+def перевести(исходник):
+    """Текст программы на Дан -> текст на C. Выбрасывает ошибки разбора и проверки."""
+    программа = дерево(исходник)
+    проверить(программа)
+    return сгенерировать(программа)
+
+
+def собрать(путь, исходник):
+    """Собирает исполняемый файл рядом с исходным. Возвращает путь к нему."""
+    код_c = перевести(исходник)
+    основа = os.path.splitext(путь)[0]
+    путь_c = основа + ".c"
+    путь_exe = основа + (".exe" if os.name == "nt" else "")
+    with open(путь_c, "w", encoding="utf-8") as ф:
+        ф.write(код_c)
+    компилятор = найти_компилятор()
+    результат = subprocess.run([компилятор, *ФЛАГИ, путь_c, "-o", путь_exe],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if результат.returncode != 0:
+        raise ОшибкаСборки("компилятор C сообщил об ошибке. Это ошибка самого компилятора Дан, "
+                           "а не вашей программы; сохраните файл " + путь_c +
+                           " для разбора.\n" + результат.stderr.strip())
+    return путь_exe
+
+
+def main(аргументы):
+    if len(аргументы) != 2 or аргументы[0] not in КОМАНДЫ:
+        print(__doc__.strip())
+        return 2
+    команда, путь = аргументы
+    try:
+        with open(путь, encoding="utf-8") as ф:
+            исходник = ф.read()
+    except OSError as о:
+        print(f"Не удалось открыть файл «{путь}»: {о.strerror}")
+        return 2
+    except UnicodeDecodeError:
+        print(f"Файл «{путь}» должен быть в кодировке UTF-8")
+        return 2
+
+    try:
+        if команда == "токены":
+            for т in токены(исходник):
+                print(т)
+        elif команда == "дерево":
+            print(uzly.показать(дерево(исходник)))
+        elif команда == "проверить":
+            проверить(дерево(исходник))
+            print(f"{путь}: ошибок не найдено")
+        elif команда == "си":
+            print(перевести(исходник), end="")
+        elif команда == "собрать":
+            print(f"Готово: {собрать(путь, исходник)}")
+        else:
+            исполняемый = собрать(путь, исходник)
+            sys.stdout.flush()
+            return subprocess.run([os.path.abspath(исполняемый)]).returncode
+    except (ОшибкаЛексера, ОшибкаРазбора) as о:
+        print(f"{путь}: ошибка в записи программы")
+        print(f"  {о}")
+        return 1
+    except ОшибкаПроверки as о:
+        print(f"{путь}: найдено ошибок: {len(о.ошибки)}")
+        for сообщение in о.ошибки:
+            print(f"  {сообщение}")
+        return 1
+    except ОшибкаСборки as о:
+        print(f"Сборка не удалась: {о}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    sys.exit(main(sys.argv[1:]))
