@@ -110,6 +110,25 @@ class ТестыРедакций(unittest.TestCase):
             with self.assertRaises(versiya.ОшибкаРедакции):
                 versiya.перевести("редакция 2028\n", "2026")
 
+    def test_устаревшие_функции(self):
+        import contextlib
+        т = 'подключить "json"\nвывод(сумма([1, 2]))\nвывод(json.записать_красиво(json.Пусто))\n'
+        with mock.patch.dict(versiya.УСТАРЕВШИЕ, {"сумма": ("2027", "используйте «итог»"),
+                                                 "json.записать_красиво": ("2027", "")}):
+            поток = io.StringIO()
+            with contextlib.redirect_stderr(поток):
+                dan.перевести(т)        # предупреждение не мешает сборке
+            строки = поток.getvalue().splitlines()
+        self.assertEqual(строки, [
+            "программа: предупреждение: Строка 2, позиция 12: функция «сумма» устарела и будет удалена в "
+            "редакции 2027; используйте «итог»",
+            "программа: предупреждение: Строка 3, позиция 28: функция «json.записать_красиво» устарела и будет "
+            "удалена в редакции 2027"])
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток):
+            dan.перевести(т)
+        self.assertEqual(поток.getvalue(), "")
+
     def test_команды(self):
         вывод = io.StringIO()
         with redirect_stdout(вывод):
