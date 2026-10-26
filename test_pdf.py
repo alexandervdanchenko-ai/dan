@@ -37,6 +37,31 @@ from test_word import выполнить
 '''
 
 
+def собрать_pdf(объекты, корень=1):
+    """Простой документ PDF из пар (номер, тело) с верной таблицей ссылок."""
+    д = b"%PDF-1.7\n"
+    места = {}
+    for н, тело in объекты:
+        места[н] = len(д)
+        д += b"%d 0 obj\n" % н + тело + b"\nendobj\n"
+    размер = max(места) + 1
+    x = len(д)
+    д += b"xref\n0 %d\n0000000000 65535 f \n" % размер
+    for н in range(1, размер):
+        д += b"%010d 00000 n \n" % места[н] if н in места else b"0000000000 65535 f \n"
+    return д + b"trailer\n<</Root %d 0 R/Size %d>>\nstartxref\n%d\n%%%%EOF\n" % (корень, размер, x)
+
+
+def поток(данные, словарь=b""):
+    return b"<<" + словарь + b"/Length %d>>stream\n" % len(данные) + данные + b"\nendstream"
+
+
+def страница(содержимое, ресурсы=b"<<>>"):
+    return [(1, b"<</Type/Catalog/Pages 2 0 R>>"), (2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+            (3, b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources " + ресурсы + b"/Contents 4 0 R>>"),
+            (4, содержимое)]
+
+
 def прочитать_текст(путь):
     return subprocess.run(["pdftotext", "-layout", путь, "-"], capture_output=True, text=True).stdout
 
@@ -180,6 +205,31 @@ class ТестыPDF(unittest.TestCase):
 """)
         self.assertEqual(код, 0, ош)
         self.assertEqual(вывод, "истина\n")
+
+    def test_вредные_документы(self):
+        import zlib
+        форма = поток(b"/X Do " * 20, b"/Type/XObject/Subtype/Form/Resources<</XObject<</X 6 0 R>>>>")
+        # ромб: каждый узел дерева страниц дважды ссылается на следующий, глубина 60
+        ромб = [(1, b"<</Type/Catalog/Pages 10 0 R>>")] + [
+            (10 + к, b"<</Type/Pages/Kids[%d 0 R %d 0 R]/Count 1>>" % (11 + к, 11 + к)) for к in range(60)] + [
+            (70, b"<</Type/Page/MediaBox[0 0 612 792]/Contents 71 0 R>>"), (71, поток(b"BT ET"))]
+        документы = {
+            "a85": собрать_pdf(страница(поток(b"z" * 64, b"/Filter/ASCII85Decode"))),
+            "предиктор": собрать_pdf(страница(поток(zlib.compress(b"BT /F1 12 Tf (Hi) Tj ET"),
+                                                     b"/Filter/FlateDecode/DecodeParms<</Predictor 12/Columns -20>>"))),
+            "цикл": собрать_pdf([(1, b"<</Type/Catalog/Pages 2 0 R>>"), (2, b"<</Type/Pages/Kids[2 0 R 2 0 R]/Count 1>>")]),
+            "ромб": собрать_pdf(ромб),
+            "форма": собрать_pdf(страница(поток(b"/X Do"), b"<</XObject<</X 6 0 R>>>>") + [(6, форма)]),
+        }
+        for имя, данные in документы.items():
+            with open(self.файл(имя + ".pdf"), "wb") as ф:
+                ф.write(данные)
+        код, вывод, ош = выполнить(self.п, """для имя в ["a85", "предиктор", "цикл", "ромб", "форма"] {
+    если пусть с = текст_pdf(прочитать_байты(имя + ".pdf")) { вывод(имя + " " + стр(с.длина)) } иначе ошибка о { вывод(имя + " " + о) }
+}
+""")
+        self.assertEqual(код, 0, ош)
+        self.assertEqual(len(вывод.splitlines()), 5, вывод)
 
     def test_ошибки(self):
         with open(self.файл("текст.pdf"), "w", encoding="utf-8") as ф:

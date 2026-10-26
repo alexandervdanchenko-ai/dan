@@ -386,6 +386,8 @@ static dan_po *dan_pget(dan_pdf *p, int64_t num) {
 
 static uint8_t *dan_ppredict(uint8_t *d, size_t *len, int64_t pred, int64_t colors, int64_t bpc, int64_t cols) {
     if (pred < 10) return d;            /* TIFF predictor 2 is not used for text */
+    /* the parameters come from the file: anything outside the limits of the format is ignored */
+    if (colors < 1 || colors > 32 || bpc < 1 || bpc > 16 || cols < 1 || cols > (1 << 20)) return d;
     size_t bpp = (size_t)((colors * bpc + 7) / 8), row = (size_t)((colors * bpc * cols + 7) / 8);
     if (!bpp) bpp = 1;
     if (!row) return d;
@@ -446,7 +448,7 @@ static uint8_t *dan_pfilter(dan_pdf *p, const char *name, dan_po *parms, uint8_t
         return o;
     }
     if (!strcmp(name, "ASCII85Decode") || !strcmp(name, "A85")) {
-        uint8_t *o = dan_alloc(*len + 8);
+        uint8_t *o = dan_alloc(*len * 4 + 8);     /* «z» gives four bytes */
         size_t n = 0;
         uint32_t acc = 0;
         int k = 0;
@@ -942,6 +944,8 @@ typedef struct {
     double size, tm[6], lm[6], leading;
     double lasty, lastx;
     int started;
+    int forms;                          /* forms drawn in the document: a damaged file must not draw them endlessly */
+    dan_po *active[10];                 /* forms being drawn now: a form must not draw itself */
 } dan_pctx;
 
 static dan_pfont *dan_pctx_font(dan_pctx *c, dan_po *res, const char *name) {
@@ -1052,11 +1056,17 @@ static void dan_pcontent(dan_pctx *c, dan_po *res, const uint8_t *d, size_t len,
         } else if (!strcmp(op, "Do") && n >= 1 && st[n - 1]->t == PO_NAME) {
             dan_po *xo = dan_pkey(c->p, dan_pkey(c->p, res, "XObject"), (const char *)st[n - 1]->s);
             dan_po *sub = dan_pkey(c->p, xo, "Subtype");
-            if (xo->is_stream && sub->t == PO_NAME && !strcmp((const char *)sub->s, "Form")) {
+            int again = 0;
+            for (int i = 0; i < depth && i < 10; i++) again |= c->active[i] == xo;
+            if (xo->is_stream && sub->t == PO_NAME && !strcmp((const char *)sub->s, "Form") && !again && depth < 9
+                && c->forms < 10000) {
+                c->forms++;
+                c->active[depth] = xo;
                 dan_po *r2 = dan_pkey(c->p, xo, "Resources");
                 size_t fl;
                 uint8_t *fd = dan_pstream(c->p, xo, &fl);
                 dan_pcontent(c, r2->t == PO_DICT ? r2 : res, fd, fl, depth + 1);
+                c->active[depth] = NULL;
             }
         }
         #undef NUM
@@ -1086,7 +1096,8 @@ static dr_Ls dan_pdf_text(dan_bytes data, int line) {
     memset(&c, 0, sizeof c);
     c.p = &p;
     int visited = 0;
-    while (top >= 0 && visited < 100000) {
+    long steps = 0;                     /* nodes of the tree passed: a damaged tree must not be walked endlessly */
+    while (top >= 0 && visited < 100000 && steps++ < 1000000) {
         dan_po *node = stack[top];
         dan_po *kids = dan_pkey(&p, node, "Kids");
         dan_po *type = dan_pkey(&p, node, "Type");
@@ -1137,6 +1148,9 @@ static dr_Ls dan_pdf_text(dan_bytes data, int line) {
         if (pos[top] >= kids->cnt || top == 63) { top--; continue; }
         dan_po *kid = dan_pres(&p, kids->v[pos[top]++]);
         if (kid->t != PO_DICT) continue;
+        int cycle = 0;
+        for (int i = 0; i <= top; i++) cycle |= stack[i] == kid;
+        if (cycle) continue;
         dan_po *kr = dan_pkey(&p, kid, "Resources");
         rstack[top + 1] = kr->t == PO_DICT ? kr : rstack[top];
         stack[++top] = kid;
@@ -1187,8 +1201,9 @@ static const uint8_t *dan_ttf_table(const dan_ttf *f, const char *tag, uint32_t 
 static uint16_t dan_ttf_gid(const dan_ttf *f, uint32_t c) {
     const uint8_t *p = f->d + f->cmap_off;
     if (f->cmap_fmt == 4) {
-        if (c > 0xFFFF) return 0;
+        if (c > 0xFFFF || (size_t)f->cmap_off + 14 > f->n) return 0;
         int segx2 = dan_be16(p + 6);
+        if ((size_t)f->cmap_off + 16 + 4 * (size_t)segx2 > f->n) return 0;     /* a damaged font */
         const uint8_t *ends = p + 14, *starts = ends + segx2 + 2, *deltas = starts + segx2, *ranges = deltas + segx2;
         for (int i = 0; i < segx2 / 2; i++) {
             uint16_t end = dan_be16(ends + 2 * i);
@@ -1205,6 +1220,7 @@ static uint16_t dan_ttf_gid(const dan_ttf *f, uint32_t c) {
         return 0;
     }
     if (f->cmap_fmt == 12) {
+        if ((size_t)f->cmap_off + 16 > f->n) return 0;
         uint32_t n = dan_be32(p + 12);
         for (uint32_t i = 0; i < n; i++) {
             const uint8_t *g = p + 16 + 12 * i;
