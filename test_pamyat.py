@@ -165,6 +165,17 @@ def под_санитайзером(текст):
 вывод(вывод_команды("echo 1") иначе "")
 вывод(переменная_среды("PATH") != ничего)
 """,
+    "json": r"""
+подключить "json"
+перем всего = 0
+для к в 1..50 {
+    пусть з = json.разобрать("{\"а\": [1, 2.5, \"три\", null, true], \"б\": {\"в\": \"\\u042f\"}}") иначе json.Пусто
+    пусть т = json.записать_красиво(з)
+    всего += т.длина + з.поле("а").длина()
+}
+вывод(всего)
+если ошибка о = json.разобрать("[1, 2") { вывод(о) }
+""",
 }
 
 
@@ -191,13 +202,16 @@ class ТестыРасходаПамяти(unittest.TestCase):
             with open(путь, "w", encoding="utf-8") as ф:
                 ф.write(текст)
             исп = dan.собрать(путь, текст)
-            до = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-            р = subprocess.run([исп], capture_output=True, text=True, timeout=120)
-            после = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        self.assertEqual(р.returncode, 0)
-        self.assertEqual(р.stdout.strip(), "43333347")
+            # пиковый расход памяти измеряется у отдельного процесса, в котором запускается только эта программа
+            замер = ("import resource, subprocess, sys\n"
+                     "р = subprocess.run([sys.argv[1]], capture_output=True, text=True)\n"
+                     "print(р.returncode, р.stdout.strip(), resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)")
+            р = subprocess.run([sys.executable, "-c", замер, исп], capture_output=True, text=True, timeout=120)
+        код, вывод, память = р.stdout.split()
+        self.assertEqual(код, "0")
+        self.assertEqual(вывод, "43333347")
         # без освобождения программа занимала больше 350 МБ
-        self.assertLess(max(до, после), 100 * 1024)
+        self.assertLess(int(память), 100 * 1024)
 
 
 if __name__ == "__main__":

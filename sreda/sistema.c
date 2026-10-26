@@ -773,3 +773,26 @@ static dl_Ls *dan_rx_split(dan_str text, dan_str pattern, int line) {
     dl_Ls_push(r, dan_str_sub(text + piece, text + strlen(text)));
     return r;
 }
+
+/* ---- characters and their codes (Unicode code points) ---- */
+
+static dan_str dan_char_from_code(int64_t c, int line) {
+    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
+        char m[160];
+        snprintf(m, sizeof m, DAN_MSG_BAD_CODE, (long long)c);
+        dan_error(m, line);
+    }
+    char b[5] = { 0 };
+    if (c < 0x80) b[0] = (char)c;
+    else if (c < 0x800) { b[0] = (char)(0xC0 | (c >> 6)); b[1] = (char)(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { b[0] = (char)(0xE0 | (c >> 12)); b[1] = (char)(0x80 | ((c >> 6) & 0x3F)); b[2] = (char)(0x80 | (c & 0x3F)); }
+    else { b[0] = (char)(0xF0 | (c >> 18)); b[1] = (char)(0x80 | ((c >> 12) & 0x3F)); b[2] = (char)(0x80 | ((c >> 6) & 0x3F)); b[3] = (char)(0x80 | (c & 0x3F)); }
+    if (c == 0) dan_error(DAN_MSG_ZERO_CODE, line);
+    return dan_strdup(b);
+}
+
+static int64_t dan_char_code(dan_str s, int line) {
+    if (!*s) dan_error(DAN_MSG_EMPTY_CHAR, line);
+    const char *p = s;
+    return dan_utf8_decode(&p);
+}

@@ -2126,11 +2126,18 @@ static bool {S}_eq(const {S} *x, const {S} *y) {{
 
 # Функции строк, которые возвращают списки строк: идут после определения dl_Ls.
 КОД_СТРОК_СО_СПИСКАМИ = r"""
+/* one-character strings of the first 128 characters (ASCII) are shared and
+   never freed: splitting a text into characters allocates memory only for
+   other letters */
+static const struct { dan_hdr h; char s[2]; } dan_ascii_s[128] = {
+""" + "\n".join("    { DAN_HDR_INIT, { " + str(и) + ", 0 } }," for и in range(128)) + r"""
+};
+
 static dl_Ls *dan_str_chars(dan_str s) {
     dl_Ls *r = dl_Ls_from(0, NULL);
     for (const char *p = s; *p;) {
         size_t k = dan_utf8_len((unsigned char)*p);
-        dl_Ls_push(r, dan_str_sub(p, p + k));
+        dl_Ls_push(r, k == 1 ? dan_ascii_s[(unsigned char)*p].s : dan_str_sub(p, p + k));
         p += k;
     }
     return r;
