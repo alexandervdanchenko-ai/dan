@@ -82,10 +82,12 @@ jobs:
           exit $код
       - name: Вывод установки
         if: failure()
-        shell: bash
+        shell: powershell
         run: |
-          текст=$(tail -c 6000 установка.txt | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\r//g;s/\n/%0A/g')
-          echo "::error title=Установка не удалась::$текст"
+          $т = (Get-Content установка.txt -Raw)
+          if ($т.Length -gt 6000) { $т = $т.Substring($т.Length - 6000) }
+          $т = $т.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+          Write-Output "::error title=Установка не удалась::$т"
       - name: Сборка программы с русским именем в установленной папке
         shell: powershell
         env:
