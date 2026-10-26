@@ -21,7 +21,10 @@ jobs:
       - name: Создать выпуск
         env:
           GH_TOKEN: ${{ github.token }}
-        # имена переменных оболочки - только латиницей: bash не принимает другие буквы
+        # имена переменных оболочки - только латиницей: bash не принимает другие буквы.
+        # GitHub убирает из имён прикреплённых файлов русские буквы, поэтому файл
+        # установки прикрепляется под латинским именем install_windows.ps1.
+        # Если выпуск уже есть, его описание и файлы обновляются.
         run: |
           version=$(python3 -c "import versiya; print(versiya.ВЕРСИЯ)")
           tag="v$version"
@@ -30,11 +33,17 @@ jobs:
             echo "::error title=Нет описания выпуска::нужен файл $notes"
             exit 1
           fi
-          if gh release view "$tag" > /dev/null 2>&1; then
-            echo "::notice title=Выпуск уже есть::$tag уже опубликован"
-            exit 0
-          fi
-          files=("установить_windows.ps1")
+          dir=$(mktemp -d)
+          cp установить_windows.ps1 "$dir/install_windows.ps1"
+          files=("$dir/install_windows.ps1")
           for f in редактор/*.vsix; do [ -f "$f" ] && files+=("$f"); done
-          gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "Дан $version" \
-            --notes-file "$notes" --latest
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "Дан $version" --notes-file "$notes"
+            for old in $(gh release view "$tag" --json assets -q '.assets[].name'); do
+              case "$old" in install_windows.ps1|*.vsix) ;; *) gh release delete-asset "$tag" "$old" -y ;; esac
+            done
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "Дан $version" \
+              --notes-file "$notes" --latest
+          fi
