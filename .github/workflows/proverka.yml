@@ -101,3 +101,37 @@ jobs:
           subprocess.run([sys.executable, "dan.py", "собрать", os.path.join("примеры", "факториал.dan")],
                          cwd=папка, check=True)
           subprocess.run([os.path.join(папка, "примеры", "факториал.exe")], cwd=папка, check=True)
+
+  postavka:
+    name: Поставка для Windows (установщик без Python)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Сборка поставки
+        run: python поставка/собрать.py
+      - name: Установка без окон и проверка установленного Дана
+        shell: python
+        run: |
+          import glob, os, subprocess, sys, winreg
+          setup = glob.glob(os.path.join("поставка", "готово", "*-setup.exe"))[0]
+          папка = os.path.join(os.environ["LOCALAPPDATA"], "Programs", "Dan")
+          subprocess.run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/TASKS=path,assoc",
+                          "/LOG=установка.log"], check=True)
+          dan = os.path.join(папка, "dan.exe")
+          assert os.path.isfile(dan), "dan.exe не установлен в " + папка
+          with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as к:
+              путь = winreg.QueryValueEx(к, "Path")[0]
+          assert папка.lower() in путь.lower(), "папка Дана не добавлена в PATH: " + путь
+          р = subprocess.run([sys.executable, os.path.join("поставка", "проверить.py"), dan],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+          print(р.stdout, р.stderr)
+          if р.returncode:
+              текст = (р.stdout + р.stderr)[-8000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print("::error title=Проверка поставки::" + текст)
+          sys.exit(р.returncode)

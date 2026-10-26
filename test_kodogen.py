@@ -9,7 +9,7 @@ import unittest
 
 import dan
 
-КОМПИЛЯТОР_ЕСТЬ = any(shutil.which(к) for к in dan.КОМПИЛЯТОРЫ)
+КОМПИЛЯТОР_ЕСТЬ = dan.компилятор_есть()
 
 
 def выполнить(текст, ввод_данных=""):

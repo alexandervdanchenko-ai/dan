@@ -25,7 +25,7 @@ from proverka import ОшибкаПроверки
 from moduli import ОшибкаМодуля
 
 КАТАЛОГ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "каталог")
-КОМПИЛЯТОР_ЕСТЬ = any(shutil.which(к) for к in dan.КОМПИЛЯТОРЫ)
+КОМПИЛЯТОР_ЕСТЬ = dan.компилятор_есть()
 
 
 def прочитать(путь):

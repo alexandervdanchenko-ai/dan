@@ -7,7 +7,7 @@ import dan
 import sverka_vychisleniy
 
 
-@unittest.skipUnless(any(shutil.which(к) for к in dan.КОМПИЛЯТОРЫ), "нет компилятора C")
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыСверкиВычислений(unittest.TestCase):
 
     def test_случайные_выражения(self):

@@ -55,7 +55,7 @@ def процессор():
 
 
 def замерить(повторов=3):
-    компилятор = dan.найти_компилятор()
+    компилятор = dan.команда_компилятора()
     строки = []
     with tempfile.TemporaryDirectory() as врем:
         for путь_дан in sorted(glob.glob(os.path.join(ПАПКА, "дан", "*.dan"))):
@@ -69,7 +69,7 @@ def замерить(повторов=3):
             путь_си = os.path.join(ПАПКА, "си", имя + ".c")
             if os.path.exists(путь_си):
                 exe_си = os.path.join(врем, имя + "_c")
-                subprocess.run([компилятор, *dan.флаги_mingw(компилятор), "-O2", путь_си, "-o", exe_си, "-lm"], check=True)
+                subprocess.run([*компилятор, "-O2", путь_си, "-o", exe_си, "-lm"], check=True)
                 т_си, в_си = время([exe_си], повторов)
                 if в_си.split() != в_дан.split():
                     raise RuntimeError(f"{имя}: вывод C {в_си!r} не совпадает с выводом Дана {в_дан!r}")
@@ -91,7 +91,7 @@ def отчёт(строки):
     def раз(а, б):
         return "-" if а is None or б is None else f"{а / б:.1f}".replace(".", ",")
 
-    версия_c = subprocess.run([dan.найти_компилятор(), "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+    версия_c = subprocess.run([*dan.команда_компилятора()[:1], "--version"] if not dan.это_zig(dan.команда_компилятора()) else [*dan.команда_компилятора()[:-1], "version"], capture_output=True, text=True).stdout.splitlines()[0]
     текст = [
         "# Замеры скорости",
         "",
