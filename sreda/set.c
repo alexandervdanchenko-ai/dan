@@ -415,3 +415,250 @@ static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes bod
 }
 
 #endif
+
+/* ==== Electronic mail: SMTP and IMAP ====
+   почтовый_запрос(адрес, пользователь, пароль, отправитель, получатели, данные,
+   команда, starttls, секунд): with recipients - sends the message (SMTP),
+   otherwise - performs an IMAP request (the command or, without it, reads what
+   the address names: «imaps://сервер/INBOX;UID=5») and returns the answer.
+   Linux and macOS use libcurl, Windows - curl.exe, which is part of Windows 10
+   and newer. */
+
+static dr_y dan_mail_fail(const char *why, int line) { return dr_y_err(dan_strdup(why), line); }
+
+static int dan_mail_scheme(dan_str url) {
+    if (!strncmp(url, "smtps://", 8)) return 1;
+    if (!strncmp(url, "smtp://", 7)) return 2;
+    if (!strncmp(url, "imaps://", 8)) return 3;
+    if (!strncmp(url, "imap://", 7)) return 4;
+    return 0;
+}
+
+static const char *dan_mail_why(int code) {
+    switch (code) {
+    case 6: return DAN_TXT_MAIL_HOST;
+    case 7: return DAN_TXT_MAIL_CONNECT;
+    case 28: return DAN_TXT_MAIL_TIMEOUT;
+    case 67: return DAN_TXT_MAIL_LOGIN;
+    case 64: return DAN_TXT_MAIL_NOTLS;
+    case 55: case 56: return DAN_TXT_MAIL_BROKEN;
+    case 78: return DAN_TXT_MAIL_NOTFOUND;
+    case 35: case 51: case 53: case 54: case 58: case 59: case 60: case 77: case 80: case 83: case 90: case 91:
+        return DAN_TXT_NET_TLS;
+    default: return NULL;
+    }
+}
+
+#if defined(__wasi__)
+
+static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, dl_Ls *rcpt, dan_bytes data,
+                     dan_str command, bool starttls, int64_t seconds, int line) {
+    (void)url; (void)user; (void)password; (void)from; (void)rcpt; (void)data; (void)command; (void)starttls; (void)seconds;
+    return dan_mail_fail(DAN_TXT_MAIL_WASM, line);
+}
+
+#elif !defined(_WIN32)
+
+#define DAN_CURLOPT_READDATA 10009
+#define DAN_CURLOPT_READFUNCTION 20012
+#define DAN_CURLOPT_UPLOAD 46
+#define DAN_CURLOPT_INFILESIZE_LARGE 30115
+#define DAN_CURLOPT_USE_SSL 119
+#define DAN_CURLOPT_USERNAME 10173
+#define DAN_CURLOPT_PASSWORD 10174
+#define DAN_CURLOPT_MAIL_FROM 10186
+#define DAN_CURLOPT_MAIL_RCPT 10187
+
+typedef struct { const uint8_t *d; size_t n, pos; } dan_mail_src;
+
+static size_t dan_mail_read(char *p, size_t size, size_t n, void *data) {
+    dan_mail_src *s = data;
+    size_t k = size * n;
+    if (k > s->n - s->pos) k = s->n - s->pos;
+    memcpy(p, s->d + s->pos, k);
+    s->pos += k;
+    return k;
+}
+
+static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, dl_Ls *rcpt, dan_bytes data,
+                     dan_str command, bool starttls, int64_t seconds, int line) {
+    int scheme = dan_mail_scheme(url);
+    if (!scheme) return dan_mail_fail(DAN_TXT_MAIL_SCHEME, line);
+    if (!dan_curl_load()) return dan_mail_fail(DAN_TXT_NET_NOCURL, line);
+    void *c = dan_curl.easy_init();
+    if (!c) return dan_mail_fail(DAN_TXT_NET_MEMORY, line);
+    dan_netbuf b = { NULL, 0, 0 };
+    dan_curl_slist *list = NULL;
+    char err[256] = "";
+    dan_mail_src src = { data->data, (size_t)data->len, 0 };
+    long protocols = scheme == 1 ? 1L << 17 : scheme == 2 ? 1L << 16 : scheme == 3 ? 1L << 13 : 1L << 12;
+    dan_curl.easy_setopt(c, DAN_CURLOPT_URL, url);
+    dan_curl.easy_setopt(c, DAN_CURLOPT_ERRORBUFFER, err);
+    dan_curl.easy_setopt(c, DAN_CURLOPT_NOSIGNAL, 1L);
+    dan_curl.easy_setopt(c, DAN_CURLOPT_PROTOCOLS, protocols);
+    dan_curl.easy_setopt(c, DAN_CURLOPT_CONNECTTIMEOUT, 30L);
+    if (seconds > 0) dan_curl.easy_setopt(c, DAN_CURLOPT_TIMEOUT, (long)seconds);
+    if (user[0]) dan_curl.easy_setopt(c, DAN_CURLOPT_USERNAME, user);
+    if (password[0]) dan_curl.easy_setopt(c, DAN_CURLOPT_PASSWORD, password);
+    if (starttls) dan_curl.easy_setopt(c, DAN_CURLOPT_USE_SSL, 3L);         /* CURLUSESSL_ALL */
+    dan_curl.easy_setopt(c, DAN_CURLOPT_WRITEFUNCTION, dan_curl_body);
+    dan_curl.easy_setopt(c, DAN_CURLOPT_WRITEDATA, (void *)&b);
+    if (rcpt->len > 0) {
+        for (int64_t i = 0; i < rcpt->len; i++) list = dan_curl.slist_append(list, rcpt->items[i]);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_MAIL_FROM, from);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_MAIL_RCPT, list);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_UPLOAD, 1L);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_READFUNCTION, dan_mail_read);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_READDATA, (void *)&src);
+        dan_curl.easy_setopt(c, DAN_CURLOPT_INFILESIZE_LARGE, (int64_t)data->len);
+    } else if (command[0]) dan_curl.easy_setopt(c, DAN_CURLOPT_CUSTOMREQUEST, command);
+    int code = dan_curl.easy_perform(c);
+    dan_curl.easy_cleanup(c);
+    if (list) dan_curl.slist_free_all(list);
+    if (code != 0) {
+        free(b.data);
+        /* libcurl reports a missing IMAP folder as a refused login */
+        const char *why = (code == 67 && strstr(err, "Select")) ? DAN_TXT_MAIL_NOTFOUND : dan_mail_why(code);
+        char m[400];
+        if (why) snprintf(m, sizeof m, "%s", why);
+        else snprintf(m, sizeof m, DAN_TXT_NET_OTHER, code, err);
+        return dan_mail_fail(m, line);
+    }
+    return dr_y_some(dan_netbuf_bytes(&b));
+}
+
+#else
+
+/* Windows: curl.exe; the password is passed in a settings file that only the
+   current user can read, not on the command line */
+static void dan_mail_cfg(dan_netbuf *cfg, const char *key, const char *value) {
+    dan_netbuf_add(cfg, key, strlen(key));
+    dan_netbuf_add(cfg, " = \"", 4);
+    for (const char *p = value; *p; p++) {
+        if (*p == '"' || *p == '\\') dan_netbuf_add(cfg, "\\", 1);
+        if (*p == '\r' || *p == '\n') continue;
+        dan_netbuf_add(cfg, p, 1);
+    }
+    dan_netbuf_add(cfg, "\"\n", 2);
+}
+
+static wchar_t *dan_mail_temp(const wchar_t *dir, const wchar_t *kind, unsigned n) {
+    wchar_t *p = dan_alloc(sizeof(wchar_t) * (wcslen(dir) + 64));
+    swprintf(p, wcslen(dir) + 64, L"%lsdan-mail-%lu-%u-%ls", dir, (unsigned long)GetCurrentProcessId(), n, kind);
+    return p;
+}
+
+static int dan_mail_write(const wchar_t *path, const void *d, size_t n) {
+    FILE *f = _wfopen(path, L"wb");
+    if (!f) return 0;
+    size_t w = fwrite(d, 1, n, f);
+    fclose(f);
+    return w == n;
+}
+
+static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, dl_Ls *rcpt, dan_bytes data,
+                     dan_str command, bool starttls, int64_t seconds, int line) {
+    if (!dan_mail_scheme(url)) return dan_mail_fail(DAN_TXT_MAIL_SCHEME, line);
+    wchar_t sys[MAX_PATH], tmp[MAX_PATH], exe[MAX_PATH + 16];
+    if (!GetSystemDirectoryW(sys, MAX_PATH) || !GetTempPathW(MAX_PATH, tmp)) return dan_mail_fail(DAN_TXT_MAIL_NOCURLEXE, line);
+    swprintf(exe, MAX_PATH + 16, L"%ls\\curl.exe", sys);
+    if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) return dan_mail_fail(DAN_TXT_MAIL_NOCURLEXE, line);
+    static volatile LONG counter;
+    unsigned n = (unsigned)InterlockedIncrement(&counter);
+    wchar_t *wcfg = dan_mail_temp(tmp, L"cfg", n), *wdata = dan_mail_temp(tmp, L"data", n),
+            *wout = dan_mail_temp(tmp, L"out", n), *werr = dan_mail_temp(tmp, L"err", n);
+    dan_str cdata = dan_narrow(wdata), cout = dan_narrow(wout), cerr = dan_narrow(werr);
+    dan_netbuf cfg = { NULL, 0, 0 };
+    dan_mail_cfg(&cfg, "url", url);
+    if (user[0]) {
+        dan_str up = dan_concat(dan_concat(user, ":"), password);
+        dan_mail_cfg(&cfg, "user", up);
+    }
+    if (starttls) dan_netbuf_add(&cfg, "ssl-reqd\n", 9);
+    dan_netbuf_add(&cfg, "silent\nshow-error\n", 18);
+    char t[64];
+    snprintf(t, sizeof t, "%lld", (long long)(seconds > 0 ? seconds : 300));
+    dan_mail_cfg(&cfg, "max-time", t);
+    dan_mail_cfg(&cfg, "connect-timeout", "30");
+    dan_mail_cfg(&cfg, "output", cout);
+    dan_mail_cfg(&cfg, "stderr", cerr);
+    int ok = 1;
+    if (rcpt->len > 0) {
+        dan_mail_cfg(&cfg, "mail-from", from);
+        for (int64_t i = 0; i < rcpt->len; i++) dan_mail_cfg(&cfg, "mail-rcpt", rcpt->items[i]);
+        dan_mail_cfg(&cfg, "upload-file", cdata);
+        ok = dan_mail_write(wdata, data->data, (size_t)data->len);
+    } else if (command[0]) dan_mail_cfg(&cfg, "request", command);
+    ok = ok && dan_mail_write(wcfg, cfg.data, cfg.len);
+    free(cfg.data);
+    dr_y result;
+    if (!ok) result = dan_mail_fail(DAN_TXT_MAIL_TEMP, line);
+    else {
+        size_t cl = wcslen(exe) + wcslen(wcfg) + 16;
+        wchar_t *cmd = dan_alloc(sizeof(wchar_t) * cl);
+        swprintf(cmd, cl, L"\"%ls\" -K \"%ls\"", exe, wcfg);
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        memset(&si, 0, sizeof si);
+        si.cb = sizeof si;
+        DWORD code = 1;
+        if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (code == 0) {
+                FILE *f = _wfopen(wout, L"rb");
+                dan_netbuf b = { NULL, 0, 0 };
+                if (f) {
+                    char chunk[8192];
+                    size_t got;
+                    while ((got = fread(chunk, 1, sizeof chunk, f)) > 0) dan_netbuf_add(&b, chunk, got);
+                    fclose(f);
+                }
+                result = dr_y_some(dan_netbuf_bytes(&b));
+            } else {
+                FILE *f = _wfopen(werr, L"rb");
+                char e[400] = "";
+                if (f) { size_t got = fread(e, 1, sizeof e - 1, f); e[got] = 0; fclose(f); }
+                for (char *q = e; *q; q++) if (*q == '\r' || *q == '\n') *q = ' ';
+                const char *why = (code == 67 && strstr(e, "Select")) ? DAN_TXT_MAIL_NOTFOUND : dan_mail_why((int)code);
+                char m[600] = "";
+                if (why) snprintf(m, sizeof m, "%s", why);
+                else snprintf(m, sizeof m, DAN_TXT_NET_OTHER, (int)code, e);
+                result = dan_mail_fail(m, line);
+            }
+        } else result = dan_mail_fail(DAN_TXT_MAIL_NOCURLEXE, line);
+        free(cmd);
+    }
+    DeleteFileW(wcfg); DeleteFileW(wdata); DeleteFileW(wout); DeleteFileW(werr);
+    free(wcfg); free(wdata); free(wout); free(werr);
+    return result;
+}
+
+#endif
+
+/* Date and time for the «Date:» header of a message: «Mon, 26 Oct 2026 10:30:00 +0300» */
+static dan_str dan_mail_date(void) {
+    time_t now = time(NULL);
+    struct tm lt, gt;
+#ifdef _WIN32
+    localtime_s(&lt, &now);
+    gmtime_s(&gt, &now);
+#else
+    localtime_r(&now, &lt);
+    gmtime_r(&now, &gt);
+#endif
+    /* the offset from UTC in minutes */
+    long off = (long)((lt.tm_hour - gt.tm_hour) * 60 + (lt.tm_min - gt.tm_min));
+    int dd = lt.tm_yday - gt.tm_yday;
+    if (dd > 1) dd = -1;
+    if (dd < -1) dd = 1;
+    off += dd * 24 * 60;
+    static const char *const wd[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *const mo[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    char t[64];
+    snprintf(t, sizeof t, "%s, %d %s %d %02d:%02d:%02d %c%02ld%02ld", wd[lt.tm_wday], lt.tm_mday, mo[lt.tm_mon],
+             lt.tm_year + 1900, lt.tm_hour, lt.tm_min, lt.tm_sec, off < 0 ? '-' : '+', labs(off) / 60, labs(off) % 60);
+    return dan_strdup(t);
+}

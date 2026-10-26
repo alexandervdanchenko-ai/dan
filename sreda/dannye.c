@@ -2651,3 +2651,459 @@ static dr_Ls dan_xml_parse(dan_str text, int line) {
     if (x.err) return dr_Ls_err(x.err, line);
     return dr_Ls_some(x.out);
 }
+
+/* ==== Base64 (RFC 4648) ==== */
+
+static const char dan_b64_abc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static dan_str dan_b64_raw(const uint8_t *d, size_t n, int64_t width) {
+    size_t out = (n + 2) / 3 * 4;
+    if (width > 0) out += out / (size_t)width * 2 + 2;
+    char *s = dan_str_new(out);
+    size_t k = 0, col = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? (uint32_t)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        char q[4] = { dan_b64_abc[v >> 18 & 63], dan_b64_abc[v >> 12 & 63],
+                      i + 1 < n ? dan_b64_abc[v >> 6 & 63] : '=', i + 2 < n ? dan_b64_abc[v & 63] : '=' };
+        for (int j = 0; j < 4; j++) {
+            if (width > 0 && col == (size_t)width) { s[k++] = '\r'; s[k++] = '\n'; col = 0; }
+            s[k++] = q[j];
+            col++;
+        }
+    }
+    s[k] = 0;
+    return s;
+}
+
+static dan_str dan_b64(dan_bytes b) { return dan_b64_raw(b->data, (size_t)b->len, 0); }
+static dan_str dan_b64_str(dan_str s) { return dan_b64_raw((const uint8_t *)s, strlen(s), 0); }
+static dan_str dan_b64_lines(dan_bytes b, int64_t width, int line) {
+    if (width < 4 || width % 4) dan_error(DAN_MSG_B64_WIDTH, line);
+    return dan_b64_raw(b->data, (size_t)b->len, width);
+}
+
+/* Decoding; strict: only the alphabet (also - and _ of the URL variant), = at the end and
+   spaces or line breaks. Returns NULL if the text is not Base64. */
+static uint8_t *dan_b64_decode_raw(const char *s, size_t n, size_t *outlen, int strict) {
+    uint8_t *o = dan_alloc(n / 4 * 3 + 4);
+    size_t k = 0;
+    uint32_t acc = 0;
+    int bits = 0, pad = 0;
+    for (size_t i = 0; i < n; i++) {
+        int c = (unsigned char)s[i], v;
+        if (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+' || c == '-') v = 62;
+        else if (c == '/' || c == '_') v = 63;
+        else if (c == '=') { pad++; continue; }
+        else if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        else if (strict) { free(o); return NULL; }
+        else continue;
+        if (pad && strict) { free(o); return NULL; }
+        acc = acc << 6 | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) { bits -= 8; o[k++] = (uint8_t)(acc >> bits); }
+    }
+    *outlen = k;
+    return o;
+}
+
+static dr_y dan_b64_decode(dan_str s, int line) {
+    size_t n;
+    uint8_t *d = dan_b64_decode_raw(s, strlen(s), &n, 1);
+    if (!d) return dr_y_err(dan_strdup(DAN_TXT_B64_BAD), line);
+    return dr_y_some(dan_bytes_wrap(d, (int64_t)n));
+}
+
+/* ==== Messages of electronic mail (MIME, RFC 2045-2047, 2231) ====
+   разобрать_письмо returns a flat list of byte strings:
+     "з" name value     - a header of the message (name in lower case, value decoded to UTF-8)
+     "ч" type file disposition data
+                        - a part: type («text/plain»), file name (or ""), «attachment» / «inline» / "",
+                          content (transfer encoding removed; text is converted to UTF-8) */
+
+/* single-byte code pages: characters 128-255 */
+static const uint16_t dan_cp1251[128] = {
+    0x0402,0x0403,0x201A,0x0453,0x201E,0x2026,0x2020,0x2021,0x20AC,0x2030,0x0409,0x2039,0x040A,0x040C,0x040B,0x040F,
+    0x0452,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,0xFFFD,0x2122,0x0459,0x203A,0x045A,0x045C,0x045B,0x045F,
+    0x00A0,0x040E,0x045E,0x0408,0x00A4,0x0490,0x00A6,0x00A7,0x0401,0x00A9,0x0404,0x00AB,0x00AC,0x00AD,0x00AE,0x0407,
+    0x00B0,0x00B1,0x0406,0x0456,0x0491,0x00B5,0x00B6,0x00B7,0x0451,0x2116,0x0454,0x00BB,0x0458,0x0405,0x0455,0x0457,
+    0x0410,0x0411,0x0412,0x0413,0x0414,0x0415,0x0416,0x0417,0x0418,0x0419,0x041A,0x041B,0x041C,0x041D,0x041E,0x041F,
+    0x0420,0x0421,0x0422,0x0423,0x0424,0x0425,0x0426,0x0427,0x0428,0x0429,0x042A,0x042B,0x042C,0x042D,0x042E,0x042F,
+    0x0430,0x0431,0x0432,0x0433,0x0434,0x0435,0x0436,0x0437,0x0438,0x0439,0x043A,0x043B,0x043C,0x043D,0x043E,0x043F,
+    0x0440,0x0441,0x0442,0x0443,0x0444,0x0445,0x0446,0x0447,0x0448,0x0449,0x044A,0x044B,0x044C,0x044D,0x044E,0x044F };
+static const uint16_t dan_koi8r[128] = {
+    0x2500,0x2502,0x250C,0x2510,0x2514,0x2518,0x251C,0x2524,0x252C,0x2534,0x253C,0x2580,0x2584,0x2588,0x258C,0x2590,
+    0x2591,0x2592,0x2593,0x2320,0x25A0,0x2219,0x221A,0x2248,0x2264,0x2265,0x00A0,0x2321,0x00B0,0x00B2,0x00B7,0x00F7,
+    0x2550,0x2551,0x2552,0x0451,0x2553,0x2554,0x2555,0x2556,0x2557,0x2558,0x2559,0x255A,0x255B,0x255C,0x255D,0x255E,
+    0x255F,0x2560,0x2561,0x0401,0x2562,0x2563,0x2564,0x2565,0x2566,0x2567,0x2568,0x2569,0x256A,0x256B,0x256C,0x00A9,
+    0x044E,0x0430,0x0431,0x0446,0x0434,0x0435,0x0444,0x0433,0x0445,0x0438,0x0439,0x043A,0x043B,0x043C,0x043D,0x043E,
+    0x043F,0x044F,0x0440,0x0441,0x0442,0x0443,0x0436,0x0432,0x044C,0x044B,0x0437,0x0448,0x044D,0x0449,0x0447,0x044A,
+    0x042E,0x0410,0x0411,0x0426,0x0414,0x0415,0x0424,0x0413,0x0425,0x0418,0x0419,0x041A,0x041B,0x041C,0x041D,0x041E,
+    0x041F,0x042F,0x0420,0x0421,0x0422,0x0423,0x0416,0x0412,0x042C,0x042B,0x0417,0x0428,0x042D,0x0429,0x0427,0x042A };
+static const uint16_t dan_cp866[128] = {
+    0x0410,0x0411,0x0412,0x0413,0x0414,0x0415,0x0416,0x0417,0x0418,0x0419,0x041A,0x041B,0x041C,0x041D,0x041E,0x041F,
+    0x0420,0x0421,0x0422,0x0423,0x0424,0x0425,0x0426,0x0427,0x0428,0x0429,0x042A,0x042B,0x042C,0x042D,0x042E,0x042F,
+    0x0430,0x0431,0x0432,0x0433,0x0434,0x0435,0x0436,0x0437,0x0438,0x0439,0x043A,0x043B,0x043C,0x043D,0x043E,0x043F,
+    0x2591,0x2592,0x2593,0x2502,0x2524,0x2561,0x2562,0x2556,0x2555,0x2563,0x2551,0x2557,0x255D,0x255C,0x255B,0x2510,
+    0x2514,0x2534,0x252C,0x251C,0x2500,0x253C,0x255E,0x255F,0x255A,0x2554,0x2569,0x2566,0x2560,0x2550,0x256C,0x2567,
+    0x2568,0x2564,0x2565,0x2559,0x2558,0x2552,0x2553,0x256B,0x256A,0x2518,0x250C,0x2588,0x2584,0x258C,0x2590,0x2580,
+    0x0440,0x0441,0x0442,0x0443,0x0444,0x0445,0x0446,0x0447,0x0448,0x0449,0x044A,0x044B,0x044C,0x044D,0x044E,0x044F,
+    0x0401,0x0451,0x0404,0x0454,0x0407,0x0457,0x040E,0x045E,0x00B0,0x2219,0x00B7,0x221A,0x2116,0x00A4,0x25A0,0x00A0 };
+
+typedef struct { char *s; size_t len, cap; } dan_mbuf;
+
+static int dan_strncaseeq(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return 0;
+        if (!a[i]) return 1;
+    }
+    return 1;
+}
+
+static void dan_mbuf_add(dan_mbuf *b, const void *p, size_t n) {
+    if (b->len + n + 1 > b->cap) { b->cap = (b->len + n + 1) * 2; b->s = dan_realloc(b->s, b->cap); }
+    memcpy(b->s + b->len, p, n);
+    b->len += n;
+    b->s[b->len] = 0;
+}
+
+static void dan_mbuf_utf8(dan_mbuf *b, uint32_t c) {
+    char t[4];
+    size_t n;
+    if (c < 0x80) { t[0] = (char)c; n = 1; }
+    else if (c < 0x800) { t[0] = (char)(0xC0 | c >> 6); t[1] = (char)(0x80 | (c & 63)); n = 2; }
+    else { t[0] = (char)(0xE0 | c >> 12); t[1] = (char)(0x80 | (c >> 6 & 63)); t[2] = (char)(0x80 | (c & 63)); n = 3; }
+    dan_mbuf_add(b, t, n);
+}
+
+static int dan_ieq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+    return *a == *b;
+}
+
+/* Text in a charset -> UTF-8 (appended to b). Unknown charsets and UTF-8 are copied. */
+static void dan_charset_to_utf8(dan_mbuf *b, const uint8_t *d, size_t n, const char *cs) {
+    const uint16_t *t = NULL;
+    int latin1 = 0;
+    if (dan_ieq(cs, "windows-1251") || dan_ieq(cs, "cp1251") || dan_ieq(cs, "x-cp1251")) t = dan_cp1251;
+    else if (dan_ieq(cs, "koi8-r") || dan_ieq(cs, "koi8-u") || dan_ieq(cs, "koi8")) t = dan_koi8r;
+    else if (dan_ieq(cs, "cp866") || dan_ieq(cs, "ibm866") || dan_ieq(cs, "866")) t = dan_cp866;
+    else if (dan_ieq(cs, "iso-8859-1") || dan_ieq(cs, "latin1") || dan_ieq(cs, "windows-1252") || dan_ieq(cs, "us-ascii")
+             || dan_ieq(cs, "ascii")) latin1 = 1;
+    else if (dan_ieq(cs, "iso-8859-5")) {
+        for (size_t i = 0; i < n; i++) {
+            uint32_t c = d[i];
+            if (c == 0xF0) c = 0x2116;
+            else if (c == 0xFD) c = 0xA7;
+            else if (c >= 0xA1 && c != 0xAD) c += 0x360;
+            dan_mbuf_utf8(b, c);
+        }
+        return;
+    }
+    if (!t && !latin1) { dan_mbuf_add(b, d, n); return; }
+    for (size_t i = 0; i < n; i++) {
+        uint32_t c = d[i];
+        if (c >= 128) c = t ? t[c - 128] : (c >= 0x80 && c < 0xA0 && dan_ieq(cs, "windows-1252") ? 0xFFFD : c);
+        dan_mbuf_utf8(b, c);
+    }
+}
+
+/* quoted-printable; in headers (q = 1) «_» is a space */
+static void dan_qp_decode(dan_mbuf *b, const char *s, size_t n, int q) {
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == '=' && i + 2 < n + 1) {
+            if (i + 1 < n && (s[i + 1] == '\r' || s[i + 1] == '\n')) {     /* soft line break */
+                i++;
+                if (s[i] == '\r' && i + 1 < n && s[i + 1] == '\n') i++;
+                continue;
+            }
+            int h1 = i + 1 < n ? dan_hexval(s[i + 1]) : -1, h2 = i + 2 < n ? dan_hexval(s[i + 2]) : -1;
+            if (h1 >= 0 && h2 >= 0) { char v = (char)(h1 * 16 + h2); dan_mbuf_add(b, &v, 1); i += 2; continue; }
+        }
+        if (q && c == '_') c = ' ';
+        dan_mbuf_add(b, &c, 1);
+    }
+}
+
+/* «=?charset?B?...?=» words of a header -> UTF-8 */
+static dan_str dan_mime_header(const char *v, size_t n) {
+    dan_mbuf b = { NULL, 0, 0 };
+    dan_mbuf_add(&b, "", 0);
+    size_t i = 0, pending_ws = 0, ws_start = 0;
+    int last_encoded = 0;
+    while (i < n) {
+        if (v[i] == '=' && i + 1 < n && v[i + 1] == '?') {
+            const char *cs = v + i + 2, *q1 = memchr(cs, '?', n - (size_t)(cs - v));
+            if (q1 && q1 + 2 < v + n && q1[2] == '?') {
+                const char *text = q1 + 3, *end = NULL;
+                for (const char *p = text; p + 1 < v + n; p++) if (p[0] == '?' && p[1] == '=') { end = p; break; }
+                if (end) {
+                    if (!last_encoded && pending_ws) dan_mbuf_add(&b, v + ws_start, pending_ws);
+                    char charset[64];
+                    size_t cl = (size_t)(q1 - cs) < sizeof charset - 1 ? (size_t)(q1 - cs) : sizeof charset - 1;
+                    memcpy(charset, cs, cl);
+                    charset[cl] = 0;
+                    char *star = strchr(charset, '*');         /* RFC 2231 language: =?utf-8*ru?... */
+                    if (star) *star = 0;
+                    dan_mbuf raw = { NULL, 0, 0 };
+                    if (q1[1] == 'B' || q1[1] == 'b') {
+                        size_t dl;
+                        uint8_t *d = dan_b64_decode_raw(text, (size_t)(end - text), &dl, 0);
+                        dan_mbuf_add(&raw, d, dl);
+                        free(d);
+                    } else dan_qp_decode(&raw, text, (size_t)(end - text), 1);
+                    dan_charset_to_utf8(&b, (const uint8_t *)(raw.s ? raw.s : ""), raw.len, charset);
+                    free(raw.s);
+                    i = (size_t)(end - v) + 2;
+                    last_encoded = 1;
+                    pending_ws = 0;
+                    continue;
+                }
+            }
+        }
+        if (v[i] == ' ' || v[i] == '\t' || v[i] == '\r' || v[i] == '\n') {
+            if (!pending_ws) ws_start = i;
+            pending_ws++;
+            i++;
+            continue;
+        }
+        if (pending_ws) { dan_mbuf_add(&b, " ", 1); pending_ws = 0; }
+        last_encoded = 0;
+        dan_mbuf_add(&b, v + i, 1);
+        i++;
+    }
+    char *s = dan_str_new(b.len);
+    memcpy(s, b.s, b.len);
+    s[b.len] = 0;
+    free(b.s);
+    return s;
+}
+
+/* value of a parameter of a header: name="value", name=value, name*=utf-8''%D0%90, name*0*=... */
+static dan_str dan_mime_param(const char *h, size_t n, const char *name) {
+    size_t nl = strlen(name);
+    dan_mbuf ext = { NULL, 0, 0 };
+    char cs[48] = "";
+    dan_str plain = NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (h[i] != ';') continue;
+        size_t j = i + 1;
+        while (j < n && (h[j] == ' ' || h[j] == '\t' || h[j] == '\r' || h[j] == '\n')) j++;
+        if (j + nl > n || !dan_strncaseeq(h + j, name, nl)) continue;
+        size_t k = j + nl;
+        int extended = 0;
+        if (k < n && h[k] == '*') {           /* *, *0, *0*, *1* ... */
+            k++;
+            while (k < n && isdigit((unsigned char)h[k])) k++;
+            if (k < n && h[k] == '*') k++;
+            extended = (k > 0 && h[k - 1] == '*');
+            if (!extended) extended = 2;      /* name*0="..." - a continuation without encoding */
+        }
+        while (k < n && h[k] == ' ') k++;
+        if (k >= n || h[k] != '=') continue;
+        k++;
+        while (k < n && h[k] == ' ') k++;
+        size_t vs = k, ve;
+        int quoted = k < n && h[k] == '"';
+        if (quoted) {
+            vs = ++k;
+            while (k < n && h[k] != '"') { if (h[k] == '\\') k++; k++; }
+            ve = k < n ? k : n;
+        } else {
+            while (k < n && h[k] != ';' && h[k] != ' ' && h[k] != '\r' && h[k] != '\n') k++;
+            ve = k;
+        }
+        if (extended == 1) {
+            const char *v = h + vs;
+            size_t vl = ve - vs;
+            if (!cs[0]) {
+                const char *a = memchr(v, '\'', vl);
+                const char *b = a ? memchr(a + 1, '\'', vl - (size_t)(a + 1 - v)) : NULL;
+                if (a && b) {
+                    size_t cl = (size_t)(a - v) < sizeof cs - 1 ? (size_t)(a - v) : sizeof cs - 1;
+                    memcpy(cs, v, cl);
+                    cs[cl] = 0;
+                    vl -= (size_t)(b + 1 - v);
+                    v = b + 1;
+                }
+            }
+            for (size_t m = 0; m < vl; m++) {
+                if (v[m] == '%' && m + 2 < vl + 1 && dan_hexval(v[m + 1]) >= 0 && dan_hexval(v[m + 2]) >= 0) {
+                    char c = (char)(dan_hexval(v[m + 1]) * 16 + dan_hexval(v[m + 2]));
+                    dan_mbuf_add(&ext, &c, 1);
+                    m += 2;
+                } else dan_mbuf_add(&ext, v + m, 1);
+            }
+        } else if (extended == 2) {
+            dan_mbuf_add(&ext, h + vs, ve - vs);
+        } else if (!plain) {
+            /* backslash escapes inside quotes */
+            dan_mbuf u = { NULL, 0, 0 };
+            for (size_t m = vs; m < ve; m++) { if (h[m] == '\\' && m + 1 < ve) m++; dan_mbuf_add(&u, h + m, 1); }
+            plain = dan_mime_header(u.s ? u.s : "", u.len);
+            free(u.s);
+        }
+    }
+    if (ext.len) {
+        dan_mbuf b = { NULL, 0, 0 };
+        dan_charset_to_utf8(&b, (const uint8_t *)ext.s, ext.len, cs[0] ? cs : "utf-8");
+        free(ext.s);
+        dan_str r = dan_mime_header(b.s, b.len);
+        free(b.s);
+        return r;
+    }
+    return plain ? plain : dan_strdup("");
+}
+
+static const char *dan_mime_find_body(const char *s, size_t n, size_t *hlen) {
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\n' && i + 1 < n && s[i + 1] == '\n') { *hlen = i + 1; return s + i + 2; }
+        if (s[i] == '\n' && i + 2 < n && s[i + 1] == '\r' && s[i + 2] == '\n') { *hlen = i + 1; return s + i + 3; }
+    }
+    *hlen = n;
+    return s + n;
+}
+
+/* the value of a header in a header block (unfolded, without the name), or NULL */
+static char *dan_mime_get(const char *h, size_t n, const char *name, size_t *vl) {
+    size_t nl = strlen(name);
+    for (size_t i = 0; i < n;) {
+        size_t e = i;
+        while (e < n && h[e] != '\n') e++;
+        if (e - i > nl && dan_strncaseeq(h + i, name, nl) && h[i + nl] == ':') {
+            /* the header continues on lines starting with a space */
+            size_t end = e;
+            while (end + 1 < n && (h[end + 1] == ' ' || h[end + 1] == '\t')) {
+                end++;
+                while (end < n && h[end] != '\n') end++;
+            }
+            size_t vs = i + nl + 1;
+            while (vs < end && (h[vs] == ' ' || h[vs] == '\t')) vs++;
+            char *v = dan_alloc(end - vs + 1);
+            size_t k = 0;
+            for (size_t m = vs; m < end; m++) if (h[m] != '\r' && h[m] != '\n') v[k++] = h[m];
+            while (k > 0 && (v[k - 1] == ' ' || v[k - 1] == '\t')) k--;
+            v[k] = 0;
+            *vl = k;
+            return v;
+        }
+        i = e + 1;
+    }
+    return NULL;
+}
+
+static dan_bytes dan_mime_cstr(const char *s) { return dan_bytes_from_str(s); }
+
+static void dan_mime_part(dl_Ly *out, const char *s, size_t n, int depth, const char *default_type) {
+    size_t hl;
+    const char *body = dan_mime_find_body(s, n, &hl);
+    size_t bl = n - (size_t)(body - s);
+    size_t vl = 0;
+    char *ct = dan_mime_get(s, hl, "Content-Type", &vl);
+    char type[96];
+    snprintf(type, sizeof type, "%s", default_type);
+    if (ct) {
+        size_t k = 0;
+        while (k < vl && k < sizeof type - 1 && ct[k] != ';' && ct[k] != ' ') { type[k] = (char)tolower((unsigned char)ct[k]); k++; }
+        type[k] = 0;
+    }
+    if (!strncmp(type, "multipart/", 10) && depth < 20 && ct) {
+        dan_str boundary = dan_mime_param(ct, vl, "boundary");
+        size_t bln = strlen(boundary);
+        const char *sub_default = !strcmp(type, "multipart/digest") ? "message/rfc822" : "text/plain";
+        if (bln) {
+            const char *part = NULL;
+            for (size_t i = 0; i + 2 + bln <= bl;) {
+                int at_line = i == 0 || body[i - 1] == '\n';
+                if (at_line && body[i] == '-' && body[i + 1] == '-' && !memcmp(body + i + 2, boundary, bln)) {
+                    if (part) {
+                        size_t pe = i;
+                        if (pe > 0 && body[pe - 1] == '\n') pe--;
+                        if (pe > 0 && body[pe - 1] == '\r') pe--;
+                        if (pe > (size_t)(part - body)) dan_mime_part(out, part, pe - (size_t)(part - body), depth + 1, sub_default);
+                    }
+                    size_t j = i + 2 + bln;
+                    if (j + 1 < bl && body[j] == '-' && body[j + 1] == '-') { part = NULL; break; }
+                    while (j < bl && body[j] != '\n') j++;
+                    part = body + (j < bl ? j + 1 : bl);
+                    i = j;
+                    continue;
+                }
+                while (i < bl && body[i] != '\n') i++;
+                i++;
+            }
+            if (part && part < body + bl) dan_mime_part(out, part, bl - (size_t)(part - body), depth + 1, sub_default);
+        }
+        free(ct);
+        return;
+    }
+    /* a leaf part */
+    size_t el = 0, dl = 0;
+    char *enc = dan_mime_get(s, hl, "Content-Transfer-Encoding", &el);
+    char *disp = dan_mime_get(s, hl, "Content-Disposition", &dl);
+    dan_str file = disp ? dan_mime_param(disp, dl, "filename") : dan_strdup("");
+    if (!file[0] && ct) file = dan_mime_param(ct, vl, "name");
+    char dtype[16] = "";
+    if (disp) {
+        size_t k = 0;
+        while (k < dl && k < sizeof dtype - 1 && disp[k] != ';' && disp[k] != ' ') { dtype[k] = (char)tolower((unsigned char)disp[k]); k++; }
+        dtype[k] = 0;
+    }
+    dan_mbuf data = { NULL, 0, 0 };
+    if (enc && dan_ieq(enc, "base64")) {
+        size_t ol;
+        uint8_t *d = dan_b64_decode_raw(body, bl, &ol, 0);
+        dan_mbuf_add(&data, d, ol);
+        free(d);
+    } else if (enc && dan_ieq(enc, "quoted-printable")) dan_qp_decode(&data, body, bl, 0);
+    else dan_mbuf_add(&data, body, bl);
+    dan_bytes content;
+    if (!strncmp(type, "text/", 5) && strcmp(dtype, "attachment") != 0) {
+        dan_str cs = ct ? dan_mime_param(ct, vl, "charset") : dan_strdup("us-ascii");
+        dan_mbuf u = { NULL, 0, 0 };
+        dan_mbuf_add(&u, "", 0);
+        dan_charset_to_utf8(&u, (const uint8_t *)(data.s ? data.s : ""), data.len, cs[0] ? cs : "us-ascii");
+        content = dan_bytes_wrap((uint8_t *)u.s, (int64_t)u.len);
+        free(data.s);
+    } else content = dan_bytes_wrap(data.s ? (uint8_t *)data.s : dan_alloc(1), (int64_t)data.len);
+    dl_Ly_push(out, dan_mime_cstr("ч"));
+    dl_Ly_push(out, dan_mime_cstr(type));
+    dl_Ly_push(out, dan_bytes_from_str(file));
+    dl_Ly_push(out, dan_mime_cstr(dtype));
+    dl_Ly_push(out, content);
+    free(ct); free(enc); free(disp);
+}
+
+static dl_Ly *dan_mail_parse(dan_bytes msg) {
+    const char *s = (const char *)msg->data;
+    size_t n = (size_t)msg->len;
+    dl_Ly *out = dl_Ly_from(0, NULL);
+    size_t hl;
+    dan_mime_find_body(s, n, &hl);
+    /* headers of the message */
+    for (size_t i = 0; i < hl;) {
+        size_t e = i;
+        while (e < hl && s[e] != '\n') e++;
+        const char *colon = memchr(s + i, ':', e - i);
+        if (colon && s[i] != ' ' && s[i] != '\t') {
+            char name[80];
+            size_t nl = (size_t)(colon - (s + i)) < sizeof name - 1 ? (size_t)(colon - (s + i)) : sizeof name - 1;
+            for (size_t k = 0; k < nl; k++) name[k] = (char)tolower((unsigned char)s[i + k]);
+            name[nl] = 0;
+            size_t vl;
+            char *v = dan_mime_get(s + i, hl - i, name, &vl);
+            if (v) {
+                dl_Ly_push(out, dan_mime_cstr("з"));
+                dl_Ly_push(out, dan_mime_cstr(name));
+                dl_Ly_push(out, dan_bytes_from_str(dan_mime_header(v, vl)));
+                free(v);
+            }
+        }
+        i = e + 1;
+    }
+    dan_mime_part(out, s, n, 0, "text/plain");
+    return out;
+}
