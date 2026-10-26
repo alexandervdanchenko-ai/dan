@@ -21,18 +21,20 @@ jobs:
       - name: Создать выпуск
         env:
           GH_TOKEN: ${{ github.token }}
+        # имена переменных оболочки - только латиницей: bash не принимает другие буквы
         run: |
-          номер=$(python3 -c "import versiya; print(versiya.ВЕРСИЯ)")
-          метка="v$номер"
-          if [ ! -f "выпуски/$метка.md" ]; then
-            echo "::error title=Нет описания выпуска::нужен файл выпуски/$метка.md"
+          version=$(python3 -c "import versiya; print(versiya.ВЕРСИЯ)")
+          tag="v$version"
+          notes="выпуски/$tag.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error title=Нет описания выпуска::нужен файл $notes"
             exit 1
           fi
-          if gh release view "$метка" > /dev/null 2>&1; then
-            echo "::notice title=Выпуск уже есть::$метка уже опубликован"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "::notice title=Выпуск уже есть::$tag уже опубликован"
             exit 0
           fi
-          файлы=("установить_windows.ps1")
-          for ф in редактор/*.vsix; do [ -f "$ф" ] && файлы+=("$ф"); done
-          gh release create "$метка" "${файлы[@]}" --target "$GITHUB_SHA" --title "Дан $номер" \
-            --notes-file "выпуски/$метка.md" --latest
+          files=("установить_windows.ps1")
+          for f in редактор/*.vsix; do [ -f "$f" ] && files+=("$f"); done
+          gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "Дан $version" \
+            --notes-file "$notes" --latest
