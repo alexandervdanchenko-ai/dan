@@ -71,31 +71,33 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Установка (Windows PowerShell, как в README)
+        # в шагах PowerShell 5.1 только латиница: служебный файл шага он читает без учёта UTF-8
         shell: powershell
         env:
           DAN_FOLDER: ${{ runner.temp }}\проекты\Дан
           DAN_NO_TESTS: "1"
         run: |
-          powershell -ExecutionPolicy Bypass -File установить_windows.ps1 *> установка.txt
-          $код = $LASTEXITCODE
-          Get-Content установка.txt
-          exit $код
+          $script = (Get-ChildItem -Filter "*_windows.ps1" | Select-Object -First 1).FullName
+          powershell -ExecutionPolicy Bypass -File $script *> install.txt
+          $code = $LASTEXITCODE
+          Get-Content install.txt
+          exit $code
       - name: Вывод установки
         if: failure()
         shell: powershell
         run: |
-          $т = (Get-Content установка.txt -Raw)
-          if ($т.Length -gt 6000) { $т = $т.Substring($т.Length - 6000) }
-          $т = $т.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
-          Write-Output "::error title=Установка не удалась::$т"
+          $t = (Get-Content install.txt -Raw)
+          if ($t.Length -gt 6000) { $t = $t.Substring($t.Length - 6000) }
+          $t = $t.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+          Write-Output "::error title=Install failed::$t"
       - name: Сборка программы с русским именем в установленной папке
-        shell: powershell
+        shell: python
         env:
+          DAN_FOLDER: ${{ runner.temp }}\проекты\Дан
           PYTHONUTF8: "1"
         run: |
-          $п = "${{ runner.temp }}\проекты\Дан"
-          Set-Location $п
-          python dan.py собрать "примеры\факториал.dan"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          & ".\примеры\факториал.exe"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          import os, subprocess, sys
+          папка = os.environ["DAN_FOLDER"]
+          subprocess.run([sys.executable, "dan.py", "собрать", os.path.join("примеры", "факториал.dan")],
+                         cwd=папка, check=True)
+          subprocess.run([os.path.join(папка, "примеры", "факториал.exe")], cwd=папка, check=True)
