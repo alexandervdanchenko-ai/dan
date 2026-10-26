@@ -100,5 +100,29 @@ class ТестыWindows(unittest.TestCase):
         self.assertIn("слишком глубокая рекурсия", ошибки)
 
 
+
+@unittest.skipUnless(MINGW, "нет x86_64-w64-mingw32-gcc")
+class ТестыСборкиДляWindows(unittest.TestCase):
+    """Сборка без запуска: имена в среде выполнения не должны совпадать с макросами
+    заголовков Windows (windows.h определяет, например, small и near)."""
+
+    def test_все_части_среды_вместе(self):
+        текст = ('подключить "http"\nподключить "почта"\nподключить "окна"\n'
+                 'вывод(делители(12))\n'
+                 'если ошибка о = http.получить("http://x") { вывод(о) }\n'
+                 'если пусть с = текст_pdf(байты("x")) { вывод(с) }\n'
+                 'вывод(почта.разобрать(байты("x")).тема)\n'
+                 'если ошибка о = файлы_архива(байты("x")) { вывод(о) }\n')
+        код_c = dan.перевести(текст)
+        with tempfile.TemporaryDirectory(prefix="dan_win_") as папка:
+            путь_c = os.path.join(папка, "p.c")
+            with open(путь_c, "w", encoding="utf-8") as ф:
+                ф.write(код_c)
+            сборка = subprocess.run([MINGW, *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o",
+                                     os.path.join(папка, "p.exe"), "-lm", "-mwindows",
+                                     "-luser32", "-lgdi32", "-lcomdlg32"], capture_output=True, text=True)
+            self.assertEqual(сборка.returncode, 0, сборка.stderr[-3000:])
+
+
 if __name__ == "__main__":
     unittest.main()

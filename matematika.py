@@ -171,15 +171,15 @@ static bool dan_prime(int64_t n) {
 
 static dl_Li *dan_divisors(int64_t n, int line) {
     if (n < 1) dan_natural_error(DAN_NAME_DIVISORS, n, line);
-    dl_Li *small = dl_Li_from(0, NULL), *large = dl_Li_from(0, NULL);
+    dl_Li *lo = dl_Li_from(0, NULL), *hi = dl_Li_from(0, NULL);
     for (int64_t d = 1; d <= n / d; d++) {
         if (n % d == 0) {
-            dl_Li_push(small, d);
-            if (d != n / d) dl_Li_push(large, n / d);
+            dl_Li_push(lo, d);
+            if (d != n / d) dl_Li_push(hi, n / d);
         }
     }
-    for (int64_t i = large->len - 1; i >= 0; i--) dl_Li_push(small, large->items[i]);
-    return small;
+    for (int64_t i = hi->len - 1; i >= 0; i--) dl_Li_push(lo, hi->items[i]);
+    return lo;
 }
 
 static dl_Li *dan_multiples(int64_t a, int64_t count, int line) {

@@ -2968,7 +2968,7 @@ static dan_str dan_mime_param(const char *h, size_t n, const char *name) {
                 }
             }
             for (size_t m = 0; m < vl; m++) {
-                if (v[m] == '%' && m + 2 < vl + 1 && dan_hexval(v[m + 1]) >= 0 && dan_hexval(v[m + 2]) >= 0) {
+                if (v[m] == '%' && m + 2 < vl && dan_hexval(v[m + 1]) >= 0 && dan_hexval(v[m + 2]) >= 0) {
                     char c = (char)(dan_hexval(v[m + 1]) * 16 + dan_hexval(v[m + 2]));
                     dan_mbuf_add(&ext, &c, 1);
                     m += 2;
@@ -2992,6 +2992,7 @@ static dan_str dan_mime_param(const char *h, size_t n, const char *name) {
         free(b.s);
         return r;
     }
+    free(ext.s);                        /* an empty extended value still has a buffer */
     return plain ? plain : dan_strdup("");
 }
 

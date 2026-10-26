@@ -65,6 +65,8 @@ def найти_clang():
 
 
 def libfuzzer_есть():
+    if os.name == "nt":         # в Windows мишени собираются clang из комплекта Microsoft без libFuzzer Дана
+        return False
     clang = найти_clang()
     if not clang:
         return False
