@@ -725,6 +725,11 @@ static int64_t dan_str_len(dan_str s) {
 static void dan_format_float(char *buf, size_t size, double v) {
     /* Shortest text that reads back as the same number; the integer
        part is never shortened to exponent form (10.0, not 1e+01). */
+    /* «не число» и бесконечность пишутся одинаково на всех системах: библиотеки C
+       пишут знак «не числа» по-разному (-nan, nan, -nan(ind)) */
+    if (v != v) { snprintf(buf, size, "nan"); return; }
+    if (v > 1.7976931348623157e308) { snprintf(buf, size, "inf"); return; }
+    if (v < -1.7976931348623157e308) { snprintf(buf, size, "-inf"); return; }
     double mag = v < 0 ? -v : v;
     int start = 1;
     while (mag >= 10.0 && start < 17) { mag /= 10.0; start++; }
