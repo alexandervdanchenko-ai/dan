@@ -74,7 +74,7 @@ class ТестыWebAssembly(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node") and subprocess.run(
         ["node", "-e", "require('playwright')"], capture_output=True,
-        env=dict(os.environ, NODE_PATH=subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
+        env=dict(os.environ, NODE_PATH=subprocess.run([shutil.which("npm") or "npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
                  if shutil.which("npm") else "")).returncode == 0, "нет Node.js с Playwright")
     def test_страница_в_браузере(self):
         сценарий = r"""
@@ -101,7 +101,7 @@ const { chromium } = require('playwright');
             _, путь_html = dan.собрать_веб(путь, текст)
             with open(os.path.join(п, "браузер.js"), "w", encoding="utf-8") as ф:
                 ф.write(сценарий)
-            окружение = dict(os.environ, NODE_PATH=subprocess.run(["npm", "root", "-g"], capture_output=True,
+            окружение = dict(os.environ, NODE_PATH=subprocess.run([shutil.which("npm") or "npm", "root", "-g"], capture_output=True,
                                                                   text=True).stdout.strip())
             р = subprocess.run(["node", os.path.join(п, "браузер.js"), путь_html], capture_output=True, text=True,
                                encoding="utf-8", timeout=120, env=окружение)

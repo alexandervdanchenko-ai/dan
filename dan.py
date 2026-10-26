@@ -49,8 +49,10 @@ import uzly
 КОМПИЛЯТОРЫ = ("gcc", "clang", "cc")
 # Служебная информация (символы отладки, таблицы раскрутки стека,
 # неиспользуемые функции) из готовой программы удаляется всегда.
+# Компоновщик macOS удаляет неиспользуемый код своим параметром.
+УДАЛИТЬ_НЕНУЖНОЕ = "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections"
 ФЛАГИ_ОБЩИЕ = ["-std=c11", "-fwrapv", "-w", "-s", "-ffunction-sections", "-fdata-sections",
-               "-Wl,--gc-sections", "-fno-asynchronous-unwind-tables", "-fno-ident"]
+               УДАЛИТЬ_НЕНУЖНОЕ, "-fno-asynchronous-unwind-tables", "-fno-ident"]
 ФЛАГИ_СКОРОСТЬ = ["-O2"]
 ФЛАГИ_РАЗМЕР = ["-Os"]
 # Размер стека в Windows по умолчанию 1 МБ, в Linux обычно 8 МБ; 64 МБ дают
@@ -170,7 +172,8 @@ def собрать_веб(путь, исходник, малый=False):
     путь_c, путь_wasm, путь_html = основа + ".c", основа + ".wasm", основа + ".html"
     with open(путь_c, "w", encoding="utf-8") as ф:
         ф.write(код_c)
-    флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф not in ("-fno-asynchronous-unwind-tables",)] + \
+    флаги = [ф if ф != УДАЛИТЬ_НЕНУЖНОЕ else "-Wl,--gc-sections"
+             for ф in ФЛАГИ_ОБЩИЕ if ф not in ("-fno-asynchronous-unwind-tables",)] + \
         (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ) + ["-Wl,-z,stack-size=8388608"]
     результат = _скомпилировать([*найти_компилятор_wasm(), *флаги], путь_c, путь_wasm, [])
     if результат.returncode != 0:
@@ -302,7 +305,7 @@ def собрать_для(путь, исходник, система, малый
     путь_c, путь_exe = основа + ".c", основа + окончание
     with open(путь_c, "w", encoding="utf-8") as ф:
         ф.write(код_c)
-    флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-Wl,--gc-sections"] + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
+    флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != УДАЛИТЬ_НЕНУЖНОЕ] + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
     библиотеки = ["-lm"]
     if система == "windows":
         библиотеки.append("-Wl,--stack,67108864")
@@ -331,9 +334,6 @@ def собрать(путь, исходник, малый=False, сжать=Fals
     флаги = ФЛАГИ_ОБЩИЕ + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
     if отладка:
         флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-s"] + ["-O0", "-g"]
-    if sys.platform == "darwin":
-        # компоновщик macOS удаляет неиспользуемый код своим параметром
-        флаги = [ф if ф != "-Wl,--gc-sections" else "-Wl,-dead_strip" for ф in флаги]
     библиотеки = БИБЛИОТЕКИ + (["-pthread"] if "DAN_TASKS" in код_c and os.name != "nt" else [])
     библиотеки += библиотеки_c(код_c, os.path.dirname(os.path.abspath(путь)))
     if "#define DAN_GUI 1" in код_c and os.name == "nt":

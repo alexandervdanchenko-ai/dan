@@ -23,7 +23,7 @@ from test_sistema import строка_дан
 
 def запустить(текст, папка):
     путь = os.path.join(папка, "программа.dan")
-    текст = текст.replace("ПАПКА", папка)
+    текст = текст.replace("ПАПКА", папка.replace("\\", "/"))
     with open(путь, "w", encoding="utf-8") as ф:
         ф.write(текст)
     начало = time.perf_counter()

@@ -7,7 +7,10 @@
 """
 
 import os
-import resource
+try:
+    import resource
+except ImportError:      # Windows
+    resource = None
 import shutil
 import subprocess
 import sys
@@ -297,6 +300,7 @@ class ТестыПроверкиПамяти(unittest.TestCase):
 @unittest.skipUnless(КОМПИЛЯТОР and sys.platform == "linux", "нужен Linux и компилятор C")
 class ТестыРасходаПамяти(unittest.TestCase):
 
+    @unittest.skipUnless(resource, "нет модуля resource (Windows)")
     def test_временные_строки_не_накапливаются(self):
         текст = ("перем итог = 0\nдля к в 1..3000000 {\n    пусть с = стр(к) + \"-\" + стр(к * 2)\n"
                  "    итог += с.длина\n}\nвывод(итог)")

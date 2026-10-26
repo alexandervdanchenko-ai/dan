@@ -26,7 +26,7 @@ def выполнить_с_файлами(текст, файлы=None, тайма
             with open(os.path.join(п, имя), "w", encoding="utf-8", newline="") as ф:
                 ф.write(содержимое)
         путь = os.path.join(п, "программа.dan")
-        текст = текст.replace("ПАПКА", п)
+        текст = текст.replace("ПАПКА", п.replace("\\", "/"))
         with open(путь, "w", encoding="utf-8") as ф:
             ф.write(текст)
         исп = dan.собрать(путь, текст)
@@ -120,7 +120,7 @@ class ТестыJSON(unittest.TestCase):
                 with open(os.path.join(п, имя), "w", encoding="utf-8") as ф:
                     ф.write(текст)
             путь = os.path.join(п, "программа.dan")
-            текст = ПРОГРАММА_ЭХО.replace("ПАПКА", п)
+            текст = ПРОГРАММА_ЭХО.replace("ПАПКА", п.replace("\\", "/"))
             исп = dan.собрать(путь, текст)
             р = subprocess.run([исп], capture_output=True, text=True, encoding="utf-8", timeout=120)
             self.assertEqual(р.returncode, 0, р.stderr)
@@ -189,7 +189,7 @@ class ТестыJSON(unittest.TestCase):
                 with open(os.path.join(п, имя), "w", encoding="utf-8") as ф:
                     ф.write(текст)
             путь = os.path.join(п, "программа.dan")
-            текст = ПРОГРАММА_ЭХО.replace("ПАПКА", п)
+            текст = ПРОГРАММА_ЭХО.replace("ПАПКА", п.replace("\\", "/"))
             р = subprocess.run([dan.собрать(путь, текст)], capture_output=True, text=True, encoding="utf-8", timeout=60)
             self.assertEqual(р.returncode, 0, р.stderr)
             for н, (исходный, часть) in enumerate(случаи):
