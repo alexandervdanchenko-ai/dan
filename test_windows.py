@@ -28,10 +28,12 @@ def выполнить_в_windows(текст, ввод_данных=""):
     with tempfile.TemporaryDirectory(prefix="dan_win_") as папка:
         путь_c = os.path.join(папка, "p.c")
         exe = os.path.join(папка, "p.exe")
+        код_c = dan.перевести(текст)
         with open(путь_c, "w", encoding="utf-8") as ф:
-            ф.write(dan.перевести(текст))
+            ф.write(код_c)
+        окна = ["-mwindows"] if "#define DAN_GUI 1" in код_c else []
         сборка = subprocess.run([MINGW, *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o", exe,
-                                 "-lm", "-Wl,--stack,67108864"], capture_output=True, text=True)
+                                 "-lm", "-Wl,--stack,67108864", *окна], capture_output=True, text=True)
         if сборка.returncode:
             raise AssertionError("сборка для Windows не удалась:\n" + сборка.stderr)
         среда = dict(os.environ, WINEDEBUG="-all",
