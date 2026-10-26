@@ -47,6 +47,22 @@ jobs:
           файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-setup.exe"))
           файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-windows.zip"))
           файлы += glob.glob(os.path.join("редактор", "*.vsix"))
+          # контрольные суммы: файл SHA256SUMS.txt и таблица в описании выпуска
+          import hashlib
+          суммы = []
+          for ф in файлы:
+              with open(ф, "rb") as фф:
+                  суммы.append((os.path.basename(ф), hashlib.sha256(фф.read()).hexdigest()))
+          путь_сумм = os.path.join(папка, "SHA256SUMS.txt")
+          with open(путь_сумм, "w", encoding="utf-8", newline="\n") as фф:
+              фф.writelines(f"{с}  {и}\n" for и, с in суммы)
+          файлы.append(путь_сумм)
+          with open(описание, encoding="utf-8") as фф:
+              текст = фф.read().rstrip() + "\n\n## Контрольные суммы SHA256\n\n| Файл | SHA256 |\n|---|---|\n"
+          текст += "".join(f"| `{и}` | `{с}` |\n" for и, с in суммы)
+          описание = os.path.join(папка, "описание.md")
+          with open(описание, "w", encoding="utf-8") as фф:
+              фф.write(текст)
           def gh(*а, проверять=True):
               return subprocess.run(["gh", *а], check=проверять, capture_output=True, text=True,
                                     encoding="utf-8", errors="replace")

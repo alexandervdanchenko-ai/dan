@@ -1,0 +1,34 @@
+name: Предложение
+description: Новая возможность языка или библиотеки
+labels: ["предложение"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Каждое предложение отвечает на четыре вопроса из раздела 10 файла `принципы.md`. Предложение, которое меняет язык, оформляется документом в папке `предложения` и обсуждается не меньше 10 дней.
+  - type: textarea
+    id: zadacha
+    attributes:
+      label: Какую задачу решает
+      description: Пример программы, которую сейчас написать неудобно или нельзя
+    validations:
+      required: true
+  - type: textarea
+    id: tsena
+    attributes:
+      label: Чего стоит
+      description: Скорость, объём языка, который нужно изучить, сложность компилятора
+    validations:
+      required: true
+  - type: textarea
+    id: drugie
+    attributes:
+      label: Не повторяет ли проблему другого языка
+    validations:
+      required: true
+  - type: textarea
+    id: sovmestimost
+    attributes:
+      label: Не ломает ли написанные программы
+    validations:
+      required: true

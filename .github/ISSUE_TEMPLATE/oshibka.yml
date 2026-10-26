@@ -1,0 +1,45 @@
+name: Ошибка
+description: Дан работает не так, как описано, падает или выдаёт неверный результат
+labels: ["ошибка"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение. Об уязвимостях (чтение чужой памяти, зависание на файле) сообщайте закрыто: см. SECURITY.md.
+  - type: input
+    id: versiya
+    attributes:
+      label: Версия Дана
+      description: Вывод команды `dan --версия`
+      placeholder: "Дан 1.2; редакции языка: 2026"
+    validations:
+      required: true
+  - type: input
+    id: sistema
+    attributes:
+      label: Система
+      placeholder: "Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: programma
+    attributes:
+      label: Программа
+      description: Самая короткая программа, на которой видна ошибка
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: ozhidalos
+    attributes:
+      label: Что ожидалось
+    validations:
+      required: true
+  - type: textarea
+    id: poluchilos
+    attributes:
+      label: Что получилось
+      description: Вывод программы или текст сообщения об ошибке целиком
+      render: text
+    validations:
+      required: true
