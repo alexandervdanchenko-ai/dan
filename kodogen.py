@@ -1421,6 +1421,77 @@ static dan_big dan_big_from_str(dan_str s, int line) {
 }
 """
 
+ПРОФИЛЬ_C = r"""
+/* ---- profiler (python dan.py профиль программа.dan) ----
+   Every function of the program starts a frame and closes it automatically
+   at the end of its C scope (the cleanup attribute). A frame knows its
+   start time and the time spent in the functions it called, so each
+   function gets its own time (without callees) and its total time; for
+   recursive functions the total time counts only the outermost call.
+   Counters are shared by tasks and updated atomically. At exit the table is
+   written to the file named by the DAN_PROFILE environment variable. */
+
+typedef struct dan_prof_frame { struct dan_prof_frame *parent; int id; uint64_t start, child; } dan_prof_frame;
+typedef struct { uint64_t calls, total, self; } dan_prof_entry;
+static dan_prof_entry dan_prof[DAN_PROF_COUNT];
+static DAN_TLS dan_prof_frame *dan_prof_top;
+static DAN_TLS unsigned dan_prof_active[DAN_PROF_COUNT];
+static uint64_t dan_prof_begin;
+
+static uint64_t dan_prof_now(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)(c.QuadPart / freq.QuadPart) * 1000000000u
+         + (uint64_t)(c.QuadPart % freq.QuadPart) * 1000000000u / (uint64_t)freq.QuadPart;
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+#endif
+}
+
+static inline void dan_prof_enter(dan_prof_frame *f, int id) {
+    f->parent = dan_prof_top; f->id = id; f->child = 0;
+    dan_prof_active[id]++;
+    dan_prof_top = f;
+    f->start = dan_prof_now();
+}
+
+static inline void dan_prof_leave(dan_prof_frame *f) {
+    uint64_t spent = dan_prof_now() - f->start;
+    dan_prof_entry *e = &dan_prof[f->id];
+    __atomic_fetch_add(&e->calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&e->self, spent > f->child ? spent - f->child : 0, __ATOMIC_RELAXED);
+    if (--dan_prof_active[f->id] == 0) __atomic_fetch_add(&e->total, spent, __ATOMIC_RELAXED);
+    if (f->parent) f->parent->child += spent;
+    dan_prof_top = f->parent;
+}
+
+static void dan_prof_dump(void) {
+    const char *path = getenv("DAN_PROFILE");
+    if (!path || !*path) return;
+    FILE *out = fopen(path, "wb");
+    if (!out) return;
+    fprintf(out, "%" PRIu64 "\n", dan_prof_now() - dan_prof_begin);
+    for (int i = 0; i < DAN_PROF_COUNT; i++) {
+        int line = dan_prof_lines[i];
+        const char *file = dan_files[line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT ? line / DAN_FILE_STEP : 0];
+        fprintf(out, "%s\t%s\t%d\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n", dan_prof_names[i], file,
+                line % DAN_FILE_STEP, __atomic_load_n(&dan_prof[i].calls, __ATOMIC_RELAXED),
+                __atomic_load_n(&dan_prof[i].total, __ATOMIC_RELAXED), __atomic_load_n(&dan_prof[i].self, __ATOMIC_RELAXED));
+    }
+    fclose(out);
+}
+
+static void dan_prof_start(void) {
+    dan_prof_begin = dan_prof_now();
+    atexit(dan_prof_dump);
+}
+"""
+
 ОТЛАДКА_C = r"""
 /* ---- debugger (python dan.py отладка программа.dan) ----
    Every statement calls dan_dbg_line; functions and variables register
@@ -2652,6 +2723,8 @@ class Генератор:
         self.нужны_компл = False   # программа пользуется комплексными числами
         self.нужны_даты = False    # программа пользуется датами
         self.отладка = False       # сборка для отладчика (python dan.py отладка)
+        self.профиль = False       # сборка с замером времени функций (python dan.py профиль)
+        self.профиль_функции = []  # (имя, строка) для каждой функции, номер - индекс
         self.отладочные_записи = {}
         self.нужна_система = False # программа пользуется системной библиотекой
         self.нужна_сеть = False    # программа выполняет запросы HTTP
@@ -3057,6 +3130,9 @@ class Генератор:
             self.пиши("dan_dbg_start();")
             self.пиши(f"__attribute__((cleanup(dan_dbg_leave))) int dan_df = dan_dbg_enter({строка_c('главная программа')}, 0);")
         место_запуска = len(self.строки) - 1
+        if self.профиль:
+            self.пиши("dan_prof_start();")
+            self._начать_замер("(основная часть программы)", 0)
         self.метка_функции, self.области, self.метки_циклов = "dan_main_mark", [[]], []
         self.текущий_результат = None
         self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
@@ -3111,7 +3187,7 @@ class Генератор:
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
             "#if defined(__wasi__) && !defined(_DEFAULT_SOURCE)", "#define _DEFAULT_SOURCE", "#endif",
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
-              if self.нужна_система else []),
+              if self.нужна_система or self.профиль else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>", "#include <stdarg.h>", "#ifndef __wasi__", "#include <setjmp.h>", "#endif",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
@@ -3129,6 +3205,12 @@ class Генератор:
             шапка += ["#define DAN_NET 1"]
         if self.нужны_окна:
             шапка += ["#define DAN_GUI 1"]
+        if self.профиль:
+            шапка += [f"#define DAN_PROF_COUNT {max(1, len(self.профиль_функции))}",
+                      "static const char *const dan_prof_names[] = {"
+                      + ", ".join(строка_c(и) for и, _ in self.профиль_функции or [("", 0)]) + "};",
+                      "static const int dan_prof_lines[] = {"
+                      + ", ".join(str(с) for _, с in self.профиль_функции or [("", 0)]) + "};"]
         if self.отладка:
             шапка += ["#define DAN_DEBUG 1", "static void dan_dbg_error(const char *text, int line);"]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ_ОТЛАДЧИКА.items()]
@@ -3145,6 +3227,8 @@ class Генератор:
         шапка += ["", f"#define DAN_FILE_STEP {у.ШАГ_ФАЙЛА}", f"#define DAN_FILE_COUNT {len(файлы)}",
                   "static const char *const dan_files[] = {" + ", ".join(строка_c(ф) for ф in файлы) + "};"]
         части = ["\n".join(шапка), СРЕДА]
+        if self.профиль:
+            части.append(ПРОФИЛЬ_C)
         if self.нужны_задачи:
             части.append(ЗАДАЧИ_C)
         if self.нужны_длинные:
@@ -3905,6 +3989,9 @@ class Генератор:
             сигнатура_типы = getattr(ф, "типы_параметров", None)
             for п in ф.параметры:
                 self._отладить_переменную(п.имя, self.имя(п.имя), п.тип)
+        if self.профиль:
+            имя = (ф.метод_типа + "." + ф.имя.split(".")[-1]) if getattr(ф, "метод_типа", None) else ф.имя
+            self._начать_замер(имя, ф.строка)
         if ф.имя in self.рекурсивные:
             self.пиши(f"DAN_STACK_CHECK({ф.строка});")
         self.текущий_результат = ф.тип_результата
@@ -3922,6 +4009,11 @@ class Генератор:
         self.текущий_результат = None
         self.отступ -= 1
         self.пиши("}")
+
+    def _начать_замер(self, имя, строка):
+        номер = len(self.профиль_функции)
+        self.профиль_функции.append((имя, строка))
+        self.пиши(f"__attribute__((cleanup(dan_prof_leave))) dan_prof_frame dan_pf; dan_prof_enter(&dan_pf, {номер});")
 
     # ---------- инструкции ----------
 
@@ -5040,10 +5132,12 @@ class Генератор:
         return f"dan_str_to_float({значение}, {строка})"
 
 
-def сгенерировать(программа, отладка=False, тесты=False):
+def сгенерировать(программа, отладка=False, тесты=False, профиль=False):
     """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика;
-    «тесты» - сборка, которая выполняет тесты программы вместо неё самой."""
+    «тесты» - сборка, которая выполняет тесты программы вместо неё самой; «профиль» - сборка,
+    которая замеряет время каждой функции (python dan.py профиль)."""
     генератор = Генератор()
     генератор.отладка = отладка
     генератор.тесты = тесты
+    генератор.профиль = профиль
     return генератор.программа(программа)
