@@ -369,6 +369,7 @@ static dan_po *dan_pget(dan_pdf *p, int64_t num) {
                 dan_po *on = dan_pparse(p, &hl, 0), *oo = dan_pparse(p, &hl, 0);
                 if (!on || !oo || on->t != PO_NUM || oo->t != PO_NUM) break;
                 if (i == p->idx[num] || (int64_t)on->num == num) {
+                    if (first < 0 || oo->num < 0) break;
                     dan_plex ol = { d, (size_t)first + (size_t)oo->num, len };
                     if (ol.pos < len) o = dan_pparse(p, &ol, 0);
                     break;
@@ -558,7 +559,7 @@ static int dan_pread_xref(dan_pdf *p, size_t at, uint8_t *seen, int depth) {
         dan_po *w = dan_pkey(p, s, "W"), *index = dan_pkey(p, s, "Index");
         if (w->t != PO_ARR || w->cnt < 3) return 0;
         int ws[3];
-        for (int i = 0; i < 3; i++) { dan_po *x = dan_pres(p, w->v[i]); ws[i] = x->t == PO_NUM ? (int)x->num : 0; if (ws[i] < 0 || ws[i] > 8) return 0; }
+        for (int i = 0; i < 3; i++) { dan_po *x = dan_pres(p, w->v[i]); if (x->t == PO_NUM && (x->num < 0 || x->num > 8)) return 0; ws[i] = x->t == PO_NUM ? (int)x->num : 0; }
         size_t len;
         uint8_t *d = dan_pstream(p, s, &len);
         size_t ent = (size_t)(ws[0] + ws[1] + ws[2]), pos = 0;
@@ -848,7 +849,8 @@ static void dan_pfont_load(dan_pdf *p, dan_pfont *f, dan_po *font) {
         for (size_t i = 0; w->t == PO_ARR && i < w->cnt;) {
             dan_po *a = dan_pres(p, w->v[i]);
             dan_po *b = i + 1 < w->cnt ? dan_pres(p, w->v[i + 1]) : &dan_po_null;
-            if (a->t != PO_NUM) { i++; continue; }
+            /* character codes are 0..0xFFFFFF: a negative or huge code of a damaged file is skipped */
+            if (a->t != PO_NUM || a->num < 0 || a->num > 0xFFFFFF) { i++; continue; }
             if (b->t == PO_ARR) {
                 for (size_t k = 0; k < b->cnt; k++) {
                     dan_po *x = dan_pres(p, b->v[k]);
@@ -857,7 +859,7 @@ static void dan_pfont_load(dan_pdf *p, dan_pfont *f, dan_po *font) {
                 i += 2;
             } else {
                 dan_po *c = i + 2 < w->cnt ? dan_pres(p, w->v[i + 2]) : &dan_po_null;
-                if (b->t == PO_NUM && c->t == PO_NUM && b->num >= a->num) dan_pfont_cw(f, (uint32_t)a->num, (uint32_t)b->num, c->num);
+                if (b->t == PO_NUM && c->t == PO_NUM && b->num >= a->num && b->num <= 0xFFFFFF) dan_pfont_cw(f, (uint32_t)a->num, (uint32_t)b->num, c->num);
                 i += 3;
             }
         }
@@ -882,7 +884,7 @@ static void dan_pfont_load(dan_pdf *p, dan_pfont *f, dan_po *font) {
             int code = 0;
             for (size_t i = 0; i < diff->cnt; i++) {
                 dan_po *x = dan_pres(p, diff->v[i]);
-                if (x->t == PO_NUM) code = (int)x->num;
+                if (x->t == PO_NUM && x->num >= 0 && x->num <= 0xFFFFFF) code = (int)x->num;
                 else if (x->t == PO_NAME && code >= 0 && code < 256) {
                     uint32_t u = dan_pglyph_unicode((const char *)x->s);
                     if (u) f->simple[code] = u;
