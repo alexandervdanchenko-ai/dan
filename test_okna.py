@@ -142,14 +142,107 @@ class ТестыОкон(unittest.TestCase):
     def test_программа_проверяется(self):
         проверить(загрузить(ПРОГРАММА, os.path.join(os.getcwd(), "программа.dan")))
 
-    @unittest.skipIf(os.name == "nt", "в Windows окна создаются")
-    def test_без_windows_сообщается_ошибка(self):
-        код, вывод, ош = выполнить('подключить "окна"\n'
-                                   'если ошибка о = окна.создать("Окно", 300, 200) { вывод(о) }\n'
-                                   'окна.сообщение("Заголовок", "текст сообщения")')
+    @unittest.skipIf(os.name == "nt", "в Windows окна - настоящие окна системы")
+    def test_окна_в_браузере_без_браузера(self):
+        """В Linux и macOS окно - страница браузера; без браузера программа управляет им сама."""
+        прежнее = os.environ.get("DAN_GUI_NO_BROWSER")
+        os.environ["DAN_GUI_NO_BROWSER"] = "1"
+        try:
+            код, вывод, ош = выполнить(ПРОГРАММА)
+        finally:
+            if прежнее is None:
+                del os.environ["DAN_GUI_NO_BROWSER"]
+            else:
+                os.environ["DAN_GUI_NO_BROWSER"] = прежнее
         self.assertEqual(код, 0, ош)
-        self.assertEqual(вывод.strip(), "окна пока можно создавать только в программах для Windows")
-        self.assertIn("Заголовок: текст сообщения", ош)
+        self.assertEqual([с for с in вывод.splitlines() if с != "закрытие"], ОЖИДАЕТСЯ)
+        self.assertIn("Окно программы открыто в браузере: http://127.0.0.1:", ош)
+
+
+ПРОГРАММА_ДЛЯ_БРАУЗЕРА = """
+подключить "окна"
+пусть окно = окна.создать("Проверка в браузере", 400, 250)!
+пусть надпись = окно.надпись("Нажатий: 0", 20, 20, 250, 24)
+пусть кнопка = окно.кнопка("Нажать", 20, 55, 120, 32)
+пусть поле = окно.поле("", 160, 58, 200, 26)
+пусть холст = окно.холст(20, 100, 200, 100)
+холст.прямоугольник(10, 10, 100, 60, окна.синий(), окна.цвет(200, 220, 255))
+перем нажатий = 0
+пока пусть с = окно.ждать() {
+    выбор с {
+        окна.Нажатие(э) {
+            нажатий += 1
+            надпись.задать_текст("Нажатий: " + стр(нажатий))
+            вывод("нажатие " + стр(нажатий))
+            если нажатий == 2 {
+                если окна.вопрос("Вопрос", "Закрыть окно?") { окно.закрыть() }
+            }
+        }
+        окна.Изменение(э) { вывод("поле: " + поле.текст()) }
+        окна.Мышь(э, х, у) { вывод("мышь " + стр(х > 40 и х < 60) + " " + стр(у > 20 и у < 40)) }
+        иначе {}
+    }
+}
+вывод("конец")
+"""
+
+СЦЕНАРИЙ_БРАУЗЕРА = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const b = await chromium.launch(); const p = await b.newPage();
+  p.on('dialog', async d => { await d.accept(); });
+  await p.goto(process.argv[2]);
+  await p.getByRole('button', { name: 'Нажать' }).click();
+  await p.getByText('Нажатий: 1').waitFor();
+  await p.locator('input[type=text]').fill('Дан');
+  await p.waitForTimeout(300);
+  await p.locator('canvas').click({ position: { x: 50, y: 30 } });
+  await p.waitForTimeout(300);
+  await p.getByRole('button', { name: 'Нажать' }).click();
+  await p.locator('#gone').waitFor({ state: 'visible', timeout: 20000 });
+  console.log(await p.title());
+  await b.close();
+})();
+"""
+
+
+def есть_playwright():
+    if not shutil.which("node") or not shutil.which("npm"):
+        return False
+    корень = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["node", "-e", "require('playwright')"], capture_output=True,
+                          env=dict(os.environ, NODE_PATH=корень)).returncode == 0
+
+
+@unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ and os.name != "nt" and есть_playwright(), "нужны компилятор C и Node.js с Playwright")
+class ТестыОконВБраузере(unittest.TestCase):
+
+    def test_человек_нажимает_в_браузере(self):
+        import re
+        with tempfile.TemporaryDirectory() as п:
+            путь = os.path.join(п, "программа.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(ПРОГРАММА_ДЛЯ_БРАУЗЕРА)
+            исп = dan.собрать(путь, ПРОГРАММА_ДЛЯ_БРАУЗЕРА)
+            процесс = subprocess.Popen([исп], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                       encoding="utf-8", env=dict(os.environ, DAN_GUI_NO_BROWSER="1"))
+            try:
+                строка = процесс.stderr.readline()
+                адрес = re.search(r"http://127\.0\.0\.1:\d+/\?k=[0-9a-f]+", строка).group(0)
+                with open(os.path.join(п, "браузер.js"), "w", encoding="utf-8") as ф:
+                    ф.write(СЦЕНАРИЙ_БРАУЗЕРА)
+                корень = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
+                р = subprocess.run(["node", os.path.join(п, "браузер.js"), адрес], capture_output=True, text=True,
+                                   encoding="utf-8", timeout=120, env=dict(os.environ, NODE_PATH=корень))
+                вывод, ош = процесс.communicate(timeout=30)
+            finally:
+                процесс.kill()
+            self.assertEqual(р.returncode, 0, р.stderr)
+            self.assertEqual(р.stdout.strip(), "Проверка в браузере")
+            self.assertEqual(процесс.returncode, 0, ош)
+            self.assertEqual(вывод.splitlines(), ["нажатие 1", "поле: Дан", "мышь истина истина", "нажатие 2", "конец"])
+            # чужой адрес без ключа не принимается
+            self.assertNotIn("403", ош)
 
 
 class Дисплей:

@@ -258,7 +258,7 @@ def собрать_для(путь, исходник, система, малый
     if система == "windows":
         библиотеки.append("-Wl,--stack,67108864")
         if "#define DAN_GUI 1" in код_c:
-            библиотеки.append("-Wl,--subsystem,windows")
+            библиотеки += ["-Wl,--subsystem,windows", "-luser32", "-lgdi32", "-lcomdlg32"]
     elif "DAN_TASKS" in код_c:
         библиотеки.append("-pthread")
     if система == "linux" and "#define DAN_NET 1" in код_c:

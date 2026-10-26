@@ -612,7 +612,8 @@ static do_s dan_window_file(dan_str kind, dan_str title, dan_str filter) {
     return do_s_some(dan_narrow(file));
 }
 
-#else  /* not Windows */
+#elif defined(__wasi__)  /* WebAssembly: windows are not available */
+
 
 static dr_i dan_window_create(dan_str title, int64_t width, int64_t height, int line) {
     (void)title; (void)width; (void)height;
@@ -647,5 +648,9 @@ static int64_t dan_window_message(dan_str title, dan_str text, dan_str kind) {
     return u[0] == 'y' || u[0] == 'Y' || (u[0] == 0xD0 && (u[1] == 0xB4 || u[1] == 0x94));   /* «д» or «Д» */
 }
 static do_s dan_window_file(dan_str kind, dan_str title, dan_str filter) { (void)kind; (void)title; (void)filter; return do_s_none(); }
+
+#else  /* Linux, macOS: the window is a page in the browser */
+
+#include "okna_veb.c"
 
 #endif

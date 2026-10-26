@@ -192,7 +192,10 @@ def найти(имя):
     "DAN_TXT_DB_ERROR": "ошибка в запросе",
     "DAN_TXT_DB_PARAMS": "число параметров «?» в запросе - %d, а передано значений - %lld",
     "DAN_TXT_DB_PARAMS_LATER": "параметры «?» допускаются только в первом запросе из нескольких",
-    "DAN_TXT_GUI_ONLY_WINDOWS": "окна пока можно создавать только в программах для Windows",
+    "DAN_TXT_GUI_ONLY_WINDOWS": "в программах для WebAssembly окна недоступны",
+    "DAN_TXT_GUI_BROWSER": "Окно программы открыто в браузере: %s\n",
+    "DAN_TXT_GUI_PATH_OPEN": "Путь к файлу, который нужно открыть:",
+    "DAN_TXT_GUI_PATH_SAVE": "Путь к файлу, в который нужно сохранить:",
     "DAN_TXT_GUI_START": "не удалось создать окно",
     "DAN_MSG_GUI_GONE": "окно или его элемент уже закрыты",
     "DAN_MSG_GUI_SIZE": "ширина окна должна быть от 50 до 20000, высота - от 30 до 20000",
@@ -230,8 +233,11 @@ def код_базы():
 
 
 def код_окон():
+    """Окна Windows (okna.c) и окна-страницы браузера для Linux и macOS (okna_veb.c)."""
     with open(os.path.join(_ПАПКА, "okna.c"), encoding="utf-8") as ф:
-        return ф.read()
+        код = ф.read()
+    with open(os.path.join(_ПАПКА, "okna_veb.c"), encoding="utf-8") as ф:
+        return код.replace('#include "okna_veb.c"', ф.read())
 
 
 def код_сети():

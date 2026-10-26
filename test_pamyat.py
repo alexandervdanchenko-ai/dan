@@ -259,6 +259,12 @@ def под_санитайзером(текст, ввод_данных=None):
 }
 
 
+# окна в Linux и macOS - страница браузера; программа проверки сама нажимает свои кнопки
+import test_okna
+ПРОГРАММЫ["окна"] = test_okna.ПРОГРАММА
+os.environ.setdefault("DAN_GUI_NO_BROWSER", "1")
+
+
 @unittest.skipUnless(САНИТАЙЗЕР, "компилятор без AddressSanitizer")
 class ТестыПроверкиПамяти(unittest.TestCase):
 
