@@ -668,8 +668,8 @@ static double dan_entropy(const dl_Lf *p, int line) {
 }
 
 /* random numbers: xoshiro256** seeded from the clock once per run */
-static uint64_t dan_rng_s[4];
-static bool dan_rng_ready = false;
+static DAN_TLS uint64_t dan_rng_s[4];
+static DAN_TLS bool dan_rng_ready = false;
 static uint64_t dan_rng_mix(uint64_t *x) {
     uint64_t z = (*x += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;

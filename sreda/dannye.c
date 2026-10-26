@@ -260,13 +260,13 @@ static uint32_t dan_crc_table[256];
 static int dan_crc_ready = 0;
 
 static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
-    if (!dan_crc_ready) {
+    if (!__atomic_load_n(&dan_crc_ready, __ATOMIC_ACQUIRE)) {
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
             for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
             dan_crc_table[i] = c;
         }
-        dan_crc_ready = 1;
+        __atomic_store_n(&dan_crc_ready, 1, __ATOMIC_RELEASE);
     }
     crc = ~crc;
     while (n--) crc = dan_crc_table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
@@ -1213,12 +1213,12 @@ static void dan_inflate_into(dan_inf *s) {
         } else if (type == 1) {
             static dan_huff fl, fd;
             static int ready = 0;
-            if (!ready) {
+            if (!__atomic_load_n(&ready, __ATOMIC_ACQUIRE)) {
                 uint8_t ll[288], dl[30];
                 dan_fixed_lengths(ll, dl);
                 dan_huff_build(&fl, ll, 288);
                 dan_huff_build(&fd, dl, 30);
-                ready = 1;
+                __atomic_store_n(&ready, 1, __ATOMIC_RELEASE);
             }
             dan_inf_codes(s, &fl, &fd);
         } else if (type == 2) {
@@ -1760,9 +1760,9 @@ static uint32_t dan_price_tab[128];
 static int dan_price_ready = 0;
 
 static void dan_price_init(void) {
-    if (dan_price_ready) return;
+    if (__atomic_load_n(&dan_price_ready, __ATOMIC_ACQUIRE)) return;
     for (int i = 0; i < 128; i++) dan_price_tab[i] = (uint32_t)(-log2((i + 0.5) / 128.0) * 16 + 0.5);
-    dan_price_ready = 1;
+    __atomic_store_n(&dan_price_ready, 1, __ATOMIC_RELEASE);
 }
 
 #define DAN_P(prob, bit) dan_price_tab[((bit) ? 2048u - (prob) : (uint32_t)(prob)) >> 4]

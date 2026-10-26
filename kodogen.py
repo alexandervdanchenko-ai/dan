@@ -30,6 +30,7 @@ import uzly as у
 import matematika
 import vysshaya  # регистрирует функции высшей и прикладной математики
 import dannye
+from proverka import это_канал, это_задача, элемент_канала
 from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, НИЧЕГО, это_список, элемент,
                       это_необяз, основа, найти_в_библиотеке, это_словарь, ключ_словаря, значение_словаря,
                       это_результат, ОШИБКА, это_функция, разобрать_тип_функции, ДИАПАЗОН, НЕИЗВ)
@@ -51,6 +52,18 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
     "DAN_MSG_RUNTIME_NOLINE": "Ошибка выполнения: %s\n",
+    "DAN_MSG_DEADLOCK": "Ошибка выполнения: взаимная блокировка - все задачи ждут друг друга, и ни одна не может продолжить:\n",
+    "DAN_TXT_MAIN_WAITS": "  главная программа ждёт ",
+    "DAN_TXT_TASK_WAITS": "  задача, запущенная в строке %d, ждёт ",
+    "DAN_TXT_WAIT_RECV": "значения из канала",
+    "DAN_TXT_WAIT_SEND": "места в канале или получателя значения",
+    "DAN_TXT_WAIT_TASK": "завершения задачи",
+    "DAN_TXT_AT_LINE": "%s в строке %d\n",
+    "DAN_TXT_AT_FILE_LINE": "%s в файле %s, строка %d\n",
+    "DAN_MSG_SEND_CLOSED": "отправка значения в закрытый канал",
+    "DAN_MSG_CLOSE_TWICE": "канал уже закрыт",
+    "DAN_MSG_CHAN_CAP": "запас канала не может быть отрицательным",
+    "DAN_MSG_THREAD": "не удалось запустить задачу: система не выделила поток",
     "DAN_MSG_DEEP_DATA": "значение собственного типа вложено слишком глубоко (например, очень длинная "
                          "цепочка звеньев), и его нельзя целиком сравнить, вывести или скопировать",
     "DAN_MSG_DEEP": "слишком глубокая рекурсия: функция из этой строки вызвала себя слишком много раз, "
@@ -113,7 +126,11 @@ def рекурсивные_функции(функции):
 СРЕДА = r"""
 typedef const char *dan_str;
 
+/* with tasks: the first error stops the program, other tasks wait for the end */
+static void (*dan_on_error)(void);
+
 static void dan_error(const char *text, int line) {
+    if (dan_on_error) dan_on_error();
     fflush(stdout);
     if (line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT)
         fprintf(stderr, DAN_MSG_RUNTIME_FILE, dan_files[line / DAN_FILE_STEP], line % DAN_FILE_STEP, text);
@@ -126,11 +143,12 @@ static void dan_error(const char *text, int line) {
    завершения без сообщения программа останавливается с ошибкой выполнения.
    Стек растёт вниз (x86, ARM); в начале каждой функции программы сравнивается
    глубина стека с пределом, вычисленным в dan_start по размеру стека потока. */
-static uintptr_t dan_stack_base, dan_stack_limit;
+static DAN_TLS uintptr_t dan_stack_base, dan_stack_limit;
 
 static void dan_stack_error(int line) __attribute__((noinline, cold));
 static void dan_stack_error(int line) {
     if (line > 0) dan_error(DAN_MSG_DEEP, line);
+    if (dan_on_error) dan_on_error();
     fflush(stdout);
     fprintf(stderr, DAN_MSG_RUNTIME_NOLINE, DAN_MSG_DEEP_DATA);
     exit(1);
@@ -175,9 +193,9 @@ typedef struct { int32_t rc; uint16_t flags; uint16_t magic; } dan_hdr;
 #define DAN_HDR_INIT { 0, DAN_IMMORTAL, DAN_MAGIC }
 typedef void (*dan_destroy_fn)(dan_hdr *);
 typedef struct { dan_hdr *h; dan_destroy_fn d; } dan_zent;
-static dan_zent *dan_zct, *dan_dead;
-static size_t dan_zct_n, dan_zct_cap, dan_dead_n, dan_dead_cap;
-static int dan_draining;
+static DAN_TLS dan_zent *dan_zct, *dan_dead;
+static DAN_TLS size_t dan_zct_n, dan_zct_cap, dan_dead_n, dan_dead_cap;
+static DAN_TLS int dan_draining;
 
 static void dan_zct_push(dan_hdr *h, dan_destroy_fn d) {
     if (h->flags & (DAN_IN_ZCT | DAN_IMMORTAL)) return;
@@ -210,14 +228,19 @@ static void dan_kill(dan_hdr *h, dan_destroy_fn d) {
 
 static inline size_t dan_mark(void) { return dan_zct_n; }
 
+#define DAN_MAGIC_SHARED 0xDA4F   /* value shared between tasks (channel): counted under a lock */
 static void dan_sweep_slow(size_t m) {
     while (dan_zct_n > m) {
         dan_zent e = dan_zct[--dan_zct_n];
+        if (e.h->magic == DAN_MAGIC_SHARED) { e.d(e.h); continue; }
         e.h->flags &= (uint16_t)~DAN_IN_ZCT;
         if (e.h->rc == 0) dan_kill(e.h, e.d);
     }
 }
 static inline void dan_sweep(size_t m) { if (dan_zct_n > m) dan_sweep_slow(m); }
+
+/* a value made for another task: one place (the message) holds it, no table */
+static inline void dan_hdr_detached(dan_hdr *h) { h->rc = 1; h->flags = 0; h->magic = DAN_MAGIC; }
 
 static inline void dan_hdr_new(dan_hdr *h, dan_destroy_fn d) {
     h->rc = 0; h->flags = 0; h->magic = DAN_MAGIC;
@@ -238,10 +261,11 @@ static inline void dan_hdr_give(dan_hdr *h, dan_destroy_fn d) {
 #define DAN_NOREL(x) ((void)0)
 
 /* environment of a closure: header, its own way to free the captured values */
-typedef struct { dan_hdr h; dan_destroy_fn d; } dan_envb;
+typedef struct { dan_hdr h; dan_destroy_fn d; void *(*c)(const void *); } dan_envb;
 static inline void dan_env_share(void *e) { if (e) dan_hdr_share(&((dan_envb *)e)->h); }
 static inline void dan_env_release(void *e) { if (e) dan_hdr_release(&((dan_envb *)e)->h, ((dan_envb *)e)->d); }
 static inline void dan_env_give(void *e) { if (e) dan_hdr_give(&((dan_envb *)e)->h, ((dan_envb *)e)->d); }
+static inline void *dan_env_clone(void *e) { return e ? ((dan_envb *)e)->c(e) : NULL; }
 
 /* Strings: the header is right before the characters. Text that did not
    come from dan_str_new (a C literal) has no header and is never freed. */
@@ -262,6 +286,16 @@ static inline dan_hdr *dan_str_hdr(dan_str s) {
 static inline dan_str dan_str_share(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_share(h); return s; }
 static inline void dan_str_release(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_release(h, dan_str_destroy); }
 static inline void dan_str_give(dan_str s) { dan_hdr *h = dan_str_hdr(s); if (h) dan_hdr_give(h, dan_str_destroy); }
+/* copy for another task (strings that are never freed are shared as they are) */
+static dan_str dan_str_clone(dan_str s) {
+    dan_hdr *h = dan_str_hdr(s);
+    if (!h || (h->flags & DAN_IMMORTAL)) return s;
+    size_t n = strlen(s);
+    dan_hdr *r = dan_alloc(sizeof *r + n + 1);
+    dan_hdr_detached(r);
+    memcpy(r + 1, s, n + 1);
+    return (char *)(r + 1);
+}
 #define DAN_STATIC_STR(name, text) \
     static const struct { dan_hdr h; char s[sizeof(text)]; } name = { DAN_HDR_INIT, text }
 DAN_STATIC_STR(dan_true_s, DAN_TRUE);
@@ -800,6 +834,15 @@ static void dan_bytes_destroy(dan_hdr *h) { dan_bytes_s *b = (dan_bytes_s *)(voi
 static inline dan_bytes dan_bytes_share(dan_bytes b) { if (b) dan_hdr_share((dan_hdr *)&b->h); return b; }
 static inline void dan_bytes_release(dan_bytes b) { if (b) dan_hdr_release((dan_hdr *)&b->h, dan_bytes_destroy); }
 static inline void dan_bytes_give(dan_bytes b) { if (b) dan_hdr_give((dan_hdr *)&b->h, dan_bytes_destroy); }
+static dan_bytes dan_bytes_clone(dan_bytes b) {
+    if (!b || (b->h.flags & DAN_IMMORTAL)) return b;
+    dan_bytes_s *r = dan_alloc(sizeof *r);
+    dan_hdr_detached(&r->h);
+    r->len = b->len;
+    r->data = dan_alloc((size_t)b->len + 1);
+    memcpy(r->data, b->data, (size_t)b->len + 1);
+    return r;
+}
 
 static dan_bytes_s *dan_bytes_alloc(int64_t len) {
     dan_bytes_s *b = dan_alloc(sizeof *b);
@@ -883,6 +926,307 @@ static void dan_start(void) {
     if (size > dan_stack_base) size = dan_stack_base;
     /* Запас на функции библиотеки выполнения и самой системы. */
     dan_stack_limit = size / 4 * 3 > 256 * 1024 ? size / 4 * 3 - 256 * 1024 : size / 2;
+}
+"""
+
+# Задачи и каналы: потоки операционной системы. Значения, переданные задаче
+# или в канал, копируются, поэтому общих изменяемых данных у задач нет и
+# подсчёт мест хранения остаётся обычным (без атомарных операций). Общий
+# между задачами только канал: его счётчик меняется под замком.
+ЗАДАЧИ_C = r"""
+/* ---- tasks and channels ---- */
+#define DAN_TASK_STACK ((size_t)64 * 1024 * 1024)
+#ifdef _WIN32
+typedef HANDLE dan_thread_t;
+typedef CRITICAL_SECTION dan_mutex_t;
+typedef CONDITION_VARIABLE dan_cond_t;
+#define DAN_THREAD_FN DWORD WINAPI
+#define DAN_THREAD_RETURN 0
+static void dan_mutex_init(dan_mutex_t *m) { InitializeCriticalSection(m); }
+static void dan_lock(dan_mutex_t *m) { EnterCriticalSection(m); }
+static void dan_unlock(dan_mutex_t *m) { LeaveCriticalSection(m); }
+static void dan_cond_init(dan_cond_t *c) { InitializeConditionVariable(c); }
+static void dan_cond_wait(dan_cond_t *c, dan_mutex_t *m) { SleepConditionVariableCS(c, m, INFINITE); }
+static void dan_cond_signal(dan_cond_t *c) { WakeConditionVariable(c); }
+static void dan_cond_free(dan_cond_t *c) { (void)c; }
+static int dan_thread_create(dan_thread_t *t, DWORD (WINAPI *f)(void *), void *a) {
+    *t = CreateThread(NULL, DAN_TASK_STACK, f, a, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    return *t != NULL;
+}
+static void dan_thread_join(dan_thread_t t) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+#else
+typedef pthread_t dan_thread_t;
+typedef pthread_mutex_t dan_mutex_t;
+typedef pthread_cond_t dan_cond_t;
+#define DAN_THREAD_FN void *
+#define DAN_THREAD_RETURN NULL
+static void dan_mutex_init(dan_mutex_t *m) { pthread_mutex_init(m, NULL); }
+static void dan_lock(dan_mutex_t *m) { pthread_mutex_lock(m); }
+static void dan_unlock(dan_mutex_t *m) { pthread_mutex_unlock(m); }
+static void dan_cond_init(dan_cond_t *c) { pthread_cond_init(c, NULL); }
+static void dan_cond_wait(dan_cond_t *c, dan_mutex_t *m) { pthread_cond_wait(c, m); }
+static void dan_cond_signal(dan_cond_t *c) { pthread_cond_signal(c); }
+static void dan_cond_free(dan_cond_t *c) { pthread_cond_destroy(c); }
+static int dan_thread_create(dan_thread_t *t, void *(*f)(void *), void *a) {
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, DAN_TASK_STACK);
+    int ok = pthread_create(t, &at, f, a) == 0;
+    pthread_attr_destroy(&at);
+    return ok;
+}
+static void dan_thread_join(dan_thread_t t) { pthread_join(t, NULL); }
+#endif
+
+/* Every task (and the main program) has a record. All waiting happens under
+   one lock, and the number of tasks that are not waiting is counted: when it
+   drops to zero, no task can ever wake the others, and the program stops
+   with a list of where each task waits (instead of hanging silently). */
+typedef struct dan_trec {
+    dan_cond_t cond;
+    int blocked, line, start_line, is_main;
+    const char *what;
+    struct dan_trec *next_all, *prev_all, *next_wait;
+} dan_trec;
+static dan_mutex_t dan_sched, dan_out_mx;
+static dan_trec *dan_all, dan_main_rec;
+static int dan_active;
+static DAN_TLS dan_trec *dan_self;
+
+static dan_mutex_t dan_fail_mx;
+static void dan_fail_once(void) { dan_lock(&dan_fail_mx); }   /* never released: the program is ending */
+static void dan_out_lock(void) { dan_lock(&dan_out_mx); }
+static void dan_out_unlock(void) { dan_unlock(&dan_out_mx); }
+
+static void dan_trec_add(dan_trec *t) {
+    t->prev_all = NULL; t->next_all = dan_all;
+    if (dan_all) dan_all->prev_all = t;
+    dan_all = t;
+}
+static void dan_trec_remove(dan_trec *t) {
+    if (t->prev_all) t->prev_all->next_all = t->next_all; else dan_all = t->next_all;
+    if (t->next_all) t->next_all->prev_all = t->prev_all;
+}
+
+static void dan_print_place(const char *what, int line) {
+    if (line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT)
+        fprintf(stderr, DAN_TXT_AT_FILE_LINE, what, dan_files[line / DAN_FILE_STEP], line % DAN_FILE_STEP);
+    else
+        fprintf(stderr, DAN_TXT_AT_LINE, what, line);
+}
+
+static void dan_deadlock(void) {
+    dan_fail_once();
+    fflush(stdout);
+    fputs(DAN_MSG_DEADLOCK, stderr);
+    for (dan_trec *t = dan_all; t; t = t->next_all) {
+        if (!t->blocked) continue;
+        if (t->is_main) fputs(DAN_TXT_MAIN_WAITS, stderr);
+        else fprintf(stderr, DAN_TXT_TASK_WAITS, t->start_line % DAN_FILE_STEP);
+        dan_print_place(t->what, t->line);
+    }
+    exit(1);
+}
+
+/* called under dan_sched: wait until a waker clears «blocked» */
+static void dan_block(dan_trec **list, int line, const char *what) {
+    dan_trec *me = dan_self;
+    me->blocked = 1; me->line = line; me->what = what;
+    me->next_wait = *list; *list = me;
+    if (--dan_active == 0) dan_deadlock();
+    while (me->blocked) dan_cond_wait(&me->cond, &dan_sched);
+}
+static void dan_wake_all(dan_trec **list) {
+    for (dan_trec *t = *list; t; t = t->next_wait) {
+        if (t->blocked) { t->blocked = 0; dan_active++; dan_cond_signal(&t->cond); }
+    }
+    *list = NULL;
+}
+
+static void dan_tasks_init(void) {
+    dan_mutex_init(&dan_fail_mx);
+    dan_on_error = dan_fail_once;
+    dan_mutex_init(&dan_sched);
+    dan_mutex_init(&dan_out_mx);
+    dan_cond_init(&dan_main_rec.cond);
+    dan_main_rec.is_main = 1;
+    dan_trec_add(&dan_main_rec);
+    dan_self = &dan_main_rec;
+    dan_active = 1;
+}
+
+typedef struct dan_task {
+    dan_thread_t th;
+    int done, joined, line;
+    dan_trec *joiners;
+    dan_trec rec;
+    struct dan_task *next;
+} dan_task;
+
+static void dan_task_start(dan_task *t, DAN_THREAD_FN (*f)(void *), void *arg, int line) {
+    t->done = 0; t->joined = 0; t->line = line; t->joiners = NULL; t->next = NULL;
+    memset(&t->rec, 0, sizeof t->rec);
+    dan_cond_init(&t->rec.cond);
+    t->rec.start_line = line;
+    dan_lock(&dan_sched);
+    dan_trec_add(&t->rec);
+    dan_active++;
+    dan_unlock(&dan_sched);
+    if (!dan_thread_create(&t->th, f, arg)) dan_error(DAN_MSG_THREAD, line);
+}
+
+/* the beginning of the task's own thread */
+static void dan_task_begin(dan_task *t) {
+    char here;
+    dan_self = &t->rec;
+    dan_stack_base = (uintptr_t)&here;
+    dan_stack_limit = DAN_TASK_STACK / 4 * 3;
+}
+
+static void dan_task_end(dan_task *t) {
+    free(dan_zct); free(dan_dead);
+    dan_zct = dan_dead = NULL;
+    dan_zct_n = dan_zct_cap = dan_dead_n = dan_dead_cap = 0;
+    dan_lock(&dan_sched);
+    dan_trec_remove(&t->rec);
+    t->done = 1;
+    dan_wake_all(&t->joiners);
+    if (--dan_active == 0 && dan_all) dan_deadlock();
+    dan_unlock(&dan_sched);
+}
+
+static void dan_task_join(dan_task *t, int line) {
+    dan_lock(&dan_sched);
+    while (!t->done) dan_block(&t->joiners, line, DAN_TXT_WAIT_TASK);
+    dan_unlock(&dan_sched);
+    if (!t->joined) {
+        dan_thread_join(t->th);
+        dan_cond_free(&t->rec.cond);
+        t->joined = 1;
+    }
+}
+
+static bool dan_task_ready(dan_task *t) {
+    dan_lock(&dan_sched);
+    bool r = t->done != 0;
+    dan_unlock(&dan_sched);
+    return r;
+}
+
+/* «параллельно { ... }»: tasks without a name belong to the block */
+typedef struct { dan_task *head; } dan_tgroup;
+static void dan_tgroup_add(dan_tgroup *g, dan_task *t) { t->next = g->head; g->head = t; }
+static void dan_tgroup_join(dan_tgroup *g, int line) {
+    while (g->head) {
+        dan_task *t = g->head;
+        g->head = t->next;
+        dan_task_join(t, line);
+        free(t);
+    }
+}
+
+/* Channels. Values in a channel are copies made for the receiver. An
+   unbuffered channel (capacity 0) makes the sender wait until the value is
+   taken. Receiving from a closed channel gives the remaining values, then
+   «ничего»; sending to a closed channel is an error. */
+typedef struct dan_chan {
+    dan_hdr h;
+    size_t esize;
+    int64_t slots, head, count, sent, taken;
+    int closed, unbuffered;
+    unsigned char *buf;
+    void (*drop)(void *);
+    dan_trec *waiters;
+} dan_chan;
+
+static void dan_chan_destroy(dan_hdr *h) {
+    dan_chan *c = (dan_chan *)(void *)h;
+    for (int64_t i = 0; i < c->count; i++) c->drop(c->buf + (size_t)((c->head + i) % c->slots) * c->esize);
+    free(c->buf);
+    free(c);
+}
+/* the table of temporaries reached a channel: decide under the lock */
+static void dan_chan_zct_done(dan_hdr *h) {
+    dan_lock(&dan_sched);
+    h->flags &= (uint16_t)~DAN_IN_ZCT;
+    int dead = h->rc == 0;
+    dan_unlock(&dan_sched);
+    if (dead) dan_kill(h, dan_chan_destroy);
+}
+static dan_chan *dan_chan_new(size_t esize, int64_t cap, void (*drop)(void *), int line) {
+    if (cap < 0) dan_error(DAN_MSG_CHAN_CAP, line);
+    dan_chan *c = dan_alloc(sizeof *c);
+    c->h.rc = 0; c->h.flags = 0; c->h.magic = DAN_MAGIC_SHARED;
+    dan_zct_push(&c->h, dan_chan_zct_done);
+    c->esize = esize;
+    c->unbuffered = cap == 0;
+    c->slots = cap == 0 ? 1 : cap;
+    c->head = c->count = c->sent = c->taken = 0;
+    c->closed = 0;
+    c->buf = dan_alloc((size_t)c->slots * esize);
+    c->drop = drop;
+    c->waiters = NULL;
+    return c;
+}
+static dan_chan *dan_chan_share(dan_chan *c) {
+    if (c) { dan_lock(&dan_sched); c->h.rc++; dan_unlock(&dan_sched); }
+    return c;
+}
+static void dan_chan_release(dan_chan *c) {
+    if (!c) return;
+    dan_lock(&dan_sched);
+    int dead = --c->h.rc <= 0 && !(c->h.flags & DAN_IN_ZCT);
+    dan_unlock(&dan_sched);
+    if (dead) dan_kill(&c->h, dan_chan_destroy);
+}
+static void dan_chan_give(dan_chan *c) {
+    if (!c) return;
+    dan_lock(&dan_sched);
+    if (--c->h.rc <= 0 && !(c->h.flags & DAN_IN_ZCT)) {
+        c->h.rc = 0;
+        c->h.flags |= DAN_IN_ZCT;
+        if (dan_zct_n == dan_zct_cap) {
+            dan_zct_cap = dan_zct_cap ? dan_zct_cap * 2 : 256;
+            dan_zct = dan_realloc(dan_zct, dan_zct_cap * sizeof *dan_zct);
+        }
+        dan_zct[dan_zct_n].h = &c->h;
+        dan_zct[dan_zct_n].d = dan_chan_zct_done;
+        dan_zct_n++;
+    }
+    dan_unlock(&dan_sched);
+}
+static dan_chan *dan_chan_clone(dan_chan *c) { return dan_chan_share(c); }
+
+static void dan_chan_send(dan_chan *c, const void *v, int line) {
+    dan_lock(&dan_sched);
+    while (!c->closed && c->count == c->slots) dan_block(&c->waiters, line, DAN_TXT_WAIT_SEND);
+    if (c->closed) { dan_unlock(&dan_sched); dan_error(DAN_MSG_SEND_CLOSED, line); }
+    memcpy(c->buf + (size_t)((c->head + c->count) % c->slots) * c->esize, v, c->esize);
+    c->count++;
+    int64_t ticket = ++c->sent;
+    dan_wake_all(&c->waiters);
+    if (c->unbuffered)
+        while (c->taken < ticket) dan_block(&c->waiters, line, DAN_TXT_WAIT_SEND);
+    dan_unlock(&dan_sched);
+}
+static int dan_chan_recv(dan_chan *c, void *out, int line) {
+    dan_lock(&dan_sched);
+    while (c->count == 0 && !c->closed) dan_block(&c->waiters, line, DAN_TXT_WAIT_RECV);
+    if (c->count == 0) { dan_unlock(&dan_sched); return 0; }
+    memcpy(out, c->buf + (size_t)c->head * c->esize, c->esize);
+    c->head = (c->head + 1) % c->slots;
+    c->count--;
+    c->taken++;
+    dan_wake_all(&c->waiters);
+    dan_unlock(&dan_sched);
+    return 1;
+}
+static void dan_chan_close(dan_chan *c, int line) {
+    dan_lock(&dan_sched);
+    if (c->closed) { dan_unlock(&dan_sched); dan_error(DAN_MSG_CLOSE_TWICE, line); }
+    c->closed = 1;
+    dan_wake_all(&c->waiters);
+    dan_unlock(&dan_sched);
 }
 """
 
@@ -1062,6 +1406,13 @@ static {D} *{D}_new(void) {{
     d->keys = NULL; d->vals = NULL; d->hashes = NULL; d->alive = NULL; d->index = NULL;
     return d;
 }}
+static {D} *{D}_new_detached(void) {{
+    {D} *d = dan_alloc(sizeof *d);
+    dan_hdr_detached(&d->h);
+    d->len = d->n = d->cap = d->slots = 0;
+    d->keys = NULL; d->vals = NULL; d->hashes = NULL; d->alive = NULL; d->index = NULL;
+    return d;
+}}
 static {D} *{D}_share({D} *d) {{ if (d) dan_hdr_share(&d->h); return d; }}
 static void {D}_release({D} *d) {{ if (d) dan_hdr_release(&d->h, {D}_destroy); }}
 static void {D}_give({D} *d) {{ if (d) dan_hdr_give(&d->h, {D}_destroy); }}
@@ -1109,6 +1460,16 @@ static void {D}_put({D} *d, {K} k, {V} v) {{
     if (d->n == d->cap) {D}_grow(d);
     e = d->n++;
     d->keys[e] = {SK}(k); d->vals[e] = {SV}(v); d->hashes[e] = h; d->alive[e] = true; d->len++;
+    int64_t p = (int64_t)(h & (uint64_t)(d->slots - 1));
+    while (d->index[p] >= 0) p = (p + 1) & (d->slots - 1);
+    d->index[p] = e;
+}}
+/* запись в новый словарь значений, которые уже учтены (копия для задачи) */
+static void {D}_put_raw({D} *d, {K} k, {V} v) {{
+    uint64_t h = {HASH};
+    if (d->n == d->cap) {D}_grow(d);
+    int64_t e = d->n++;
+    d->keys[e] = k; d->vals[e] = v; d->hashes[e] = h; d->alive[e] = true; d->len++;
     int64_t p = (int64_t)(h & (uint64_t)(d->slots - 1));
     while (d->index[p] >= 0) p = (p + 1) & (d->slots - 1);
     d->index[p] = e;
@@ -1341,9 +1702,16 @@ class Генератор:
         self.области = []          # места хранения (переменные), которые нужно освободить при выходе
         self.метка_функции = None  # отметка таблицы временных значений в начале функции
         self.метки_циклов = []     # отметки в начале шага каждого вложенного цикла
+        self.нужны_задачи = False  # программа запускает задачи или пользуется каналами
+        self.клоны = {}            # тип -> функция C, копирующая значение для другой задачи
+        self.каналы = {}           # тип элементов канала -> часть имени функций C
+        self.задачи_c = {}         # тип результата задачи -> структура C
+        self.группы = []           # переменные C блоков «параллельно» текущей функции
 
     def код_типа(self, тип):
         """Короткий код типа для имён в C: [цел] -> Li, стр? -> Os, [Сотрудник] -> LTSotrudnik."""
+        if это_канал(тип):
+            return "K" + self.код_типа(элемент_канала(тип))
         if это_список(тип):
             return "L" + self.код_типа(элемент(тип))
         if это_словарь(тип):
@@ -1466,7 +1834,7 @@ class Генератор:
         учитываются места хранения (строки, списки, словари, ячейки и т.п.)."""
         в_работе = в_работе if в_работе is not None else set()
         if тип in (СТР, БАЙТЫ) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
-                or тип in self.перечисления or это_результат(тип) or self.по_ссылке(тип):
+                or тип in self.перечисления or это_результат(тип) or self.по_ссылке(тип) or это_канал(тип):
             return True
         if это_необяз(тип):
             return self.куча(основа(тип), в_работе)
@@ -1487,6 +1855,9 @@ class Генератор:
             return "dan_str_" + действие
         if тип == БАЙТЫ:
             return "dan_bytes_" + действие
+        if это_канал(тип):
+            self.канал_c(тип)
+            return "dan_chan_" + действие
         if это_список(тип):
             return self.структура(тип) + "_" + действие
         if это_словарь(тип):
@@ -1575,6 +1946,11 @@ class Генератор:
         return self.перечисления_c[тип]
 
     def тип_c(self, тип):
+        if это_канал(тип):
+            self.канал_c(тип)
+            return "dan_chan *"
+        if это_задача(тип):
+            return self.задача_c(тип)
         if тип in self.перечисления:
             return self.перечисление_c(тип)
         if это_список(тип):
@@ -1693,6 +2069,7 @@ class Генератор:
         self.пиши("int main(void) {")
         self.отступ += 1
         self.пиши("dan_start();")
+        место_запуска = len(self.строки) - 1
         self.метка_функции, self.области, self.метки_циклов = "dan_main_mark", [[]], []
         self.текущий_результат = None
         self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
@@ -1700,6 +2077,8 @@ class Генератор:
             self.инструкция(и)
         self._выход_из_функции()
         self.пиши("return 0;")
+        if self.нужны_задачи:
+            self.строки[место_запуска] += " dan_tasks_init();"
         self.отступ -= 1
         self.пиши("}")
         if self.лямбды_код:
@@ -1719,12 +2098,21 @@ class Генератор:
         if self.нужна_математика:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
+        if self.нужны_задачи:
+            шапка += ["#define DAN_TASKS 1", "#define DAN_TLS _Thread_local",
+                      "#ifndef _WIN32", "#include <pthread.h>", "#endif",
+                      "#define DAN_OUT_LOCK() dan_out_lock()", "#define DAN_OUT_UNLOCK() dan_out_unlock()"]
+        else:
+            шапка += ["#define DAN_TLS", "#define DAN_OUT_LOCK() ((void)0)", "#define DAN_OUT_UNLOCK() ((void)0)"]
         файлы = getattr(программа, "файлы", None) or ["программа.dan"]
         шапка += ["", f"#define DAN_FILE_STEP {у.ШАГ_ФАЙЛА}", f"#define DAN_FILE_COUNT {len(файлы)}",
                   "static const char *const dan_files[] = {" + ", ".join(строка_c(ф) for ф in файлы) + "};"]
         части = ["\n".join(шапка), СРЕДА]
+        if self.нужны_задачи:
+            части.append(ЗАДАЧИ_C)
         self._собрать_все_типы()
         части.append(self._определения_типов())
+        части.append(self._определения_задач())
         for имя in self.словари.values():
             части.append(ОБЪЯВЛЕНИЯ_СЛОВАРЯ.format(D=имя))
             for тип, и in self.словари.items():
@@ -1763,6 +2151,9 @@ class Генератор:
         части.append(self._функции_перечислений())
         части.append(self._функции_расширения())
         части.append("\n".join(self.помощники.values()))
+        части.append(self._функции_клонов())
+        части.append(self._функции_каналов())
+        части.append(self._функции_задач())
         if self.нужны_данные:
             части.append(dannye.код_c())
         if self.нужна_математика:
@@ -2129,6 +2520,231 @@ class Генератор:
                     строки.append(f"static void {имя}_{действие}({имя} v) {{ {проверка}{тело} }}")
         return "\n".join(строки) + "\n"
 
+    def клон(self, тип):
+        """Функция C, копирующая значение для другой задачи (или None, если копия не нужна)."""
+        if not self.куча(тип):
+            return None
+        if тип == СТР:
+            return "dan_str_clone"
+        if тип == БАЙТЫ:
+            return "dan_bytes_clone"
+        if это_канал(тип):
+            self.канал_c(тип)
+            return "dan_chan_clone"
+        if тип not in self.клоны:
+            if это_список(тип):
+                имя = self.структура(тип) + "_clone"
+            elif это_словарь(тип):
+                имя = self.словарь_c(тип) + "_clone"
+            elif тип in self.перечисления:
+                имя = self.перечисление_c(тип) + "_clone"
+            else:
+                имя = self.значимый(тип) + "_clone"
+            self.клоны[тип] = имя
+            # вложенные типы тоже понадобятся
+            if это_список(тип):
+                self.клон(элемент(тип))
+            elif это_словарь(тип):
+                self.клон(ключ_словаря(тип)); self.клон(значение_словаря(тип))
+            elif тип in self.перечисления:
+                for _, поля in self.перечисления[тип]:
+                    for _, т in поля:
+                        self.клон(т)
+            elif это_необяз(тип) or это_результат(тип):
+                if основа(тип) != ПУСТО:
+                    self.клон(основа(тип))
+            elif тип in self.собственные:
+                for _, т, _ in self.собственные[тип]:
+                    self.клон(т)
+        return self.клоны[тип]
+
+    def _скопировать(self, тип, код):
+        ф = self.клон(тип)
+        return f"{ф}({код})" if ф else код
+
+    def _функции_клонов(self):
+        """Копирование значений для задач: новые значения с одним местом хранения, без таблицы временных."""
+        объявления, определения = [], []
+        обработанные = set()
+        while len(обработанные) < len(self.клоны):
+            for тип, имя in list(self.клоны.items()):
+                if тип in обработанные:
+                    continue
+                обработанные.add(тип)
+                т_c = self.тип_c(тип)
+                if это_список(тип):
+                    S = self.структура(тип)
+                    объявления.append(f"static {S} *{имя}(const {S} *l);")
+                    определения.append(
+                        f"static {S} *{имя}(const {S} *l) {{ {S} *r = dan_alloc(sizeof *r); dan_hdr_detached(&r->h); "
+                        f"r->len = l->len; r->cap = l->len < 4 ? 4 : l->len; "
+                        f"r->items = dan_alloc((size_t)r->cap * sizeof *r->items); "
+                        f"for (int64_t i = 0; i < l->len; i++) r->items[i] = {self._скопировать(элемент(тип), 'l->items[i]')}; "
+                        f"return r; }}")
+                elif это_словарь(тип):
+                    D = self.словарь_c(тип)
+                    к, з = ключ_словаря(тип), значение_словаря(тип)
+                    объявления.append(f"static {D} *{имя}(const {D} *d);")
+                    определения.append(
+                        f"static {D} *{имя}(const {D} *d) {{ {D} *r = {D}_new_detached(); "
+                        f"for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) "
+                        f"{D}_put_raw(r, {self._скопировать(к, 'd->keys[e]')}, {self._скопировать(з, 'd->vals[e]')}); "
+                        f"return r; }}")
+                elif тип in self.перечисления:
+                    V = self.перечисление_c(тип)
+                    объявления.append(f"static {V} {имя}({V} v);")
+                    ветви = []
+                    for номер, (вариант, поля) in enumerate(self.перечисления[тип]):
+                        копии = " ".join(f"c->u.v{номер}.{self.поле_c((тип, вариант), п)} = "
+                                         f"{self._скопировать(т, f'v->u.v{номер}.' + self.поле_c((тип, вариант), п))};"
+                                         for п, т in поля)
+                        if копии:
+                            ветви.append(f"case {номер}: {копии} break;")
+                    определения.append(
+                        f"static {V} {имя}({V} v) {{ if (!v) return v; DAN_STACK_CHECK(0); {V}_s *c = dan_alloc(sizeof *c); "
+                        f"*c = *v; dan_hdr_detached(&c->h); switch (v->tag) {{ {' '.join(ветви)} default: break; }} return c; }}")
+                elif это_функция(тип):
+                    объявления.append(f"static {т_c} {имя}({т_c} v);")
+                    определения.append(f"static {т_c} {имя}({т_c} v) {{ v.env = dan_env_clone(v.env); return v; }}")
+                elif self.по_ссылке(тип):
+                    т = основа(тип)
+                    объявления.append(f"static {т_c} {имя}({т_c} v);")
+                    определения.append(
+                        f"static {т_c} {имя}({т_c} v) {{ if (!v) return v; DAN_STACK_CHECK(0); {т_c}_cell *c = dan_alloc(sizeof *c); "
+                        f"dan_hdr_detached(&c->h); c->v = {self._скопировать(т, '*v')}; return &c->v; }}")
+                elif это_результат(тип):
+                    т = основа(тип)
+                    значение = f"v.value = {self._скопировать(т, 'v.value')};" if т != ПУСТО and self.клон(т) else ""
+                    объявления.append(f"static {т_c} {имя}({т_c} v);")
+                    определения.append(f"static {т_c} {имя}({т_c} v) {{ if (v.ok) {{ {значение} }} else "
+                                       f"v.err = dan_str_clone(v.err); return v; }}")
+                elif это_необяз(тип):
+                    объявления.append(f"static {т_c} {имя}({т_c} v);")
+                    определения.append(f"static {т_c} {имя}({т_c} v) {{ if (v.has) v.value = "
+                                       f"{self._скопировать(основа(тип), 'v.value')}; return v; }}")
+                else:
+                    объявления.append(f"static {т_c} {имя}({т_c} v);")
+                    поля = " ".join(f"v.{self.поле_c(тип, п)} = {self._скопировать(т, 'v.' + self.поле_c(тип, п))};"
+                                    for п, т, _ in self.собственные[тип] if self.клон(т))
+                    определения.append(f"static {т_c} {имя}({т_c} v) {{ DAN_STACK_CHECK(0); {поля} return v; }}")
+        return "\n".join(объявления + определения) + "\n"
+
+    def канал_c(self, тип):
+        """Регистрирует функции канала для типа элементов; возвращает часть имени."""
+        т = элемент_канала(тип)
+        if т not in self.каналы:
+            self.нужны_задачи = True
+            self.каналы[т] = "dk_" + self.код_типа(т)
+            self.тип_c(т)
+            self.тип_c(т + "?")
+            self.клон(т)
+        return self.каналы[т]
+
+    def _функции_каналов(self):
+        строки = []
+        for т, имя in self.каналы.items():
+            т_c, о = self.тип_c(т), self.тип_c(т + "?")
+            освободить = f"{self.отпустить(т)}(*({т_c} *)p);" if self.отпустить(т) else "(void)p;"
+            отдать = f"{self.отдать(т)}(x);" if self.отдать(т) else ""
+            строки += [
+                f"static void {имя}_drop(void *p) {{ {освободить} }}",
+                f"static dan_chan *{имя}_new(int64_t cap, int line) {{ return dan_chan_new(sizeof({т_c}), cap, {имя}_drop, line); }}",
+                f"static void {имя}_send(dan_chan *c, {т_c} v, int line) {{ {т_c} x = {self._скопировать(т, 'v')}; "
+                f"dan_chan_send(c, &x, line); }}",
+                f"static {о} {имя}_recv(dan_chan *c, int line) {{ {т_c} x; if (!dan_chan_recv(c, &x, line)) "
+                f"return {о}_none(); {отдать} return {о}_some(x); }}",
+            ]
+        return "\n".join(строки) + "\n"
+
+    def задача_c(self, тип):
+        """Структура C задачи с местом для её результата."""
+        результат = тип[len("задача<"):-1]
+        if результат not in self.задачи_c:
+            self.нужны_задачи = True
+            имя = "dz_" + (self.код_типа(результат) if результат != ПУСТО else "v")
+            self.задачи_c[результат] = имя
+            if результат != ПУСТО:
+                self.тип_c(результат)
+                self.клон(результат)
+        return self.задачи_c[результат]
+
+    def _определения_задач(self):
+        строки = []
+        for результат, имя in self.задачи_c.items():
+            if результат == ПУСТО:
+                строки.append(f"typedef struct {{ dan_task t; }} {имя};")
+            else:
+                строки.append(f"typedef struct {{ dan_task t; {self.тип_c(результат)} result; }} {имя};")
+        return "\n".join(строки) + "\n"
+
+    def _функции_задач(self):
+        строки = []
+        for результат, имя in self.задачи_c.items():
+            освободить = f"{self.отпустить(результат)}(z->result);" if результат != ПУСТО and self.отпустить(результат) else ""
+            строки.append(f"static void {имя}_end({имя} *z, int line) {{ dan_task_join(&z->t, line); {освободить} }}")
+        return "\n".join(строки) + "\n"
+
+    def _итоговый_тип(self, узел):
+        return (getattr(узел, "в_результат", None) or getattr(узел, "в_необяз", None)
+                or getattr(узел, "привести_к", None) or узел.тип_выр)
+
+    def _запустить(self, запуск, задача, результат):
+        """Код запуска задачи: значения для вызова вычисляются здесь, копии получает задача."""
+        self.нужны_задачи = True
+        вызов = запуск.вызов
+        значения = list(вызов.аргументы)
+        if isinstance(вызов.функция, у.Поле):
+            значения.insert(0, вызов.функция.объект)
+        elif getattr(вызов, "вызов_значения", None):
+            значения.insert(0, вызов.функция)
+        self.счётчик += 1
+        номер = self.счётчик
+        А = f"dan_targs_{номер}"
+        типы = [self._итоговый_тип(з) for з in значения]
+        тип_результата = запуск.тип_результата
+        поля = " ".join(f"{self.тип_c(т)} a{и};" for и, т in enumerate(типы))
+        # функция задачи: вызов с полученными копиями
+        сохр = (self.строки, self.отступ, getattr(self, "текущий_результат", None),
+                self.области, self.метка_функции, self.метки_циклов, self.группы)
+        self.строки, self.отступ, self.текущий_результат = [], 1, None
+        self.области, self.метка_функции, self.метки_циклов, self.группы = [[]], "dan_fmark", [], []
+        for и, з in enumerate(значения):
+            з.готовый_код = f"a->a{и}"
+        self.пиши(f"{А} *a = p;")
+        self.пиши("dan_task_begin(a->task);")
+        self.пиши("{")
+        self.пиши(f"    const size_t {self.метка_функции} = dan_mark();")
+        код = self.выр(вызов)
+        if тип_результата in (ПУСТО, None):
+            self.пиши(f"    {код};")
+        else:
+            self.пиши(f"    {self.тип_c(тип_результата)} const r = {код};")
+            self.пиши(f"    if (a->out) *a->out = {self._скопировать(тип_результата, 'r')};")
+        self.пиши(f"    dan_sweep({self.метка_функции});")
+        self.пиши("}")
+        for и, т in enumerate(типы):
+            if self.отпустить(т):
+                self.пиши(f"{self.отпустить(т)}(a->a{и});")
+        self.пиши("dan_task *t = a->task;")
+        self.пиши("free(a);")
+        self.пиши("dan_task_end(t);")
+        self.пиши("return DAN_THREAD_RETURN;")
+        for з in значения:
+            del з.готовый_код
+        тело = self.строки
+        (self.строки, self.отступ, self.текущий_результат,
+         self.области, self.метка_функции, self.метки_циклов, self.группы) = сохр
+        выход = "" if тип_результата in (ПУСТО, None) else f" {self.тип_c(тип_результата)} *out;"
+        self.лямбды_код.append(f"typedef struct {{ dan_task *task;{выход} {поля} }} {А};")
+        self.лямбды_код.append(f"static DAN_THREAD_FN dan_task_entry_{номер}(void *p) {{")
+        self.лямбды_код += тело
+        self.лямбды_код.append("}")
+        # запуск в текущей функции
+        присвоения = " ".join(f"a->a{и} = {self._скопировать(т, self.выр(з))};" for и, (з, т) in enumerate(zip(значения, типы)))
+        выход = "" if тип_результата in (ПУСТО, None) else f" a->out = {результат or 'NULL'};"
+        self.пиши(f"{{ {А} *a = dan_alloc(sizeof *a); a->task = {задача};{выход} {присвоения} "
+                  f"dan_task_start(a->task, dan_task_entry_{номер}, a, {запуск.строка}); }}")
+
     def _учесть(self, тип, код):
         """Код значения, которое получает место хранения (удержанное значение)."""
         ф = self.удержать(тип)
@@ -2197,13 +2813,20 @@ class Генератор:
 
     # ---------- память: места хранения и временные значения ----------
 
+    def _код_отпустить(self, имя_c, тип):
+        if тип.startswith("<группа:"):
+            return f"dan_tgroup_join(&{имя_c}, {тип[len('<группа:'):-1]});"     # блок ждёт свои задачи
+        if это_задача(тип):
+            return f"{self.задача_c(тип)}_end(&{имя_c}, {имя_c}.t.line);"       # задача не переживает блок
+        return f"{self.отпустить(тип)}({имя_c});"
+
     def _освободить(self, область):
         for имя_c, тип in reversed(область):
-            self.пиши(f"{self.отпустить(тип)}({имя_c});")
+            self.пиши(self._код_отпустить(имя_c, тип))
 
     def _код_освобождения(self, от=0):
         """Код C, освобождающий переменные областей начиная с номера «от»."""
-        return " ".join(f"{self.отпустить(тип)}({имя_c});"
+        return " ".join(self._код_отпустить(имя_c, тип)
                         for область in reversed(self.области[от:]) for имя_c, тип in reversed(область))
 
     def _выход_из_функции(self):
@@ -2284,6 +2907,14 @@ class Генератор:
             self.пиши(f"dan_sweep({метка});")
 
     def и_ОбъявлениеПеременной(self, и):
+        if isinstance(и.значение, у.Запуск):
+            имя = self.имя(и.имя)
+            тип = и.тип_итог
+            self.пиши(f"{self.задача_c(тип)} {имя};")
+            результат = None if и.значение.тип_результата == ПУСТО else f"&{имя}.result"
+            self._запустить(и.значение, f"&{имя}.t", результат)
+            self.области[-1].append((имя, тип))
+            return
         модификатор = "" if и.изменяемая else " const"
         значение = self.сохранить(и.значение, self.выр(и.значение), и.тип_итог)
         self.пиши(f"{self.тип_c(и.тип_итог)}{модификатор} {self.имя(и.имя)} = {значение};")
@@ -2482,7 +3113,31 @@ class Генератор:
         self.пиши("}")
 
     def и_Выражение(self, и):
+        if isinstance(и.выражение, у.Запуск):
+            запуск = и.выражение
+            тип = f"задача<{запуск.тип_результата}>"
+            dz, h = self.задача_c(тип), self.служебное_имя("task")
+            self.пиши(f"{{ {dz} *{h} = dan_alloc(sizeof *{h});")
+            self._запустить(запуск, f"&{h}->t", None)
+            self.пиши(f"dan_tgroup_add(&{self.группы[-1]}, &{h}->t); }}")
+            return
         self.пиши(f"{self.выр(и.выражение)};")
+
+    def и_Параллельно(self, и):
+        self.нужны_задачи = True
+        группа = self.служебное_имя("group")
+        self.пиши("{")
+        self.отступ += 1
+        self.пиши(f"dan_tgroup {группа} = {{ NULL }};")
+        self.области.append([(группа, f"<группа:{и.строка}>")])
+        self.группы.append(группа)
+        self.пиши("{")
+        self.блок(и.тело)
+        self.пиши("}")
+        self.группы.pop()
+        self._освободить(self.области.pop())
+        self.отступ -= 1
+        self.пиши("}")
 
     def и_Если(self, и, продолжение=False):
         начало = "} else if" if продолжение else "if"
@@ -2558,6 +3213,8 @@ class Генератор:
             self.отступ -= 1
             self.пиши("}")
             return
+        if getattr(и, "по_каналу", False):
+            return self._цикл_по_каналу(и, перем)
         if getattr(и, "по_строке", False):
             структура = self.структура("[стр]")
             источник = f"dan_str_chars({self.выр(и.источник)})"
@@ -2582,6 +3239,32 @@ class Генератор:
         self.пиши(f"{self.тип_c(и.тип_элемента)} const {перем} = {список}->items[{номер}];")
         self.отступ -= 1
         self._тело_цикла(и.тело)
+        self.пиши("}")
+        self._освободить(self.области.pop())
+        self.отступ -= 1
+        self.пиши("}")
+
+    def _цикл_по_каналу(self, и, перем):
+        тип = и.источник.тип_выр
+        dk = self.канал_c(тип)
+        т = элемент_канала(тип)
+        о = self.тип_c(т + "?")
+        канал, полученное, метка = self.служебное_имя("chan"), self.служебное_имя("got"), self.служебное_имя("ml")
+        self.пиши("{")
+        self.отступ += 1
+        self.пиши(f"dan_chan *const {канал} = dan_chan_share({self.выр(и.источник)});")
+        self.области.append([(канал, тип)])
+        self.пиши("for (;;) {")
+        self.пиши(f"    const size_t {метка} = dan_mark();")
+        self.пиши(f"    const {о} {полученное} = {dk}_recv({канал}, {и.строка});")
+        self.пиши(f"    if (!{о}_has({полученное})) {{ dan_sweep({метка}); break; }}")
+        self.пиши(f"    {self.тип_c(т)} const {перем} = {о}_val({полученное});")
+        # полученное значение живёт до конца шага цикла
+        self.метки_циклов.append((метка, len(self.области)))
+        self.блок(и.тело)
+        self.метки_циклов.pop()
+        if not self._завершает(и.тело):
+            self.пиши(f"    dan_sweep({метка});")
         self.пиши("}")
         self._освободить(self.области.pop())
         self.отступ -= 1
@@ -2618,6 +3301,9 @@ class Генератор:
     # ---------- выражения ----------
 
     def выр(self, в):
+        готовый = getattr(в, "готовый_код", None)
+        if готовый is not None:      # значение уже вычислено (передано задаче)
+            return готовый
         код = getattr(self, "в_" + type(в).__name__)(в)
         к_типу = getattr(в, "привести_к", None)
         if к_типу and к_типу != в.тип_выр:
@@ -2694,10 +3380,13 @@ class Генератор:
         код = []
         if захваты:
             поля = " ".join(f"{self.тип_c(т)} {self.имя(имя)};" for имя, т in захваты)
-            код.append(f"typedef struct {{ dan_hdr h; dan_destroy_fn d; {поля} }} dan_env_{номер};")
+            код.append(f"typedef struct {{ dan_hdr h; dan_destroy_fn d; void *(*c)(const void *); {поля} }} dan_env_{номер};")
             освободить = " ".join(f"{self.отпустить(т)}(e->{self.имя(имя)});" for имя, т in захваты if self.отпустить(т))
             код.append(f"static void dan_env_{номер}_destroy(dan_hdr *h) {{ dan_env_{номер} *e = (dan_env_{номер} *)(void *)h; "
                        f"{освободить} free(e); }}")
+            копии = " ".join(f"r->{self.имя(имя)} = {self._скопировать(т, 'e->' + self.имя(имя))};" for имя, т in захваты)
+            код.append(f"static void *dan_env_{номер}_clone(const void *p) {{ const dan_env_{номер} *e = p; "
+                       f"dan_env_{номер} *r = dan_alloc(sizeof *r); *r = *e; dan_hdr_detached(&r->h); {копии} return r; }}")
         код.append(f"static {self.тип_c(результат)} {имя_c}(void *envp{параметры_c}) {{")
         код += тело
         код.append("}")
@@ -2708,7 +3397,8 @@ class Генератор:
         присвоения = " ".join(f"{окр}->{self.имя(имя)} = {self.сохранить(у.Имя(имя), self.имя(имя), т)};"
                               for имя, т in захваты)
         return (f"({{ dan_env_{номер} *{окр} = dan_alloc(sizeof *{окр}); "
-                f"dan_hdr_new(&{окр}->h, dan_env_{номер}_destroy); {окр}->d = dan_env_{номер}_destroy; {присвоения} "
+                f"dan_hdr_new(&{окр}->h, dan_env_{номер}_destroy); {окр}->d = dan_env_{номер}_destroy; "
+                f"{окр}->c = dan_env_{номер}_clone; {присвоения} "
                 f"({df}){{ {имя_c}, {окр} }}; }})")
 
     def обёртка(self, имя_дан, тип):
@@ -2893,6 +3583,8 @@ class Генератор:
 
     def в_Поле(self, в):
         тип = в.объект.тип_выр
+        if getattr(в, "свойство_задачи", False):
+            return f"dan_task_ready(&{self.выр(в.объект)}.t)"
         if тип in self.собственные:
             return f"({self.выр(в.объект)}).{self.поле_c(тип, в.имя)}"
         if тип == РАЦ:
@@ -2912,6 +3604,22 @@ class Генератор:
         return f"({self.выр(в.объект)})->len"
 
     def в_Вызов(self, в):
+        if getattr(в, "метод_задачи", None):
+            задача = self.выр(в.функция.объект)
+            if в.тип_выр == ПУСТО:
+                return f"dan_task_join(&{задача}.t, {в.строка})"
+            return f"(dan_task_join(&{задача}.t, {в.строка}), {задача}.result)"
+        if getattr(в, "метод_канала", None):
+            канал = self.выр(в.функция.объект)
+            dk = self.канал_c(в.функция.объект.тип_выр)
+            if в.метод_канала == "отправить":
+                return f"{dk}_send({канал}, {self.выр(в.аргументы[0])}, {в.строка})"
+            if в.метод_канала == "получить":
+                return f"{dk}_recv({канал}, {в.строка})"
+            return f"dan_chan_close({канал}, {в.строка})"
+        if isinstance(в.функция, у.Имя) and в.функция.имя == "канал" and это_канал(в.тип_выр):
+            запас = self.выр(в.аргументы[0]) if в.аргументы else "0"
+            return f"{self.канал_c(в.тип_выр)}_new({запас}, {в.строка})"
         if getattr(в, "вызов_значения", None):
             аргументы = "".join(", " + self.выр(а) for а in в.аргументы)
             return f"{self.тип_c(в.вызов_значения)}_call({self.выр(в.функция)}{аргументы})"
@@ -2969,7 +3677,7 @@ class Генератор:
 
         if имя == "вывод":
             тип = в.аргументы[0].тип_выр
-            return f"({self.запись(тип)}({аргументы[0]}), dan_newline())"
+            return f"(DAN_OUT_LOCK(), {self.запись(тип)}({аргументы[0]}), dan_newline(), DAN_OUT_UNLOCK())"
         if имя == "ошибка":
             return аргументы[0]
         if имя == "ввод":

@@ -80,6 +80,15 @@ class ТестыWindows(unittest.TestCase):
         self.assertEqual(код, 0, ошибки)
         self.assertEqual(вывод.splitlines(), ["Прошу суд", "взыскать", '["2026 год/"]', '["иск.txt"]', "истина"])
 
+    def test_задачи_и_каналы(self):
+        import test_zadachi
+        код, вывод, ошибки = выполнить_в_windows(test_zadachi.КОНВЕЙЕР)
+        self.assertEqual(код, 0, ошибки)
+        self.assertEqual(вывод.splitlines(), ["180300"])
+        код, _, ошибки = выполнить_в_windows("пусть к: канал<цел> = канал()\nвывод(к.получить())")
+        self.assertEqual(код, 1)
+        self.assertIn("взаимная блокировка", ошибки)
+
     def test_глубокая_рекурсия(self):
         текст = ("функ глубина(н: цел) -> цел {\n если н == 0 { вернуть 0 }\n вернуть 1 + глубина(н - 1)\n}\n"
                  "вывод(глубина(300000))\nвывод(глубина(1000000000))")
