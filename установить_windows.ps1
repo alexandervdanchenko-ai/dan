@@ -1,6 +1,8 @@
 ﻿# Установка языка Дан на компьютер с Windows.
-# Создаёт папку D:\проекты\Дан, устанавливает Python, компилятор C (WinLibs),
-# упаковщик UPX и Git, загружает проект из GitHub и проверяет его тестами.
+# Создаёт папку D:\проекты\Дан (если диска D нет - папку «проекты\Дан» в папке
+# пользователя), устанавливает Python, компилятор C (WinLibs), упаковщик UPX и
+# Git, загружает проект из GitHub и проверяет его тестами.
+# Другую папку можно задать переменной окружения DAN_FOLDER.
 #
 # Запуск (в обычном окне PowerShell):
 #   powershell -ExecutionPolicy Bypass -File установить_windows.ps1
@@ -8,7 +10,9 @@
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$Папка = "D:\проекты\Дан"
+if ($env:DAN_FOLDER) { $Папка = $env:DAN_FOLDER }
+elseif (Test-Path "D:\") { $Папка = "D:\проекты\Дан" }
+else { $Папка = Join-Path $env:USERPROFILE "проекты\Дан" }
 $Репозиторий = "https://github.com/alexandervdanchenko-ai/dan.git"
 
 function Шаг($текст) { Write-Host ""; Write-Host "==> $текст" -ForegroundColor Cyan }
@@ -18,24 +22,28 @@ function ОбновитьPath {
                 [Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+# Команда есть и работает. В Windows 10 и 11 команда python есть всегда: без
+# установленного Python она только предлагает открыть Microsoft Store.
+function Работает($команда) {
+    if (-not (Get-Command $команда -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $null = & $команда --version 2>&1
+        return $LASTEXITCODE -eq 0
+    } catch { return $false }
+}
+
 function Установить($команда, $пакет, $название) {
-    if (Get-Command $команда -ErrorAction SilentlyContinue) {
+    if (Работает $команда) {
         Write-Host "$название уже установлен"
         return
     }
     Write-Host "Устанавливаю $название..."
     winget install --id $пакет -e --silent --accept-package-agreements --accept-source-agreements
     ОбновитьPath
-    if (-not (Get-Command $команда -ErrorAction SilentlyContinue)) {
+    if (-not (Работает $команда)) {
         Write-Host "$название установлен, но пока не виден. Закройте окно PowerShell, откройте новое и запустите сценарий ещё раз." -ForegroundColor Yellow
         exit 1
     }
-}
-
-Шаг "Проверяю диск D"
-if (-not (Test-Path "D:\")) {
-    Write-Host "Диск D не найден. Подключите диск или измените путь в строке `$Папка в начале сценария." -ForegroundColor Red
-    exit 1
 }
 
 Шаг "Проверяю winget"
@@ -51,7 +59,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 Установить "upx" "UPX.UPX" "упаковщик UPX"
 
 Шаг "Создаю папку $Папка"
-New-Item -ItemType Directory -Force -Path "D:\проекты" | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path $Папка -Parent) | Out-Null
 
 Шаг "Загружаю проект"
 if (Test-Path (Join-Path $Папка ".git")) {
@@ -73,10 +81,14 @@ if ($LASTEXITCODE -ne 0) {
 Set-Location $Папка
 $env:PYTHONUTF8 = "1"
 python dan.py запустить "примеры\факториал.dan"
+if ($LASTEXITCODE -ne 0) { Write-Host "Программа не запустилась: сообщение об ошибке выше." -ForegroundColor Red; exit 1 }
 python dan.py запустить "примеры\основы_математики.dan"
+if ($LASTEXITCODE -ne 0) { Write-Host "Программа не запустилась: сообщение об ошибке выше." -ForegroundColor Red; exit 1 }
 
-Шаг "Запускаю тесты (около минуты)"
-python -m unittest
+if ($env:DAN_NO_TESTS -ne "1") {
+    Шаг "Запускаю тесты (несколько минут)"
+    python -m unittest discover -p "test_*.py"
+}
 
 Шаг "Готово"
 Write-Host "Проект находится в $Папка"

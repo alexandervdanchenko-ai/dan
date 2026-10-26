@@ -63,3 +63,27 @@ jobs:
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
       - name: Фаззинг (по 45 секунд на каждую мишень)
         run: python fazzing.py --секунд=45
+
+  ustanovka:
+    name: Установка в Windows по инструкции
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Установка (Windows PowerShell, как в README)
+        shell: powershell
+        env:
+          DAN_FOLDER: ${{ runner.temp }}\проекты\Дан
+          DAN_NO_TESTS: "1"
+        run: powershell -ExecutionPolicy Bypass -File установить_windows.ps1
+      - name: Сборка программы с русским именем в установленной папке
+        shell: powershell
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          $п = "${{ runner.temp }}\проекты\Дан"
+          Set-Location $п
+          python dan.py собрать "примеры\факториал.dan"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & ".\примеры\факториал.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
