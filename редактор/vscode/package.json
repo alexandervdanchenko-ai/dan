@@ -1,0 +1,59 @@
+{
+  "name": "dan-language",
+  "displayName": "Дан",
+  "description": "Язык программирования Дан: подсветка, поиск ошибок при наборе, подсказки, переход к объявлениям, единый вид текста, запуск программ",
+  "version": "0.21.0",
+  "publisher": "dan-lang",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/alexandervdanchenko-ai/dan" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages", "Formatters", "Linters"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:dan"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dan",
+        "aliases": ["Дан", "dan"],
+        "extensions": [".dan"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "dan", "scopeName": "source.dan", "path": "./syntaxes/dan.tmLanguage.json" }
+    ],
+    "configuration": {
+      "title": "Дан",
+      "properties": {
+        "дан.python": {
+          "type": "string",
+          "default": "",
+          "description": "Команда запуска Python (по умолчанию: python в Windows, python3 в других системах)"
+        },
+        "дан.компилятор": {
+          "type": "string",
+          "default": "",
+          "description": "Полный путь к файлу dan.py. Если не указан, он ищется в открытой папке, в переменной среды DAN_HOME и в папке D:\\проекты\\Дан"
+        }
+      }
+    },
+    "commands": [
+      { "command": "dan.run", "title": "Дан: запустить программу", "icon": "$(play)" },
+      { "command": "dan.build", "title": "Дан: собрать исполняемый файл" },
+      { "command": "dan.check", "title": "Дан: проверить программу" },
+      { "command": "dan.debug", "title": "Дан: запустить в отладчике" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "dan.run", "when": "editorLangId == dan", "group": "navigation" }
+      ]
+    },
+    "keybindings": [
+      { "command": "dan.run", "key": "ctrl+f5", "when": "editorLangId == dan" },
+      { "command": "dan.debug", "key": "f5", "when": "editorLangId == dan && !inDebugMode" }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

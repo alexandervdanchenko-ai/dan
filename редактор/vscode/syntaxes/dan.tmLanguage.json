@@ -1,0 +1,134 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Дан",
+  "scopeName": "source.dan",
+  "fileTypes": [
+    "dan"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#call"
+    },
+    {
+      "include": "#capitalized"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.double-slash.dan",
+      "match": "//.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.dan",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        {
+          "name": "constant.character.escape.dan",
+          "match": "\\\\[nt\"\\\\]"
+        },
+        {
+          "name": "invalid.illegal.escape.dan",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "(?<![\\p{L}\\p{N}_])(функ)\\s+(?:([\\p{L}_][\\p{L}\\p{N}_]*)(\\.))?([\\p{L}_][\\p{L}\\p{N}_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.function.dan"
+            },
+            "2": {
+              "name": "entity.name.type.dan"
+            },
+            "4": {
+              "name": "entity.name.function.dan"
+            }
+          }
+        },
+        {
+          "match": "(?<![\\p{L}\\p{N}_])(тип|интерфейс)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.type.dan"
+            },
+            "2": {
+              "name": "entity.name.type.dan"
+            }
+          }
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.dan",
+          "match": "(?<![\\p{L}\\p{N}_])(если|иначе|пока|для|в|вернуть|прервать|продолжить|выбор|запустить|параллельно)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "storage.type.dan",
+          "match": "(?<![\\p{L}\\p{N}_])(функ|пусть|перем|тип|интерфейс|подключить|как|общий|внешняя)(?![\\p{L}\\p{N}_])"
+        },
+        {
+          "name": "keyword.operator.logical.dan",
+          "match": "(?<![\\p{L}\\p{N}_])(и|или|не)(?![\\p{L}\\p{N}_])"
+        }
+      ]
+    },
+    "constant": {
+      "name": "constant.language.dan",
+      "match": "(?<![\\p{L}\\p{N}_])(истина|ложь|ничего)(?![\\p{L}\\p{N}_])"
+    },
+    "type": {
+      "name": "support.type.dan",
+      "match": "(?<![\\p{L}\\p{N}_])(цел|дроб|стр|лог|рац|мн|байты|длинное|компл|дата|пусто|канал|задача|сам|Сам)(?![\\p{L}\\p{N}_])"
+    },
+    "number": {
+      "name": "constant.numeric.dan",
+      "match": "(?<![\\p{L}_])\\d[\\d_]*(\\.\\d+)?|[²³]"
+    },
+    "call": {
+      "match": "([\\p{L}_][\\p{L}\\p{N}_]*)(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.call.dan"
+        }
+      }
+    },
+    "capitalized": {
+      "name": "entity.name.type.dan",
+      "match": "(?<![\\p{L}\\p{N}_])\\p{Lu}[\\p{L}\\p{N}_]*(?![\\p{L}\\p{N}_])"
+    },
+    "operator": {
+      "name": "keyword.operator.dan",
+      "match": "->|==|!=|<=|>=|\\+=|-=|\\*=|/=|\\.\\.|[-+*/%^=<>!?×·÷−≤≥≠:]"
+    }
+  }
+}
