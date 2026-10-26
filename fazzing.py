@@ -300,7 +300,17 @@ def main(аргументы):
             итог = 1
             print(вывод[-6000:])
             if os.environ.get("GITHUB_ACTIONS"):       # замечание на странице проверки GitHub
-                кратко = вывод[-6000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                import base64
+                строки = [с for с in вывод.splitlines()
+                          if re.search(r"ERROR|SUMMARY|runtime error|^\s+#\d+ ", с)][:40]
+                for ф in найдено[:3]:
+                    with open(ф, "rb") as фф:
+                        данные = фф.read()
+                    if len(данные) <= 4000:
+                        строки.append(f"вход {os.path.basename(ф)} (Base64): " + base64.b64encode(данные).decode())
+                    else:
+                        строки.append(f"вход {os.path.basename(ф)}: {len(данные)} байт")
+                кратко = "\n".join(строки)[-30000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
                 print(f"::error title=Находка фаззинга%3A {имя}::{кратко}")
             for ф in найдено:
                 print("  находка:", os.path.relpath(ф, ПАПКА))
