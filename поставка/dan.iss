@@ -54,6 +54,7 @@ Name: "{group}\Дан - командная строка"; Filename: "{cmd}"; Par
 Name: "{group}\Примеры программ"; Filename: "{userdocs}\Дан\примеры"
 Name: "{group}\Справочник языка"; Filename: "{app}\справочник.html"
 Name: "{group}\Библиотека Дана"; Filename: "{app}\документация_библиотеки\index.html"
+Name: "{group}\Песочница Дана"; Filename: "{app}\dan.exe"; Parameters: "песочница"; WorkingDir: "{userdocs}\Дан"; IconFilename: "{app}\dan.ico"
 Name: "{group}\Удалить Дан"; Filename: "{uninstallexe}"
 
 [Registry]
