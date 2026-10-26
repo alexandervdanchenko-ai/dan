@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ГОТОВО = os.path.join(КОРЕНЬ, "поставка", "готово")
@@ -46,6 +47,7 @@ def собрать_dan_exe():
                     "--name", "dan", "--distpath", ГОТОВО, "--workpath", работа, "--specpath", работа,
                     "--add-data", os.path.join(КОРЕНЬ, "sreda") + разделитель + "sreda",
                     "--add-data", os.path.join(КОРЕНЬ, "библиотека") + разделитель + "библиотека",
+                    "--add-data", os.path.join(КОРЕНЬ, "учебник", "задачи") + разделитель + os.path.join("учебник", "задачи"),
                     os.path.join(КОРЕНЬ, "dan.py")], check=True, cwd=КОРЕНЬ)
     shutil.rmtree(работа, ignore_errors=True)
 
@@ -96,6 +98,21 @@ def добавить_файлы():
     в_html(os.path.join(КОРЕНЬ, "spec.md"), os.path.join(ПАПКА, "описание_языка.html"), "Описание языка Дан")
 
 
+def добавить_учебник_и_редактор():
+    шаг("учебник и редактор")
+    import uchebnik
+    uchebnik.собрать_html(os.path.join(ПАПКА, "учебник"))
+    # редактор собирается самим Даном из поставки
+    dan = os.path.join(ПАПКА, "dan.exe" if os.name == "nt" else "dan")
+    with tempfile.TemporaryDirectory() as папка:
+        исходник = os.path.join(папка, "редактор.dan")
+        shutil.copy(os.path.join(КОРЕНЬ, "поставка", "редактор", "редактор.dan"), исходник)
+        среда = dict(os.environ, DAN_COMPILER="zig")
+        subprocess.run([dan, "собрать", исходник, "--малый"], check=True, env=среда)
+        готовый = исходник[:-4] + (".exe" if os.name == "nt" else "")
+        shutil.copy(готовый, os.path.join(ПАПКА, os.path.basename(готовый)))
+
+
 def найти_iscc():
     for путь in (shutil.which("iscc"), r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
                  r"C:\Program Files\Inno Setup 6\ISCC.exe"):
@@ -125,6 +142,7 @@ def main():
     собрать_dan_exe()
     добавить_zig()
     добавить_файлы()
+    добавить_учебник_и_редактор()
     шаг("переносной архив")
     архив = shutil.make_archive(os.path.join(ГОТОВО, f"dan-{версия}-windows"), "zip", ГОТОВО, "dan")
     установщик = собрать_установщик(версия) if os.name == "nt" else None

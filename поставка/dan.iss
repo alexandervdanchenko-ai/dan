@@ -46,6 +46,8 @@ Source: "готово\dan\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 Source: "готово\dan\примеры\*.dan"; DestDir: "{userdocs}\Дан\примеры"; Flags: onlyifdoesntexist
 
 [Icons]
+Name: "{group}\Редактор Дан"; Filename: "{app}\редактор.exe"; Parameters: "--дан=""{app}\dan.exe"""; WorkingDir: "{userdocs}\Дан"
+Name: "{group}\Учебник «Дан с нуля»"; Filename: "{app}\учебник\index.html"
 Name: "{group}\Дан - командная строка"; Filename: "{cmd}"; Parameters: "/k chcp 65001 >nul && echo Дан {#AppVer}. Команды: dan"; WorkingDir: "{userdocs}\Дан"
 Name: "{group}\Примеры программ"; Filename: "{userdocs}\Дан\примеры"
 Name: "{group}\Справочник языка"; Filename: "{app}\справочник.html"
@@ -61,11 +63,11 @@ Root: HKCU; Subkey: "Software\Classes\Dan.Program"; ValueType: string; ValueData
 Root: HKCU; Subkey: "Software\Classes\Dan.Program\shell\open\command"; ValueType: string; \
   ValueData: """{cmd}"" /k chcp 65001 >nul && ""{app}\dan.exe"" запустить ""%1"""; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\Dan.Program\shell\edit\command"; ValueType: string; \
-  ValueData: """{win}\notepad.exe"" ""%1"""; Tasks: assoc
+  ValueData: """{app}\редактор.exe"" --дан=""{app}\dan.exe"" ""%1"""; Tasks: assoc
 
 [Run]
-Filename: "{cmd}"; Parameters: "/k chcp 65001 >nul && ""{app}\dan.exe"" запустить примеры\факториал.dan"; \
-  WorkingDir: "{userdocs}\Дан"; Description: "Запустить пример программы"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\редактор.exe"; Parameters: "--дан=""{app}\dan.exe"" ""{userdocs}\Дан\примеры\факториал.dan"""; \
+  WorkingDir: "{userdocs}\Дан"; Description: "Открыть редактор Дан"; Flags: postinstall nowait skipifsilent
 
 [Code]
 // в коде Pascal Script имена - только латиницей
