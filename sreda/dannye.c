@@ -1308,82 +1308,109 @@ static void dan_dos_time(uint16_t *t, uint16_t *d) {
     *d = (uint16_t)(((lt->tm_year - 80) << 9) | ((lt->tm_mon + 1) << 5) | lt->tm_mday);
 }
 
+/* One file of an archive: local header and data into out, directory entry into cd. */
+static void dan_zip_add(dan_bbuf *out, dan_bbuf *cd, const char *name, const uint8_t *data, size_t dlen,
+                        dan_str password, uint16_t t, uint16_t d, int line) {
+    int encrypt = password && password[0];
+    if (dlen >= 0xFFFFFFFFu) dan_error(DAN_MSG_ZIP_BIG, line);
+    size_t clen;
+    uint8_t *comp = dan_deflate_raw(data, dlen, &clen);
+    const uint8_t *body = comp;
+    uint16_t method = 8;
+    if (clen >= dlen) { body = data; clen = dlen; method = 0; }
+    uint32_t crc = dan_crc32_update(0, data, dlen);
+    dan_bbuf payload = { NULL, 0, 0 }, extra = { NULL, 0, 0 };
+    uint16_t flags = 1 << 11, version = 20, stored_method = method;
+    if (encrypt) {
+        /* WinZip AES-256, version AE-2 */
+        uint8_t salt[16], keys[66], mac[20];
+        dan_random(salt, 16, line);
+        dan_pbkdf2_sha1((const uint8_t *)password, strlen(password), salt, 16, 1000, keys, 66);
+        uint8_t *ct = dan_alloc(clen + 1);
+        memcpy(ct, body, clen);
+        dan_aes aes;
+        dan_aes_init(&aes, keys, 32);
+        dan_aes_ctr_winzip(&aes, ct, clen);
+        dan_hmac1_ctx hm;
+        dan_hmac1_init(&hm, keys + 32, 32);
+        dan_hmac1(&hm, ct, clen, mac);
+        dan_bbuf_add(&payload, salt, 16);
+        dan_bbuf_add(&payload, keys + 64, 2);
+        dan_bbuf_add(&payload, ct, clen);
+        dan_bbuf_add(&payload, mac, 10);
+        free(ct);
+        dan_bbuf_u16(&extra, 0x9901); dan_bbuf_u16(&extra, 7); dan_bbuf_u16(&extra, 2);
+        dan_bbuf_add(&extra, "AE", 2);
+        uint8_t strength = 3;
+        dan_bbuf_add(&extra, &strength, 1);
+        dan_bbuf_u16(&extra, method);
+        flags |= 1;
+        version = 51;
+        stored_method = 99;
+        crc = 0;
+    } else dan_bbuf_add(&payload, body, clen);
+    free(comp);
+    if (out->len + payload.len + 1024 > 0xFFFFFFFFu) dan_error(DAN_MSG_ZIP_BIG, line);
+    uint32_t offset = (uint32_t)out->len;
+    size_t nlen = strlen(name);
+    /* local file header */
+    dan_bbuf_u32(out, 0x04034b50); dan_bbuf_u16(out, version); dan_bbuf_u16(out, flags);
+    dan_bbuf_u16(out, stored_method); dan_bbuf_u16(out, t); dan_bbuf_u16(out, d);
+    dan_bbuf_u32(out, crc); dan_bbuf_u32(out, (uint32_t)payload.len); dan_bbuf_u32(out, (uint32_t)dlen);
+    dan_bbuf_u16(out, (uint32_t)nlen); dan_bbuf_u16(out, (uint32_t)extra.len);
+    dan_bbuf_add(out, name, nlen);
+    if (extra.len) dan_bbuf_add(out, extra.d, extra.len);
+    if (payload.len) dan_bbuf_add(out, payload.d, payload.len);
+    /* central directory entry */
+    dan_bbuf_u32(cd, 0x02014b50); dan_bbuf_u16(cd, 63); dan_bbuf_u16(cd, version); dan_bbuf_u16(cd, flags);
+    dan_bbuf_u16(cd, stored_method); dan_bbuf_u16(cd, t); dan_bbuf_u16(cd, d);
+    dan_bbuf_u32(cd, crc); dan_bbuf_u32(cd, (uint32_t)payload.len); dan_bbuf_u32(cd, (uint32_t)dlen);
+    dan_bbuf_u16(cd, (uint32_t)nlen); dan_bbuf_u16(cd, (uint32_t)extra.len); dan_bbuf_u16(cd, 0);
+    dan_bbuf_u16(cd, 0); dan_bbuf_u16(cd, 0); dan_bbuf_u32(cd, 0x20); dan_bbuf_u32(cd, offset);
+    dan_bbuf_add(cd, name, nlen);
+    if (extra.len) dan_bbuf_add(cd, extra.d, extra.len);
+    free(payload.d);
+    free(extra.d);
+}
+
+/* Central directory and its end record; cd is freed. */
+static void dan_zip_finish(dan_bbuf *out, dan_bbuf *cd, int64_t count) {
+    uint32_t cd_offset = (uint32_t)out->len;
+    dan_bbuf_add(out, cd->d ? cd->d : (uint8_t *)"", cd->len);
+    dan_bbuf_u32(out, 0x06054b50); dan_bbuf_u16(out, 0); dan_bbuf_u16(out, 0);
+    dan_bbuf_u16(out, (uint32_t)count); dan_bbuf_u16(out, (uint32_t)count);
+    dan_bbuf_u32(out, (uint32_t)cd->len); dan_bbuf_u32(out, cd_offset); dan_bbuf_u16(out, 0);
+    free(cd->d);
+}
+
 static void dan_create_zip(dan_str zip_path, const dl_Ls *files, dan_str password, int line) {
     dan_bbuf out = { NULL, 0, 0 }, cd = { NULL, 0, 0 };
     uint16_t t, d;
     dan_dos_time(&t, &d);
-    int encrypt = password && password[0];
     if (files->len > 65535) dan_error(DAN_MSG_ZIP_BIG, line);
     for (int64_t i = 0; i < files->len; i++) {
         dan_bytes data = dan_read_bytes(files->items[i], line);
-        if (data->len >= 0xFFFFFFFFLL) dan_error(DAN_MSG_ZIP_BIG, line);
-        const char *name = dan_basename(files->items[i]);
-        size_t clen;
-        uint8_t *comp = dan_deflate_raw(data->data, (size_t)data->len, &clen);
-        uint16_t method = 8;
-        if (clen >= (size_t)data->len) { free(comp); comp = data->data; clen = (size_t)data->len; method = 0; }
-        uint32_t crc = dan_crc32_update(0, data->data, (size_t)data->len);
-        dan_bbuf payload = { NULL, 0, 0 }, extra = { NULL, 0, 0 };
-        uint16_t flags = 1 << 11, version = 20, stored_method = method;
-        if (encrypt) {
-            /* WinZip AES-256, version AE-2 */
-            uint8_t salt[16], keys[66], mac[20];
-            dan_random(salt, 16, line);
-            dan_pbkdf2_sha1((const uint8_t *)password, strlen(password), salt, 16, 1000, keys, 66);
-            uint8_t *ct = dan_alloc(clen + 1);
-            memcpy(ct, comp, clen);
-            dan_aes aes;
-            dan_aes_init(&aes, keys, 32);
-            dan_aes_ctr_winzip(&aes, ct, clen);
-            dan_hmac1_ctx hm;
-            dan_hmac1_init(&hm, keys + 32, 32);
-            dan_hmac1(&hm, ct, clen, mac);
-            dan_bbuf_add(&payload, salt, 16);
-            dan_bbuf_add(&payload, keys + 64, 2);
-            dan_bbuf_add(&payload, ct, clen);
-            dan_bbuf_add(&payload, mac, 10);
-            free(ct);
-            dan_bbuf_u16(&extra, 0x9901); dan_bbuf_u16(&extra, 7); dan_bbuf_u16(&extra, 2);
-            dan_bbuf_add(&extra, "AE", 2);
-            uint8_t strength = 3;
-            dan_bbuf_add(&extra, &strength, 1);
-            dan_bbuf_u16(&extra, method);
-            flags |= 1;
-            version = 51;
-            stored_method = 99;
-            crc = 0;
-        } else dan_bbuf_add(&payload, comp, clen);
-        if (out.len + payload.len + 1024 > 0xFFFFFFFFu) dan_error(DAN_MSG_ZIP_BIG, line);
-        uint32_t offset = (uint32_t)out.len;
-        size_t nlen = strlen(name);
-        /* local file header */
-        dan_bbuf_u32(&out, 0x04034b50); dan_bbuf_u16(&out, version); dan_bbuf_u16(&out, flags);
-        dan_bbuf_u16(&out, stored_method); dan_bbuf_u16(&out, t); dan_bbuf_u16(&out, d);
-        dan_bbuf_u32(&out, crc); dan_bbuf_u32(&out, (uint32_t)payload.len); dan_bbuf_u32(&out, (uint32_t)data->len);
-        dan_bbuf_u16(&out, (uint32_t)nlen); dan_bbuf_u16(&out, (uint32_t)extra.len);
-        dan_bbuf_add(&out, name, nlen);
-        if (extra.len) dan_bbuf_add(&out, extra.d, extra.len);
-        dan_bbuf_add(&out, payload.d, payload.len);
-        /* central directory entry */
-        dan_bbuf_u32(&cd, 0x02014b50); dan_bbuf_u16(&cd, 63); dan_bbuf_u16(&cd, version); dan_bbuf_u16(&cd, flags);
-        dan_bbuf_u16(&cd, stored_method); dan_bbuf_u16(&cd, t); dan_bbuf_u16(&cd, d);
-        dan_bbuf_u32(&cd, crc); dan_bbuf_u32(&cd, (uint32_t)payload.len); dan_bbuf_u32(&cd, (uint32_t)data->len);
-        dan_bbuf_u16(&cd, (uint32_t)nlen); dan_bbuf_u16(&cd, (uint32_t)extra.len); dan_bbuf_u16(&cd, 0);
-        dan_bbuf_u16(&cd, 0); dan_bbuf_u16(&cd, 0); dan_bbuf_u32(&cd, 0x20); dan_bbuf_u32(&cd, offset);
-        dan_bbuf_add(&cd, name, nlen);
-        if (extra.len) dan_bbuf_add(&cd, extra.d, extra.len);
-        free(payload.d);
-        free(extra.d);
-        if (method == 8) free(comp);
+        dan_zip_add(&out, &cd, dan_basename(files->items[i]), data->data, (size_t)data->len, password, t, d, line);
     }
-    uint32_t cd_offset = (uint32_t)out.len;
-    dan_bbuf_add(&out, cd.d ? cd.d : (uint8_t *)"", cd.len);
-    dan_bbuf_u32(&out, 0x06054b50); dan_bbuf_u16(&out, 0); dan_bbuf_u16(&out, 0);
-    dan_bbuf_u16(&out, (uint32_t)files->len); dan_bbuf_u16(&out, (uint32_t)files->len);
-    dan_bbuf_u32(&out, (uint32_t)cd.len); dan_bbuf_u32(&out, cd_offset); dan_bbuf_u16(&out, 0);
+    dan_zip_finish(&out, &cd, files->len);
     dan_write_raw(zip_path, "wb", out.d, out.len, line);
     free(out.d);
-    free(cd.d);
+}
+
+/* Archive in memory from pairs [name, data, name, data, ...] (names are text in bytes). */
+static dan_bytes dan_zip_pack(const dl_Ly *parts, int line) {
+    if (parts->len % 2) dan_error(DAN_MSG_ZIP_PAIRS, line);
+    if (parts->len / 2 > 65535) dan_error(DAN_MSG_ZIP_BIG, line);
+    dan_bbuf out = { NULL, 0, 0 }, cd = { NULL, 0, 0 };
+    uint16_t t, d;
+    dan_dos_time(&t, &d);
+    for (int64_t i = 0; i + 1 < parts->len; i += 2) {
+        dan_str name = dan_bytes_to_str(parts->items[i]);
+        if (!name[0] || (int64_t)strlen(name) != parts->items[i]->len) dan_error(DAN_MSG_ZIP_PAIRS, line);
+        dan_zip_add(&out, &cd, name, parts->items[i + 1]->data, (size_t)parts->items[i + 1]->len, NULL, t, d, line);
+    }
+    dan_zip_finish(&out, &cd, parts->len / 2);
+    return dan_bytes_wrap(out.d ? out.d : dan_alloc(1), (int64_t)out.len);
 }
 
 static void dan_create_zip_plain(dan_str zip_path, const dl_Ls *files, int line) { dan_create_zip(zip_path, files, NULL, line); }
@@ -1462,10 +1489,52 @@ static void dan_check_entry_name(char *name, int line) {
     }
 }
 
+/* Contents of one archive entry (allocated; *plen - its length). */
+static uint8_t *dan_zip_entry_data(const uint8_t *p, size_t n, const dan_zip_entry *x, dan_str password,
+                                   size_t *plen, int line) {
+    size_t lh = x->offset;
+    if (lh + 30 > n || dan_le32(p + lh) != 0x04034b50) dan_error(DAN_MSG_CORRUPT, line);
+    size_t start = lh + 30 + dan_le16(p + lh + 26) + dan_le16(p + lh + 28);
+    if (start + x->csize > n) dan_error(DAN_MSG_CORRUPT, line);
+    uint8_t *data = dan_alloc((size_t)x->csize + 1);
+    memcpy(data, p + start, x->csize);
+    size_t dlen = x->csize;
+    uint16_t method = x->method;
+    if (x->flags & 1) {
+        if (!x->aes) dan_conv_error(DAN_MSG_ZIPCRYPTO, x->name, line);
+        if (!password || !password[0]) dan_conv_error(DAN_MSG_ZIP_NEED_PW, x->name, line);
+        int keylen = x->aes_strength == 1 ? 16 : x->aes_strength == 2 ? 24 : 32;
+        int saltlen = keylen / 2;
+        if (dlen < (size_t)saltlen + 12) dan_error(DAN_MSG_CORRUPT, line);
+        uint8_t keys[66], mac[20];
+        dan_pbkdf2_sha1((const uint8_t *)password, strlen(password), data, (size_t)saltlen, 1000, keys,
+                        (size_t)(2 * keylen + 2));
+        if (memcmp(keys + 2 * keylen, data + saltlen, 2) != 0) dan_conv_error(DAN_MSG_ZIP_BAD_PW, x->name, line);
+        uint8_t *ct = data + saltlen + 2;
+        size_t ctlen = dlen - (size_t)saltlen - 12;
+        dan_hmac1_ctx hm;
+        dan_hmac1_init(&hm, keys + keylen, (size_t)keylen);
+        dan_hmac1(&hm, ct, ctlen, mac);
+        if (!dan_equal_ct(mac, ct + ctlen, 10)) dan_conv_error(DAN_MSG_ZIP_BAD_PW, x->name, line);
+        dan_aes aes;
+        dan_aes_init(&aes, keys, keylen);
+        dan_aes_ctr_winzip(&aes, ct, ctlen);
+        memmove(data, ct, ctlen);
+        dlen = ctlen;
+        method = x->aes_method;
+    }
+    uint8_t *plain;
+    if (method == 0) { plain = data; *plen = dlen; }
+    else if (method == 8) { plain = dan_inflate_raw(data, dlen, plen, NULL, line); free(data); }
+    else { char t[32]; snprintf(t, sizeof t, "%u", method); dan_conv_error(DAN_MSG_ZIP_METHOD, t, line); return NULL; }
+    if (*plen != x->usize) dan_error(DAN_MSG_CORRUPT, line);
+    if (!(x->aes && x->aes_version == 2) && dan_crc32_update(0, plain, *plen) != x->crc)
+        dan_error(DAN_MSG_CORRUPT, line);
+    return plain;
+}
+
 static dl_Ls *dan_extract_zip(dan_str zip_path, dan_str folder, dan_str password, int line) {
     dan_bytes z = dan_read_bytes(zip_path, line);
-    const uint8_t *p = z->data;
-    size_t n = (size_t)z->len;
     int64_t k;
     dan_zip_entry *e = dan_zip_entries(z, &k, line);
     dl_Ls *done = dl_Ls_from(0, NULL);
@@ -1483,52 +1552,31 @@ static dl_Ls *dan_extract_zip(dan_str zip_path, dan_str folder, dan_str password
             dir[slash - target] = 0;
             dan_make_dirs(dir, line);
         }
-        size_t lh = x->offset;
-        if (lh + 30 > n || dan_le32(p + lh) != 0x04034b50) dan_error(DAN_MSG_CORRUPT, line);
-        size_t start = lh + 30 + dan_le16(p + lh + 26) + dan_le16(p + lh + 28);
-        if (start + x->csize > n) dan_error(DAN_MSG_CORRUPT, line);
-        uint8_t *data = dan_alloc((size_t)x->csize + 1);
-        memcpy(data, p + start, x->csize);
-        size_t dlen = x->csize;
-        uint16_t method = x->method;
-        if (x->flags & 1) {
-            if (!x->aes) dan_conv_error(DAN_MSG_ZIPCRYPTO, x->name, line);
-            if (!password || !password[0]) dan_conv_error(DAN_MSG_ZIP_NEED_PW, x->name, line);
-            int keylen = x->aes_strength == 1 ? 16 : x->aes_strength == 2 ? 24 : 32;
-            int saltlen = keylen / 2;
-            if (dlen < (size_t)saltlen + 12) dan_error(DAN_MSG_CORRUPT, line);
-            uint8_t keys[66], mac[20];
-            dan_pbkdf2_sha1((const uint8_t *)password, strlen(password), data, (size_t)saltlen, 1000, keys,
-                            (size_t)(2 * keylen + 2));
-            if (memcmp(keys + 2 * keylen, data + saltlen, 2) != 0) dan_conv_error(DAN_MSG_ZIP_BAD_PW, x->name, line);
-            uint8_t *ct = data + saltlen + 2;
-            size_t ctlen = dlen - (size_t)saltlen - 12;
-            dan_hmac1_ctx hm;
-            dan_hmac1_init(&hm, keys + keylen, (size_t)keylen);
-            dan_hmac1(&hm, ct, ctlen, mac);
-            if (!dan_equal_ct(mac, ct + ctlen, 10)) dan_conv_error(DAN_MSG_ZIP_BAD_PW, x->name, line);
-            dan_aes aes;
-            dan_aes_init(&aes, keys, keylen);
-            dan_aes_ctr_winzip(&aes, ct, ctlen);
-            memmove(data, ct, ctlen);
-            dlen = ctlen;
-            method = x->aes_method;
-        }
-        uint8_t *plain;
         size_t plen;
-        if (method == 0) { plain = data; plen = dlen; }
-        else if (method == 8) plain = dan_inflate_raw(data, dlen, &plen, NULL, line);
-        else { char t[32]; snprintf(t, sizeof t, "%u", method); dan_conv_error(DAN_MSG_ZIP_METHOD, t, line); }
-        if (plen != x->usize) dan_error(DAN_MSG_CORRUPT, line);
-        if (!(x->aes && x->aes_version == 2) && dan_crc32_update(0, plain, plen) != x->crc)
-            dan_error(DAN_MSG_CORRUPT, line);
+        uint8_t *plain = dan_zip_entry_data(z->data, (size_t)z->len, x, password, &plen, line);
         dan_write_raw(target, "wb", plain, plen, line);
-        if (plain != data) free(plain);
-        free(data);
+        free(plain);
         dl_Ls_push(done, x->name);
     }
     free(e);
     return done;
+}
+
+/* Archive in memory -> [name, data, name, data, ...]; folders are skipped. */
+static dl_Ly *dan_zip_unpack(dan_bytes z, int line) {
+    int64_t k;
+    dan_zip_entry *e = dan_zip_entries(z, &k, line);
+    dl_Ly *r = dl_Ly_from(0, NULL);
+    for (int64_t i = 0; i < k; i++) {
+        size_t nl = strlen(e[i].name);
+        if (nl && e[i].name[nl - 1] == '/') continue;
+        size_t plen;
+        uint8_t *plain = dan_zip_entry_data(z->data, (size_t)z->len, &e[i], NULL, &plen, line);
+        dl_Ly_push(r, dan_bytes_from_str(e[i].name));
+        dl_Ly_push(r, dan_bytes_wrap(plain, (int64_t)plen));
+    }
+    free(e);
+    return r;
 }
 
 static dl_Ls *dan_extract_zip_plain(dan_str zip_path, dan_str folder, int line) {
@@ -2355,3 +2403,242 @@ static dan_bytes dan_decompress(dan_bytes b, int line) {
 static dan_bytes dan_compress_pw(dan_bytes b, dan_str pw, int line) { return dan_encrypt(dan_compress(b), pw, line); }
 static dan_bytes dan_compress_str_pw(dan_str s, dan_str pw, int line) { return dan_encrypt(dan_compress_str(s), pw, line); }
 static dan_bytes dan_decompress_pw(dan_bytes b, dan_str pw, int line) { return dan_decompress(dan_decrypt(b, pw, line), line); }
+
+/* ==== XML: the text is split into events, the tree is built by library/xml.dan ====
+   Events (a flat list of strings):
+     "<" name ("@" attribute value)* ">"   - start of an element (also for <a/>, followed by "</" a)
+     "</" name                            - end of an element
+     "т" text                             - text (entities decoded, CDATA included)
+   The declaration <?xml ...?>, processing instructions, comments and DOCTYPE are skipped. */
+
+typedef struct { const char *s, *p; dl_Ls *out; dan_str err; char *tmp; size_t tlen, tcap; } dan_xml;
+DAN_STATIC_STR(dan_xml_open_s, "<");
+DAN_STATIC_STR(dan_xml_end_s, ">");
+DAN_STATIC_STR(dan_xml_close_s, "</");
+DAN_STATIC_STR(dan_xml_attr_s, "@");
+DAN_STATIC_STR(dan_xml_text_s, "\xd1\x82");     /* «т» */
+
+static void dan_xml_fail(dan_xml *x, const char *at, const char *why) {
+    if (x->err) return;
+    int64_t row = 1, col = 1;
+    for (const char *q = x->s; q < at && *q; q++) {
+        if (*q == '\n') { row++; col = 1; }
+        else if (((unsigned char)*q & 0xC0) != 0x80) col++;
+    }
+    char head[96];
+    snprintf(head, sizeof head, "%s%" PRId64 "%s%" PRId64 ": ", DAN_TXT_XML_ROW, row, DAN_TXT_XML_COL, col);
+    char *m = dan_str_new(strlen(head) + strlen(why));
+    strcpy(m, head);
+    strcat(m, why);
+    x->err = m;
+}
+
+static void dan_xml_put(dan_xml *x, const char *t, size_t n) {
+    if (x->tlen + n + 1 > x->tcap) { x->tcap = (x->tlen + n + 1) * 2; x->tmp = dan_realloc(x->tmp, x->tcap); }
+    memcpy(x->tmp + x->tlen, t, n);
+    x->tlen += n;
+}
+
+static dan_str dan_xml_take(dan_xml *x) {
+    char *r = dan_str_new(x->tlen);
+    memcpy(r, x->tmp ? x->tmp : "", x->tlen);
+    r[x->tlen] = 0;
+    x->tlen = 0;
+    return r;
+}
+
+static void dan_xml_utf8(dan_xml *x, uint32_t c) {
+    char t[4];
+    size_t n;
+    if (c < 0x80) { t[0] = (char)c; n = 1; }
+    else if (c < 0x800) { t[0] = (char)(0xC0 | c >> 6); t[1] = (char)(0x80 | (c & 63)); n = 2; }
+    else if (c < 0x10000) { t[0] = (char)(0xE0 | c >> 12); t[1] = (char)(0x80 | (c >> 6 & 63)); t[2] = (char)(0x80 | (c & 63)); n = 3; }
+    else { t[0] = (char)(0xF0 | c >> 18); t[1] = (char)(0x80 | (c >> 12 & 63)); t[2] = (char)(0x80 | (c >> 6 & 63)); t[3] = (char)(0x80 | (c & 63)); n = 4; }
+    dan_xml_put(x, t, n);
+}
+
+/* Text up to the stop character with entities decoded, into x->tmp. */
+static int dan_xml_chars(dan_xml *x, char stop) {
+    while (*x->p && *x->p != stop) {
+        if (stop == '<' && *x->p == '>' ) { dan_xml_put(x, x->p++, 1); continue; }
+        if (stop != '<' && *x->p == '<') { dan_xml_fail(x, x->p, DAN_TXT_XML_LT); return 0; }
+        /* in attribute values line breaks and tabs written as such become spaces (XML 1.0, 3.3.3) */
+        if (stop != '<' && (*x->p == '\t' || *x->p == '\n' || *x->p == '\r')) {
+            if (*x->p == '\r' && x->p[1] == '\n') x->p++;
+            x->p++;
+            dan_xml_put(x, " ", 1);
+            continue;
+        }
+        if (stop == '<' && *x->p == '\r') {          /* line ends are normalized to \n (XML 1.0, 2.11) */
+            x->p++;
+            if (*x->p != '\n') dan_xml_put(x, "\n", 1);
+            continue;
+        }
+        if (*x->p != '&') { dan_xml_put(x, x->p++, 1); continue; }
+        const char *e = x->p + 1, *semi = strchr(e, ';');
+        if (!semi || semi - e > 10) { dan_xml_fail(x, x->p, DAN_TXT_XML_ENTITY); return 0; }
+        size_t n = (size_t)(semi - e);
+        if (n == 2 && !strncmp(e, "lt", 2)) dan_xml_put(x, "<", 1);
+        else if (n == 2 && !strncmp(e, "gt", 2)) dan_xml_put(x, ">", 1);
+        else if (n == 3 && !strncmp(e, "amp", 3)) dan_xml_put(x, "&", 1);
+        else if (n == 4 && !strncmp(e, "quot", 4)) dan_xml_put(x, "\"", 1);
+        else if (n == 4 && !strncmp(e, "apos", 4)) dan_xml_put(x, "'", 1);
+        else if (n >= 2 && e[0] == '#') {
+            char *end;
+            unsigned long c = (e[1] == 'x' || e[1] == 'X') ? strtoul(e + 2, &end, 16) : strtoul(e + 1, &end, 10);
+            if (end != semi || c == 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
+                dan_xml_fail(x, x->p, DAN_TXT_XML_ENTITY); return 0;
+            }
+            dan_xml_utf8(x, (uint32_t)c);
+        } else { dan_xml_fail(x, x->p, DAN_TXT_XML_ENTITY); return 0; }
+        x->p = semi + 1;
+    }
+    return 1;
+}
+
+static int dan_xml_name_char(unsigned char c) {
+    return c >= 0x80 || isalnum(c) || c == '_' || c == ':' || c == '-' || c == '.';
+}
+
+static dan_str dan_xml_name(dan_xml *x) {
+    const char *b = x->p;
+    while (dan_xml_name_char((unsigned char)*x->p)) x->p++;
+    if (x->p == b || isdigit((unsigned char)*b) || *b == '-' || *b == '.') {
+        dan_xml_fail(x, b, DAN_TXT_XML_NAME);
+        return NULL;
+    }
+    char *r = dan_str_new((size_t)(x->p - b));
+    memcpy(r, b, (size_t)(x->p - b));
+    r[x->p - b] = 0;
+    return r;
+}
+
+static void dan_xml_space(dan_xml *x) { while (*x->p == ' ' || *x->p == '\t' || *x->p == '\n' || *x->p == '\r') x->p++; }
+
+static dr_Ls dan_xml_parse(dan_str text, int line) {
+    dan_xml x = { text, text, dl_Ls_from(0, NULL), NULL, NULL, 0, 0 };
+    if ((unsigned char)x.p[0] == 0xEF && (unsigned char)x.p[1] == 0xBB && (unsigned char)x.p[2] == 0xBF) x.p += 3;
+    int64_t cap = 16, depth = 0;
+    dan_str *stack = dan_alloc(sizeof(dan_str) * (size_t)cap);
+    int root_done = 0;
+    while (*x.p && !x.err) {
+        if (*x.p != '<') {
+            const char *at = x.p;
+            if (!dan_xml_chars(&x, '<')) break;
+            dan_str t = dan_xml_take(&x);
+            if (depth == 0) {
+                for (const char *q = t; *q; q++)
+                    if (!strchr(" \t\r\n", *q)) { dan_xml_fail(&x, at, DAN_TXT_XML_OUTSIDE); break; }
+                continue;
+            }
+            dl_Ls_push(x.out, dan_xml_text_s.s);
+            dl_Ls_push(x.out, t);
+            continue;
+        }
+        if (!strncmp(x.p, "<!--", 4)) {
+            const char *e = strstr(x.p + 4, "-->");
+            if (!e) { dan_xml_fail(&x, x.p, DAN_TXT_XML_COMMENT); break; }
+            x.p = e + 3;
+            continue;
+        }
+        if (!strncmp(x.p, "<?", 2)) {
+            const char *e = strstr(x.p + 2, "?>");
+            if (!e) { dan_xml_fail(&x, x.p, DAN_TXT_XML_PI); break; }
+            x.p = e + 2;
+            continue;
+        }
+        if (!strncmp(x.p, "<![CDATA[", 9)) {
+            const char *e = strstr(x.p + 9, "]]>");
+            if (!e) { dan_xml_fail(&x, x.p, DAN_TXT_XML_CDATA); break; }
+            if (depth == 0) { dan_xml_fail(&x, x.p, DAN_TXT_XML_OUTSIDE); break; }
+            dan_xml_put(&x, x.p + 9, (size_t)(e - x.p - 9));
+            dl_Ls_push(x.out, dan_xml_text_s.s);
+            dl_Ls_push(x.out, dan_xml_take(&x));
+            x.p = e + 3;
+            continue;
+        }
+        if (!strncmp(x.p, "<!", 2)) {                 /* DOCTYPE, possibly with [ ... ] */
+            int br = 0;
+            const char *q = x.p + 2;
+            for (; *q; q++) {
+                if (*q == '[') br++;
+                else if (*q == ']') br--;
+                else if (*q == '>' && br <= 0) break;
+            }
+            if (!*q) { dan_xml_fail(&x, x.p, DAN_TXT_XML_UNCLOSED); break; }
+            x.p = q + 1;
+            continue;
+        }
+        if (x.p[1] == '/') {
+            const char *at = x.p;
+            x.p += 2;
+            dan_str name = dan_xml_name(&x);
+            if (!name) break;
+            dan_xml_space(&x);
+            if (*x.p != '>') { dan_xml_fail(&x, x.p, DAN_TXT_XML_GT); break; }
+            x.p++;
+            if (depth == 0 || strcmp(stack[depth - 1], name) != 0) {
+                char why[300];
+                snprintf(why, sizeof why, DAN_TXT_XML_MISMATCH, name, depth ? stack[depth - 1] : "");
+                dan_xml_fail(&x, at, why);
+                break;
+            }
+            depth--;
+            dl_Ls_push(x.out, dan_xml_close_s.s);
+            dl_Ls_push(x.out, name);
+            continue;
+        }
+        const char *at = x.p;
+        x.p++;
+        if (depth == 0 && root_done) { dan_xml_fail(&x, at, DAN_TXT_XML_TWO_ROOTS); break; }
+        dan_str name = dan_xml_name(&x);
+        if (!name) break;
+        dl_Ls_push(x.out, dan_xml_open_s.s);
+        dl_Ls_push(x.out, name);
+        for (;;) {
+            const char *before = x.p;
+            dan_xml_space(&x);
+            if (*x.p == '>' || (x.p[0] == '/' && x.p[1] == '>')) break;
+            if (x.p == before) { dan_xml_fail(&x, x.p, DAN_TXT_XML_ATTR); break; }
+            dan_str an = dan_xml_name(&x);
+            if (!an) break;
+            dan_xml_space(&x);
+            if (*x.p != '=') { dan_xml_fail(&x, x.p, DAN_TXT_XML_ATTR); break; }
+            x.p++;
+            dan_xml_space(&x);
+            char q = *x.p;
+            if (q != '"' && q != '\'') { dan_xml_fail(&x, x.p, DAN_TXT_XML_ATTR); break; }
+            x.p++;
+            if (!dan_xml_chars(&x, q)) break;
+            if (*x.p != q) { dan_xml_fail(&x, at, DAN_TXT_XML_UNCLOSED); break; }
+            x.p++;
+            dl_Ls_push(x.out, dan_xml_attr_s.s);
+            dl_Ls_push(x.out, an);
+            dl_Ls_push(x.out, dan_xml_take(&x));
+        }
+        if (x.err) break;
+        dl_Ls_push(x.out, dan_xml_end_s.s);
+        if (*x.p == '/') {
+            x.p += 2;
+            dl_Ls_push(x.out, dan_xml_close_s.s);
+            dl_Ls_push(x.out, name);
+            if (depth == 0) root_done = 1;
+            continue;
+        }
+        x.p++;
+        if (depth == cap) { cap *= 2; stack = dan_realloc(stack, sizeof(dan_str) * (size_t)cap); }
+        stack[depth++] = name;
+        if (depth > 10000) { dan_xml_fail(&x, at, DAN_TXT_XML_DEEP); break; }
+        if (depth == 1) root_done = 1;
+    }
+    if (!x.err && depth > 0) {
+        char why[300];
+        snprintf(why, sizeof why, DAN_TXT_XML_NOT_CLOSED, stack[depth - 1]);
+        dan_xml_fail(&x, x.p, why);
+    }
+    if (!x.err && !root_done) dan_xml_fail(&x, x.p, DAN_TXT_XML_EMPTY);
+    free(stack);
+    free(x.tmp);
+    if (x.err) return dr_Ls_err(x.err, line);
+    return dr_Ls_some(x.out);
+}

@@ -2837,8 +2837,10 @@ class Генератор:
         if self.нужны_данные:
             return
         self.нужны_данные = True
-        for тип_списка in ("[цел]", "[стр]"):
+        for тип_списка in ("[цел]", "[стр]", "[байты]"):
             self.структура(тип_списка)
+        for тип in dannye.НУЖНЫЕ_ТИПЫ:
+            self.тип_c(тип)
 
     def включить_систему(self):
         if self.нужна_система:
@@ -2975,7 +2977,7 @@ class Генератор:
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
               if self.нужна_система else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
-            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>",
+            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
             "#ifndef _WIN32", "#include <dirent.h>", "#include <unistd.h>", "#endif",
             "#if !defined(_WIN32) && !defined(__wasi__)", "#include <sys/resource.h>", "#endif",
