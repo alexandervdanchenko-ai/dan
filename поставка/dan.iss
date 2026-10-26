@@ -32,6 +32,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 UninstallDisplayName=Дан {#AppVer}
 LicenseFile=..\LICENSE
+SetupIconFile=значки\dan.ico
+UninstallDisplayIcon={app}\dan.ico
 
 [Languages]
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -46,9 +48,9 @@ Source: "готово\dan\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 Source: "готово\dan\примеры\*.dan"; DestDir: "{userdocs}\Дан\примеры"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\Редактор Дан"; Filename: "{app}\редактор.exe"; Parameters: "--дан=""{app}\dan.exe"""; WorkingDir: "{userdocs}\Дан"
+Name: "{group}\Редактор Дан"; Filename: "{app}\редактор.exe"; Parameters: "--дан=""{app}\dan.exe"""; WorkingDir: "{userdocs}\Дан"; IconFilename: "{app}\dan.ico"
 Name: "{group}\Учебник «Дан с нуля»"; Filename: "{app}\учебник\index.html"
-Name: "{group}\Дан - командная строка"; Filename: "{cmd}"; Parameters: "/k chcp 65001 >nul && echo Дан {#AppVer}. Команды: dan"; WorkingDir: "{userdocs}\Дан"
+Name: "{group}\Дан - командная строка"; Filename: "{cmd}"; Parameters: "/k chcp 65001 >nul && echo Дан {#AppVer}. Команды: dan"; WorkingDir: "{userdocs}\Дан"; IconFilename: "{app}\dan.ico"
 Name: "{group}\Примеры программ"; Filename: "{userdocs}\Дан\примеры"
 Name: "{group}\Справочник языка"; Filename: "{app}\справочник.html"
 Name: "{group}\Удалить Дан"; Filename: "{uninstallexe}"
@@ -60,6 +62,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; Value
 ; файлы .dan: двойной щелчок - запуск в окне консоли, «Изменить» - Блокнот
 Root: HKCU; Subkey: "Software\Classes\.dan"; ValueType: string; ValueData: "Dan.Program"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\Dan.Program"; ValueType: string; ValueData: "Программа на языке Дан"; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCU; Subkey: "Software\Classes\Dan.Program\DefaultIcon"; ValueType: string; ValueData: """{app}\dan-fail.ico"",0"; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\Dan.Program\shell\open\command"; ValueType: string; \
   ValueData: """{cmd}"" /k chcp 65001 >nul && ""{app}\dan.exe"" запустить ""%1"""; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\Dan.Program\shell\edit\command"; ValueType: string; \

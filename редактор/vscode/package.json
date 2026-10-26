@@ -3,6 +3,7 @@
   "displayName": "Дан",
   "description": "Язык программирования Дан: подсветка, поиск ошибок при наборе, подсказки, переход к объявлениям, единый вид текста, запуск программ",
   "version": "1.0.0",
+  "icon": "images/dan.png",
   "publisher": "dan-lang",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/alexandervdanchenko-ai/dan" },
@@ -16,6 +17,7 @@
         "id": "dan",
         "aliases": ["Дан", "dan"],
         "extensions": [".dan"],
+        "icon": { "light": "./images/dan-fail.svg", "dark": "./images/dan-fail.svg" },
         "configuration": "./language-configuration.json"
       }
     ],

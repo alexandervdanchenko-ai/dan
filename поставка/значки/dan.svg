@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0" stop-color="#D3164A"/><stop offset=".55" stop-color="#9B1035"/><stop offset="1" stop-color="#5A0A22"/></linearGradient>
+ <linearGradient id="gl" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#FFFFFF" stop-opacity=".20"/><stop offset=".5" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+</defs>
+<rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/><rect x="8" y="8" width="240" height="240" rx="56" fill="url(#gl)"/>
+<rect x="9" y="9" width="238" height="238" rx="56" fill="none" stroke="#3A0515" stroke-opacity=".45" stroke-width="2"/>
+<path transform="translate(38.90 172) scale(0.06711 -0.06711)" d="M664 0C1117 0 1397 280 1397 745C1397 1210 1117 1490 664 1490H116V0ZM469 302V1188H644C905 1188 1044 1068 1044 745C1044 422 905 302 649 302Z" fill="#FFFFFF"/><path transform="translate(136.23 172) scale(0.06711 -0.06711)" d="M428 -20C583 -20 691 42 752 157H761V0H1089V759C1089 999 870 1132 592 1132C312 1132 136 1001 92 810L408 769C427 839 492 884 589 884C684 884 741 840 741 763V759C741 690 665 676 476 660C250 641 60 558 60 310C60 89 213 -20 428 -20ZM534 211C450 211 390 251 390 326C390 400 448 444 551 459C616 469 704 484 744 505V398C744 288 651 211 534 211Z" fill="#F6C453"/>
+<rect x="74" y="190" width="108" height="10" rx="5" fill="#F6C453" opacity=".9"/>
+</svg>

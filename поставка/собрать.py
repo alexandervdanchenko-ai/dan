@@ -22,6 +22,7 @@ import sys
 import tempfile
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ЗНАЧКИ = os.path.join(КОРЕНЬ, "поставка", "значки")
 ГОТОВО = os.path.join(КОРЕНЬ, "поставка", "готово")
 ПАПКА = os.path.join(ГОТОВО, "dan")
 sys.path.insert(0, КОРЕНЬ)
@@ -44,7 +45,7 @@ def собрать_dan_exe():
     работа = os.path.join(ГОТОВО, "_сборка")
     разделитель = ";" if os.name == "nt" else ":"
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--console",
-                    "--name", "dan", "--distpath", ГОТОВО, "--workpath", работа, "--specpath", работа,
+                    "--name", "dan", "--icon", os.path.join(ЗНАЧКИ, "dan.ico"), "--distpath", ГОТОВО, "--workpath", работа, "--specpath", работа,
                     "--add-data", os.path.join(КОРЕНЬ, "sreda") + разделитель + "sreda",
                     "--add-data", os.path.join(КОРЕНЬ, "библиотека") + разделитель + "библиотека",
                     "--add-data", os.path.join(КОРЕНЬ, "учебник", "задачи") + разделитель + os.path.join("учебник", "задачи"),
@@ -94,6 +95,9 @@ def добавить_файлы():
         shutil.copy(путь, os.path.join(примеры, "модули"))
     for имя in ("LICENSE", "README.md"):
         shutil.copy(os.path.join(КОРЕНЬ, имя), ПАПКА)
+    # значки программы и файлов .dan (для «Пуска» и проводника)
+    for имя in ("dan.ico", "dan-fail.ico"):
+        shutil.copy(os.path.join(ЗНАЧКИ, имя), ПАПКА)
     в_html(os.path.join(КОРЕНЬ, "справочник.md"), os.path.join(ПАПКА, "справочник.html"), "Справочник языка Дан")
     в_html(os.path.join(КОРЕНЬ, "spec.md"), os.path.join(ПАПКА, "описание_языка.html"), "Описание языка Дан")
 
