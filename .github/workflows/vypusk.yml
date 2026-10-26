@@ -74,6 +74,9 @@ jobs:
                       gh("release", "delete-asset", метка, имя, "-y")
               gh("release", "upload", метка, *файлы, "--clobber")
           else:
+              # номер с буквой (1.4b1, 1.4rc1) - пробный выпуск: его получает канал «пробный» команды dan обновить
+              import re
+              вид = ["--prerelease"] if re.search(r"[a-z]", версия) else ["--latest"]
               gh("release", "create", метка, *файлы, "--target", os.environ["GITHUB_SHA"],
-                 "--title", "Дан " + версия, "--notes-file", описание, "--latest")
+                 "--title", "Дан " + версия, "--notes-file", описание, *вид)
           print("выпуск", метка, "готов:", ", ".join(os.path.basename(ф) for ф in файлы))
