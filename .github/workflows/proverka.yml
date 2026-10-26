@@ -1,0 +1,43 @@
+# Проверка Дана при каждом изменении: все тесты в Windows, Linux и macOS,
+# на процессорах x86-64 и ARM.
+name: Проверка
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  testy:
+    name: Тесты (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      DAN_GUI_NO_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Программы для проверки документов (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0
+          python -m pip install pypdf reportlab openpyxl python-docx
+      - name: Программы для проверки документов (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: python -m pip install pypdf reportlab openpyxl python-docx
+      - name: Компилятор C
+        shell: bash
+        run: |
+          (command -v gcc || command -v clang || command -v cc) && (gcc --version || clang --version) | head -1
+      - name: Тесты
+        shell: bash
+        run: python -m unittest discover -p "test_*.py" -v 2>&1 | tail -150 ; exit ${PIPESTATUS[0]}
