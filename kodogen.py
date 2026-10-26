@@ -978,6 +978,10 @@ static void dan_write_bytes(dan_bytes b) { fputs(dan_bytes_show(b), stdout); }
 /* ---- polynomials: defined after the list types ---- */
 typedef struct dan_poly dan_poly;
 typedef const dan_poly *dan_mn;
+static dan_mn dan_poly_share(dan_mn p);
+static void dan_poly_release(dan_mn p);
+static void dan_poly_give(dan_mn p);
+static dan_mn dan_poly_clone(dan_mn p);
 static void dan_write_poly(dan_mn p);
 static dan_str dan_poly_to_str(dan_mn p);
 static bool dan_poly_eq(dan_mn a, dan_mn b);
@@ -2660,7 +2664,7 @@ class Генератор:
         """Хранит ли значение типа ссылки на значения в памяти, у которых
         учитываются места хранения (строки, списки, словари, ячейки и т.п.)."""
         в_работе = в_работе if в_работе is not None else set()
-        if тип in (СТР, БАЙТЫ, ДЛИН) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
+        if тип in (СТР, БАЙТЫ, ДЛИН, МН) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
                 or тип in self.перечисления or это_результат(тип) or self.по_ссылке(тип) or это_канал(тип):
             return True
         if это_необяз(тип):
@@ -2685,6 +2689,9 @@ class Генератор:
         if тип == ДЛИН:
             self.нужны_длинные = True
             return "dan_big_" + действие
+        if тип == МН:
+            self.включить_математику()
+            return "dan_poly_" + действие
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan_" + действие
@@ -3428,6 +3435,8 @@ class Генератор:
             return "dan_bytes_clone"
         if тип == ДЛИН:
             return "dan_big_clone"
+        if тип == МН:
+            return "dan_poly_clone"
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan_clone"

@@ -1374,6 +1374,7 @@ static void dan_create_zip(dan_str zip_path, const dl_Ls *files, dan_str passwor
         if (extra.len) dan_bbuf_add(&cd, extra.d, extra.len);
         free(payload.d);
         free(extra.d);
+        if (method == 8) free(comp);
     }
     uint32_t cd_offset = (uint32_t)out.len;
     dan_bbuf_add(&out, cd.d ? cd.d : (uint8_t *)"", cd.len);
@@ -1443,6 +1444,7 @@ static dl_Ls *dan_zip_list(dan_str zip_path, int line) {
     dan_zip_entry *e = dan_zip_entries(dan_read_bytes(zip_path, line), &k, line);
     dl_Ls *r = dl_Ls_from(0, NULL);
     for (int64_t i = 0; i < k; i++) dl_Ls_push(r, e[i].name);
+    free(e);
     return r;
 }
 
@@ -1521,8 +1523,11 @@ static dl_Ls *dan_extract_zip(dan_str zip_path, dan_str folder, dan_str password
         if (!(x->aes && x->aes_version == 2) && dan_crc32_update(0, plain, plen) != x->crc)
             dan_error(DAN_MSG_CORRUPT, line);
         dan_write_raw(target, "wb", plain, plen, line);
+        if (plain != data) free(plain);
+        free(data);
         dl_Ls_push(done, x->name);
     }
+    free(e);
     return done;
 }
 

@@ -760,6 +760,9 @@ static dl_LLf *dan_mat_from_f(const double *a, int64_t r, int64_t c) {
     for (int64_t i = 0; i < r; i++) dl_LLf_push(m, dl_Lf_from(c, a + i * c));
     return m;
 }
+/* то же, рабочий массив после этого освобождается */
+static dl_LLr *dan_mat_from_r_free(dan_rat *a, int64_t r, int64_t c) { dl_LLr *m = dan_mat_from_r(a, r, c); free(a); return m; }
+static dl_LLf *dan_mat_from_f_free(double *a, int64_t r, int64_t c) { dl_LLf *m = dan_mat_from_f(a, r, c); free(a); return m; }
 /* Приведение к ступенчатому виду; возвращает ранг, в *det - определитель (для квадратной). */
 static int64_t dan_gauss_r(dan_rat *a, int64_t r, int64_t c, dan_rat *det, dan_rat *aug, int64_t ac, int line) {
     int64_t rank = 0;
@@ -792,19 +795,23 @@ static int64_t dan_gauss_r(dan_rat *a, int64_t r, int64_t c, dan_rat *det, dan_r
 static dan_rat dan_det_rat(const dl_LLr *m, int line) {
     int64_t c = dan_mat_cols_r(m, line);
     if (c != m->len) dan_error(DAN_MSG_MATRIX_SQUARE, line);
-    dan_rat d;
-    dan_gauss_r(dan_mat_flat_r(m, c), c, c, &d, NULL, 0, line);
+    dan_rat d, *a = dan_mat_flat_r(m, c);
+    dan_gauss_r(a, c, c, &d, NULL, 0, line);
+    free(a);
     return d;
 }
 static int64_t dan_rank_rat(const dl_LLr *m, int line) {
     int64_t c = dan_mat_cols_r(m, line);
-    return dan_gauss_r(dan_mat_flat_r(m, c), m->len, c, NULL, NULL, 0, line);
+    dan_rat *a = dan_mat_flat_r(m, c);
+    int64_t r = dan_gauss_r(a, m->len, c, NULL, NULL, 0, line);
+    free(a);
+    return r;
 }
 static dl_LLr *dan_identity(int64_t n, int line) {
     if (n < 1) dan_error(DAN_MSG_MATRIX_EMPTY, line);
     dan_rat *a = dan_alloc(sizeof(dan_rat) * (size_t)(n * n));
     for (int64_t i = 0; i < n * n; i++) { a[i].n = (i / n == i % n); a[i].d = 1; }
-    return dan_mat_from_r(a, n, n);
+    return dan_mat_from_r_free(a, n, n);
 }
 static dl_LLr *dan_inverse_rat(const dl_LLr *m, int line) {
     int64_t c = dan_mat_cols_r(m, line);
@@ -812,7 +819,10 @@ static dl_LLr *dan_inverse_rat(const dl_LLr *m, int line) {
     dan_rat *a = dan_mat_flat_r(m, c), *e = dan_alloc(sizeof(dan_rat) * (size_t)(c * c));
     for (int64_t i = 0; i < c * c; i++) { e[i].n = (i / c == i % c); e[i].d = 1; }
     if (dan_gauss_r(a, c, c, NULL, e, c, line) < c) dan_error(DAN_MSG_MATRIX_SINGULAR, line);
-    return dan_mat_from_r(e, c, c);
+    dl_LLr *r = dan_mat_from_r(e, c, c);
+    free(a);
+    free(e);
+    return r;
 }
 static double dan_gauss_f(double *a, int64_t n, double *aug, int line) {   /* квадратная, частичный выбор главного */
     (void)line;
@@ -842,7 +852,10 @@ static double dan_gauss_f(double *a, int64_t n, double *aug, int line) {   /* к
 static double dan_det_float(const dl_LLf *m, int line) {
     int64_t c = dan_mat_cols_f(m, line);
     if (c != m->len) dan_error(DAN_MSG_MATRIX_SQUARE, line);
-    return dan_gauss_f(dan_mat_flat_f(m, c), c, NULL, line);
+    double *a = dan_mat_flat_f(m, c);
+    double d = dan_gauss_f(a, c, NULL, line);
+    free(a);
+    return d;
 }
 static dl_LLf *dan_inverse_float(const dl_LLf *m, int line) {
     int64_t c = dan_mat_cols_f(m, line);
@@ -850,19 +863,22 @@ static dl_LLf *dan_inverse_float(const dl_LLf *m, int line) {
     double *a = dan_mat_flat_f(m, c), *e = dan_alloc(sizeof(double) * (size_t)(c * c));
     for (int64_t i = 0; i < c * c; i++) e[i] = (i / c == i % c);
     if (dan_gauss_f(a, c, e, line) == 0) dan_error(DAN_MSG_MATRIX_SINGULAR, line);
-    return dan_mat_from_f(e, c, c);
+    dl_LLf *r = dan_mat_from_f(e, c, c);
+    free(a);
+    free(e);
+    return r;
 }
 static dl_LLr *dan_transpose_rat(const dl_LLr *m, int line) {
     int64_t c = dan_mat_cols_r(m, line), r = m->len;
     dan_rat *a = dan_alloc(sizeof(dan_rat) * (size_t)(r * c));
     for (int64_t i = 0; i < r; i++) for (int64_t j = 0; j < c; j++) a[j * r + i] = m->items[i]->items[j];
-    return dan_mat_from_r(a, c, r);
+    return dan_mat_from_r_free(a, c, r);
 }
 static dl_LLf *dan_transpose_float(const dl_LLf *m, int line) {
     int64_t c = dan_mat_cols_f(m, line), r = m->len;
     double *a = dan_alloc(sizeof(double) * (size_t)(r * c));
     for (int64_t i = 0; i < r; i++) for (int64_t j = 0; j < c; j++) a[j * r + i] = m->items[i]->items[j];
-    return dan_mat_from_f(a, c, r);
+    return dan_mat_from_f_free(a, c, r);
 }
 static dl_LLr *dan_matmul_rat(const dl_LLr *x, const dl_LLr *y, int line) {
     int64_t n = dan_mat_cols_r(x, line), k = dan_mat_cols_r(y, line);
@@ -874,7 +890,7 @@ static dl_LLr *dan_matmul_rat(const dl_LLr *x, const dl_LLr *y, int line) {
             for (int64_t t = 0; t < n; t++) s = dan_rat_add(s, dan_rat_mul(x->items[i]->items[t], y->items[t]->items[j], line), line);
             a[i * k + j] = s;
         }
-    return dan_mat_from_r(a, x->len, k);
+    return dan_mat_from_r_free(a, x->len, k);
 }
 static dl_LLf *dan_matmul_float(const dl_LLf *x, const dl_LLf *y, int line) {
     int64_t n = dan_mat_cols_f(x, line), k = dan_mat_cols_f(y, line);
@@ -886,7 +902,7 @@ static dl_LLf *dan_matmul_float(const dl_LLf *x, const dl_LLf *y, int line) {
             for (int64_t t = 0; t < n; t++) s += x->items[i]->items[t] * y->items[t]->items[j];
             a[i * k + j] = s;
         }
-    return dan_mat_from_f(a, x->len, k);
+    return dan_mat_from_f_free(a, x->len, k);
 }
 static dl_LLr *dan_matadd_rat(const dl_LLr *x, const dl_LLr *y, int line) {
     int64_t c = dan_mat_cols_r(x, line);
@@ -894,14 +910,14 @@ static dl_LLr *dan_matadd_rat(const dl_LLr *x, const dl_LLr *y, int line) {
     dan_rat *a = dan_alloc(sizeof(dan_rat) * (size_t)(x->len * c));
     for (int64_t i = 0; i < x->len; i++) for (int64_t j = 0; j < c; j++)
         a[i * c + j] = dan_rat_add(x->items[i]->items[j], y->items[i]->items[j], line);
-    return dan_mat_from_r(a, x->len, c);
+    return dan_mat_from_r_free(a, x->len, c);
 }
 static dl_LLf *dan_matadd_float(const dl_LLf *x, const dl_LLf *y, int line) {
     int64_t c = dan_mat_cols_f(x, line);
     if (c != dan_mat_cols_f(y, line) || x->len != y->len) dan_error(DAN_MSG_MATRIX_DIMS, line);
     double *a = dan_alloc(sizeof(double) * (size_t)(x->len * c));
     for (int64_t i = 0; i < x->len; i++) for (int64_t j = 0; j < c; j++) a[i * c + j] = x->items[i]->items[j] + y->items[i]->items[j];
-    return dan_mat_from_f(a, x->len, c);
+    return dan_mat_from_f_free(a, x->len, c);
 }
 static dan_rat dan_dot_rat(const dl_Lr *a, const dl_Lr *b, int line) {
     if (a->len != b->len) dan_error(DAN_MSG_VECTOR_LEN, line);
@@ -1416,7 +1432,7 @@ static do_Lr dan_lp(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, bool minimi
                 row = i; best = ratio;
             }
         }
-        if (row < 0) return do_Lr_none();                /* целевая функция не ограничена */
+        if (row < 0) { free(t); free(basis); return do_Lr_none(); }   /* целевая функция не ограничена */
         dan_rat pv = t[row * w + col];
         for (int64_t j = 0; j < w; j++) t[row * w + j] = dan_rat_div(t[row * w + j], pv, line);
         for (int64_t i = 0; i <= m; i++) {
@@ -1429,6 +1445,8 @@ static do_Lr dan_lp(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, bool minimi
     dl_Lr *x = dl_Lr_from(0, NULL);
     for (int64_t j = 0; j < n; j++) dl_Lr_push(x, zero);
     for (int64_t i = 0; i < m; i++) if (basis[i] < n) x->items[basis[i]] = t[i * w + w - 1];
+    free(t);
+    free(basis);
     return do_Lr_some(x);
 }
 static do_Lr dan_lp_max(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, int line) { return dan_lp(c, a, b, false, line); }
