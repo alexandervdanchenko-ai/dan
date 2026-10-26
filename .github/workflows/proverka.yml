@@ -40,4 +40,8 @@ jobs:
           (command -v gcc || command -v clang || command -v cc) && (gcc --version || clang --version) | head -1
       - name: Тесты
         shell: bash
-        run: python -m unittest discover -p "test_*.py" -v 2>&1 | tail -150 ; exit ${PIPESTATUS[0]}
+        run: python -m unittest discover -p "test_*.py" > вывод_тестов.txt 2>&1
+      - name: Упавшие тесты
+        if: failure()
+        shell: bash
+        run: python .github/otchet.py вывод_тестов.txt
