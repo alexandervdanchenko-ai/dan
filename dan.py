@@ -107,6 +107,8 @@ def собрать(путь, исходник, малый=False, сжать=Fals
     флаги = ФЛАГИ_ОБЩИЕ + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
     библиотеки = БИБЛИОТЕКИ + (["-pthread"] if "DAN_TASKS" in код_c and os.name != "nt" else [])
     библиотеки += библиотеки_c(код_c, os.path.dirname(os.path.abspath(путь)))
+    if "#define DAN_NET 1" in код_c and os.name != "nt":
+        библиотеки.append("-ldl")        # загрузка libcurl (в новых glibc dlopen уже в самой libc)
     результат = subprocess.run([компилятор, *флаги, путь_c, "-o", путь_exe, *библиотеки],
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
     if результат.returncode != 0:

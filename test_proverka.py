@@ -23,7 +23,9 @@ class ТестыКорректныхПрограмм(unittest.TestCase):
         import glob, os
         for путь in glob.glob(os.path.join(os.path.dirname(__file__), "примеры", "*.dan")):
             with self.subTest(путь=путь), open(путь, encoding="utf-8") as ф:
-                ок(ф.read())
+                # примеры с подключениями проверяются вместе с подключёнными модулями
+                from moduli import загрузить
+                проверить(загрузить(ф.read(), путь))
 
     def test_вывод_типов(self):
         п = ок("пусть а = 1\nпусть б = 2.0\nпусть в_ = а + б\nпусть г = \"х\" + \"у\"\nпусть д = а < б")
