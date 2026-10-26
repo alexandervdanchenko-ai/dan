@@ -57,6 +57,28 @@ class ТестыWebAssembly(unittest.TestCase):
         self.assertEqual(код, 1)
         self.assertIn("слишком глубокая рекурсия", ош)
 
+    def test_стек_больше_допустимого(self):
+        # Python в Windows не принимает стек потока 256 МБ: выполнение не должно падать.
+        import threading
+        from unittest import mock
+        настоящий = threading.stack_size
+        размеры = []
+
+        def как_в_windows(размер=0):
+            if размер > 128 * 1024 * 1024:
+                raise ValueError(f"size not valid: {размер} bytes")
+            размеры.append(размер)
+            return настоящий(размер)
+        with tempfile.TemporaryDirectory() as п:
+            путь = os.path.join(п, "программа.dan")
+            текст = "пусть х = 1\n"
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(текст)
+            путь_wasm, _ = dan.собрать_веб(путь, текст)
+            with mock.patch.object(threading, "stack_size", side_effect=как_в_windows):
+                self.assertEqual(dan.выполнить_wasm(путь_wasm, []), 0)
+        self.assertIn(128 * 1024 * 1024, размеры)
+
     def test_чего_нет_в_webassembly(self):
         for текст, часть in [
                 ("функ ф() -> цел { вернуть 1 }\nпусть з = запустить ф()\nвывод(з.дождаться())", "параллельные задачи"),

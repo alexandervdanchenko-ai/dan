@@ -314,7 +314,13 @@ def выполнить_wasm(путь_wasm, аргументы):
             итог["код"] = 1
 
     прежний = threading.stack_size()
-    threading.stack_size(256 * 1024 * 1024)
+    # Python в Windows не принимает стек 256 МБ (ValueError): берём наибольший допустимый.
+    for мб in (256, 128, 64):
+        try:
+            threading.stack_size(мб * 1024 * 1024)
+            break
+        except ValueError:
+            continue
     try:
         поток = threading.Thread(target=выполнить)
         поток.start()
