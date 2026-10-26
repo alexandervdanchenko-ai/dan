@@ -69,7 +69,7 @@ def замерить(повторов=3):
             путь_си = os.path.join(ПАПКА, "си", имя + ".c")
             if os.path.exists(путь_си):
                 exe_си = os.path.join(врем, имя + "_c")
-                subprocess.run([компилятор, "-O2", путь_си, "-o", exe_си, "-lm"], check=True)
+                subprocess.run([компилятор, *dan.флаги_mingw(компилятор), "-O2", путь_си, "-o", exe_си, "-lm"], check=True)
                 т_си, в_си = время([exe_си], повторов)
                 if в_си.split() != в_дан.split():
                     raise RuntimeError(f"{имя}: вывод C {в_си!r} не совпадает с выводом Дана {в_дан!r}")

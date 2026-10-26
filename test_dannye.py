@@ -304,7 +304,7 @@ class ТестыОфициальныхПримеров(unittest.TestCase):
             исполняемый = os.path.join(папка, "rfc.exe" if os.name == "nt" else "rfc")
             with open(путь_c, "w", encoding="utf-8") as ф:
                 ф.write(текст_c)
-            сборка = subprocess.run([dan.найти_компилятор(), *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ,
+            сборка = subprocess.run([dan.найти_компилятор(), *dan.флаги_mingw(dan.найти_компилятор()), *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ,
                                      путь_c, "-o", исполняемый, *dan.БИБЛИОТЕКИ],
                                     capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(сборка.returncode, 0, сборка.stderr)
