@@ -43,6 +43,27 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
 ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool",
           РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes", ДЛИН: "dan_write_big",
           КОМПЛ: "dan_write_cx", ДАТА: "dan_write_date"}
+СООБЩЕНИЯ_ОТЛАДЧИКА = {
+    "DAN_TXT_DBG_HELLO": "Отладчик Дана. Команды: шаг (ш), далее (д), выйти_из (вы), продолжить (п), "
+                         "точка 12 (тч), убрать 12 (у), показать (пк), показать имя, стек (ст), текст (т), стоп (с). "
+                         "Пустая строка повторяет прошлую команду.",
+    "DAN_TXT_DBG_PROMPT": "(отладка) ",
+    "DAN_TXT_DBG_HELP": "Команды: шаг (ш) - к следующей строке, заходя в функции; далее (д) - к следующей строке, "
+                        "не заходя в функции; выйти_из (вы) - до выхода из текущей функции; продолжить (п) - до точки "
+                        "остановки или конца; точка 12 (тч 12) или точка файл.dan:12 - точка остановки, точка - список; "
+                        "убрать 12 (у 12); показать (пк) - переменные функции, показать имя - одну; стек (ст) - "
+                        "цепочка вызовов; текст (т) - строки вокруг текущей; стоп (с) - завершить программу.",
+    "DAN_TXT_DBG_NO_VARS": "  переменных пока нет",
+    "DAN_TXT_DBG_NO_VAR": "  такой переменной здесь нет",
+    "DAN_TXT_DBG_NO_BPS": "  точек остановки нет",
+    "DAN_TXT_DBG_NO_FILE": "  такого файла в программе нет",
+    "DAN_TXT_DBG_BAD_LINE": "  укажите номер строки: точка 12",
+    "DAN_TXT_DBG_BP_SET": "  точка остановки: ",
+    "DAN_TXT_DBG_ERROR": "Ошибка выполнения: %s\nПрограмма остановлена в ",
+    "DAN_TXT_DBG_AFTER_ERROR": "  после ошибки программа продолжиться не может: посмотрите переменные (показать, стек) и "
+                               "завершите её (продолжить или стоп)",
+}
+
 ОПЕРАЦИИ_КОМПЛ = {"+": "dan_cx_add", "-": "dan_cx_sub", "*": "dan_cx_mul", "/": "dan_cx_div"}
 ОПЕРАЦИИ_ДЛИН = {"+": "dan_big_add", "-": "dan_big_sub", "*": "dan_big_mul", "/": "dan_big_div", "%": "dan_big_mod"}
 ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
@@ -144,6 +165,9 @@ typedef const char *dan_str;
 static void (*dan_on_error)(void);
 
 static void dan_error(const char *text, int line) {
+#ifdef DAN_DEBUG
+    dan_dbg_error(text, line);
+#endif
     if (dan_on_error) dan_on_error();
     fflush(stdout);
     if (line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT)
@@ -1257,6 +1281,228 @@ static dan_big dan_big_from_str(dan_str s, int line) {
 }
 """
 
+ОТЛАДКА_C = r"""
+/* ---- debugger (python dan.py отладка программа.dan) ----
+   Every statement calls dan_dbg_line; functions and variables register
+   themselves in the tables below and leave them automatically at the end
+   of their C scope (the cleanup attribute), so the debugger always knows
+   which variables exist at the current line. Only the main thread is
+   debugged; tasks run without stops. */
+
+typedef struct { const char *name; const void *p; void (*w)(const void *); int frame; } dan_dbg_var_t;
+typedef struct { const char *name; int line; } dan_dbg_frame_t;
+
+static dan_dbg_var_t *dan_dbg_vars;
+static int dan_dbg_nvars, dan_dbg_capvars;
+static dan_dbg_frame_t *dan_dbg_frames;
+static int dan_dbg_depth, dan_dbg_capframes;
+static int dan_dbg_mode = 1;               /* 0 - run, 1 - step, 2 - next, 3 - out */
+static int dan_dbg_target;
+static int *dan_dbg_bps;
+static int dan_dbg_nbps;
+static DAN_TLS int dan_dbg_main_thread;
+static char dan_dbg_last[64] = "шаг";
+
+static int dan_dbg_enter(const char *name, int line) {
+    if (!dan_dbg_main_thread) return 0;
+    if (dan_dbg_depth == dan_dbg_capframes) {
+        dan_dbg_capframes = dan_dbg_capframes ? dan_dbg_capframes * 2 : 64;
+        dan_dbg_frames = dan_realloc(dan_dbg_frames, sizeof *dan_dbg_frames * (size_t)dan_dbg_capframes);
+    }
+    dan_dbg_frames[dan_dbg_depth].name = name;
+    dan_dbg_frames[dan_dbg_depth].line = line;
+    return ++dan_dbg_depth;
+}
+
+static void dan_dbg_leave(int *depth) {
+    if (!*depth) return;
+    dan_dbg_depth = *depth - 1;
+    while (dan_dbg_nvars > 0 && dan_dbg_vars[dan_dbg_nvars - 1].frame > dan_dbg_depth) dan_dbg_nvars--;
+}
+
+static int dan_dbg_var(const char *name, const void *p, void (*w)(const void *)) {
+    if (!dan_dbg_main_thread) return 0;
+    if (dan_dbg_nvars == dan_dbg_capvars) {
+        dan_dbg_capvars = dan_dbg_capvars ? dan_dbg_capvars * 2 : 256;
+        dan_dbg_vars = dan_realloc(dan_dbg_vars, sizeof *dan_dbg_vars * (size_t)dan_dbg_capvars);
+    }
+    dan_dbg_var_t *v = &dan_dbg_vars[dan_dbg_nvars++];
+    v->name = name;
+    v->p = p;
+    v->w = w;
+    v->frame = dan_dbg_depth;
+    return dan_dbg_nvars;
+}
+
+static void dan_dbg_unvar(int *n) {
+    if (*n && dan_dbg_nvars >= *n) dan_dbg_nvars = *n - 1;
+}
+
+static void dan_dbg_where(int line) {
+    int file = line / DAN_FILE_STEP, n = line % DAN_FILE_STEP;
+    printf("%s:%d", file < DAN_FILE_COUNT ? dan_files[file] : "?", n);
+}
+
+static void dan_dbg_show_source(int line, int around) {
+    int file = line / DAN_FILE_STEP, n = line % DAN_FILE_STEP;
+    if (file >= DAN_FILE_COUNT) return;
+    for (int i = n - around; i <= n + around; i++) {
+        if (i < 1 || i > dan_dbg_src_count[file]) continue;
+        printf("%s%5d  %s\n", i == n ? "->" : "  ", i, dan_dbg_src[file][i - 1]);
+    }
+}
+
+static void dan_dbg_show_vars(const char *only) {
+    int shown = 0;
+    for (int i = 0; i < dan_dbg_nvars; i++) {
+        dan_dbg_var_t *v = &dan_dbg_vars[i];
+        if (v->frame != dan_dbg_depth) continue;
+        if (only && strcmp(only, v->name) != 0) continue;
+        /* an inner variable with the same name hides the outer one */
+        int hidden = 0;
+        for (int j = i + 1; j < dan_dbg_nvars; j++)
+            if (dan_dbg_vars[j].frame == dan_dbg_depth && strcmp(dan_dbg_vars[j].name, v->name) == 0) hidden = 1;
+        if (hidden) continue;
+        printf("  %s = ", v->name);
+        v->w(v->p);
+        putchar('\n');
+        shown++;
+    }
+    if (!shown) puts(only ? DAN_TXT_DBG_NO_VAR : DAN_TXT_DBG_NO_VARS);
+}
+
+static void dan_dbg_show_stack(void) {
+    for (int i = dan_dbg_depth - 1; i >= 0; i--) {
+        printf("  %s, ", dan_dbg_frames[i].name);
+        dan_dbg_where(dan_dbg_frames[i].line);
+        putchar('\n');
+    }
+}
+
+/* a line of input; -1 when the input has ended */
+static int dan_dbg_read(char *buf, size_t size) {
+    fflush(stdout);
+#ifdef _WIN32
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (GetConsoleMode(h, &mode)) {
+        wchar_t w[256];
+        size_t len = 0;
+        for (;;) {
+            DWORD got = 0;
+            wchar_t c;
+            if (!ReadConsoleW(h, &c, 1, &got, NULL) || got == 0) { if (!len) return -1; break; }
+            if (c == L'\n') break;
+            if (c != L'\r' && len < 255) w[len++] = c;
+        }
+        int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)len, buf, (int)size - 1, NULL, NULL);
+        buf[n > 0 ? n : 0] = 0;
+        return 0;
+    }
+#endif
+    if (!fgets(buf, (int)size, stdin)) return -1;
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    return 0;
+}
+
+static int dan_dbg_is(const char *cmd, const char *full, const char *short_) {
+    return strcmp(cmd, full) == 0 || strcmp(cmd, short_) == 0;
+}
+
+/* the dialogue at a stop; «error» - the program stops because of an error */
+static void dan_dbg_prompt(int line, int error) {
+    for (;;) {
+        printf(DAN_TXT_DBG_PROMPT);
+        char buf[256];
+        if (dan_dbg_read(buf, sizeof buf) < 0) {
+            dan_dbg_mode = 0;          /* no more commands: the program runs to the end */
+            dan_dbg_nbps = 0;
+            return;
+        }
+        char *cmd = buf;
+        while (*cmd == ' ') cmd++;
+        if (!*cmd) cmd = dan_dbg_last;
+        else snprintf(dan_dbg_last, sizeof dan_dbg_last, "%s", cmd);
+        char *arg = strchr(cmd, ' ');
+        if (arg) { *arg++ = 0; while (*arg == ' ') arg++; if (!*arg) arg = NULL; }
+        if (dan_dbg_is(cmd, "шаг", "ш")) { if (error) { puts(DAN_TXT_DBG_AFTER_ERROR); continue; } dan_dbg_mode = 1; return; }
+        if (dan_dbg_is(cmd, "далее", "д")) { if (error) { puts(DAN_TXT_DBG_AFTER_ERROR); continue; } dan_dbg_mode = 2; dan_dbg_target = dan_dbg_depth; return; }
+        if (dan_dbg_is(cmd, "выйти_из", "вы")) { if (error) { puts(DAN_TXT_DBG_AFTER_ERROR); continue; } dan_dbg_mode = 3; dan_dbg_target = dan_dbg_depth; return; }
+        if (dan_dbg_is(cmd, "продолжить", "п")) { dan_dbg_mode = 0; return; }
+        if (dan_dbg_is(cmd, "стоп", "с")) { fflush(stdout); exit(error ? 1 : 0); }
+        if (dan_dbg_is(cmd, "показать", "пк")) { dan_dbg_show_vars(arg); continue; }
+        if (dan_dbg_is(cmd, "стек", "ст")) { dan_dbg_show_stack(); continue; }
+        if (dan_dbg_is(cmd, "текст", "т")) { dan_dbg_show_source(line, 5); continue; }
+        if (dan_dbg_is(cmd, "точка", "тч") || dan_dbg_is(cmd, "убрать", "у")) {
+            int remove = dan_dbg_is(cmd, "убрать", "у");
+            if (!arg) {
+                if (!dan_dbg_nbps) puts(DAN_TXT_DBG_NO_BPS);
+                for (int i = 0; i < dan_dbg_nbps; i++) { printf("  "); dan_dbg_where(dan_dbg_bps[i]); putchar('\n'); }
+                continue;
+            }
+            int file = line / DAN_FILE_STEP;
+            char *colon = strrchr(arg, ':');
+            if (colon) {
+                *colon = 0;
+                file = -1;
+                for (int f = 0; f < DAN_FILE_COUNT; f++) {
+                    const char *name = dan_files[f], *slash = strrchr(name, '/');
+                    if (strcmp(name, arg) == 0 || (slash && strcmp(slash + 1, arg) == 0)) file = f;
+                }
+                arg = colon + 1;
+                if (file < 0) { puts(DAN_TXT_DBG_NO_FILE); continue; }
+            }
+            int n = atoi(arg);
+            if (n <= 0) { puts(DAN_TXT_DBG_BAD_LINE); continue; }
+            int at = file * DAN_FILE_STEP + n;
+            if (remove) {
+                int k = 0;
+                for (int i = 0; i < dan_dbg_nbps; i++) if (dan_dbg_bps[i] != at) dan_dbg_bps[k++] = dan_dbg_bps[i];
+                dan_dbg_nbps = k;
+            } else {
+                dan_dbg_bps = dan_realloc(dan_dbg_bps, sizeof(int) * (size_t)(dan_dbg_nbps + 1));
+                dan_dbg_bps[dan_dbg_nbps++] = at;
+                printf(DAN_TXT_DBG_BP_SET);
+                dan_dbg_where(at);
+                putchar('\n');
+            }
+            continue;
+        }
+        puts(DAN_TXT_DBG_HELP);
+    }
+}
+
+static void dan_dbg_line(int line) {
+    if (!dan_dbg_main_thread) return;
+    if (dan_dbg_depth > 0) dan_dbg_frames[dan_dbg_depth - 1].line = line;
+    int stop = dan_dbg_mode == 1 || (dan_dbg_mode == 2 && dan_dbg_depth <= dan_dbg_target)
+               || (dan_dbg_mode == 3 && dan_dbg_depth < dan_dbg_target);
+    for (int i = 0; !stop && i < dan_dbg_nbps; i++) stop = dan_dbg_bps[i] == line;
+    if (!stop) return;
+    fflush(stdout);
+    printf("\n");
+    dan_dbg_where(line);
+    printf(" (%s)\n", dan_dbg_depth > 0 ? dan_dbg_frames[dan_dbg_depth - 1].name : "");
+    dan_dbg_show_source(line, 0);
+    dan_dbg_prompt(line, 0);
+}
+
+static void dan_dbg_error(const char *text, int line) {
+    if (!dan_dbg_main_thread) return;
+    fflush(stdout);
+    printf("\n" DAN_TXT_DBG_ERROR, text);
+    if (line > 0) { dan_dbg_where(line); putchar('\n'); dan_dbg_show_source(line, 0); }
+    dan_dbg_prompt(line, 1);
+}
+
+static void dan_dbg_start(void) {
+    dan_dbg_main_thread = 1;
+    puts(DAN_TXT_DBG_HELLO);
+}
+"""
+
+
 ДАТЫ_C = r"""
 /* ---- calendar dates (дата): days since 01.01.1970, Gregorian calendar ---- */
 typedef struct { int64_t d; } dan_date;
@@ -2265,6 +2511,8 @@ class Генератор:
         self.нужны_длинные = False # программа пользуется длинными целыми
         self.нужны_компл = False   # программа пользуется комплексными числами
         self.нужны_даты = False    # программа пользуется датами
+        self.отладка = False       # сборка для отладчика (python dan.py отладка)
+        self.отладочные_записи = {}
         self.нужна_система = False # программа пользуется системной библиотекой
         self.нужна_сеть = False    # программа выполняет запросы HTTP
         self.нужна_база = False    # программа работает с базой данных SQLite
@@ -2656,6 +2904,9 @@ class Генератор:
         self.пиши("int main(int argc, char **argv) {")
         self.отступ += 1
         self.пиши("dan_argc = argc; dan_argv = argv; dan_start();")
+        if self.отладка:
+            self.пиши("dan_dbg_start();")
+            self.пиши(f"__attribute__((cleanup(dan_dbg_leave))) int dan_df = dan_dbg_enter({строка_c('главная программа')}, 0);")
         место_запуска = len(self.строки) - 1
         self.метка_функции, self.области, self.метки_циклов = "dan_main_mark", [[]], []
         self.текущий_результат = None
@@ -2691,6 +2942,9 @@ class Генератор:
             шапка += ["#define DAN_NET 1"]
         if self.нужны_окна:
             шапка += ["#define DAN_GUI 1"]
+        if self.отладка:
+            шапка += ["#define DAN_DEBUG 1", "static void dan_dbg_error(const char *text, int line);"]
+            шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ_ОТЛАДЧИКА.items()]
         if self.нужна_математика:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
@@ -2712,6 +2966,21 @@ class Генератор:
             части.append(КОМПЛЕКСНЫЕ_C)
         if self.нужны_даты:
             части.append(ДАТЫ_C)
+        if self.отладка:
+            тексты = getattr(у, "ТЕКСТЫ", None) or []
+            строки_файлов = []
+            for номер in range(len(файлы)):
+                текст = тексты[номер] if номер < len(тексты) and тексты[номер] is not None else ""
+                строки_файла = текст.split("\n")
+                строки_файлов.append(f"static const char *const dan_dbg_src_{номер}[] = {{"
+                                     + ", ".join(строка_c(с.rstrip()) for с in строки_файла) + "};")
+            строки_файлов.append("static const char *const *const dan_dbg_src[] = {"
+                                 + ", ".join(f"dan_dbg_src_{н}" for н in range(len(файлы))) + "};")
+            строки_файлов.append("static const int dan_dbg_src_count[] = {"
+                                 + ", ".join(str(len((тексты[н] if н < len(тексты) and тексты[н] else "").split("\n")))
+                                             for н in range(len(файлы))) + "};")
+            части.append("\n".join(строки_файлов))
+            части.append(ОТЛАДКА_C)
         self._собрать_все_типы()
         части.append(self._определения_типов())
         части.append(self._определения_задач())
@@ -2774,6 +3043,8 @@ class Генератор:
             части.append(matematika._код_многочленов_строки())
             части.append(matematika.КОД_МНОГОЧЛЕНОВ)
             части.append(vysshaya.КОД_C)
+        if self.отладочные_записи:
+            части.append("\n".join(запись for _, запись in self.отладочные_записи.values()))
         части.append("\n".join(self.строки))
         постоянные = [f"DAN_STATIC_STR({имя}, {строка_c(текст)});" for текст, имя in self.литералы.items()]
         части.insert(2, "\n".join(["/* ---- string constants ---- */"] + постоянные) + "\n")
@@ -3437,6 +3708,12 @@ class Генератор:
         self.пиши(f"/* line {ф.строка} */")
         self.пиши(self._заголовок(ф) + " {")
         self.отступ += 1
+        if self.отладка:
+            имя = (ф.метод_типа + "." + ф.имя.split(".")[-1]) if getattr(ф, "метод_типа", None) else ф.имя
+            self.пиши(f"__attribute__((cleanup(dan_dbg_leave))) int dan_df = dan_dbg_enter({строка_c(имя)}, {ф.строка});")
+            сигнатура_типы = getattr(ф, "типы_параметров", None)
+            for п in ф.параметры:
+                self._отладить_переменную(п.имя, self.имя(п.имя), п.тип)
         if ф.имя in self.рекурсивные:
             self.пиши(f"DAN_STACK_CHECK({ф.строка});")
         self.текущий_результат = ф.тип_результата
@@ -3558,7 +3835,26 @@ class Генератор:
             return [и.источник]
         return []
 
+    def _отладить_переменную(self, имя, имя_c, тип):
+        """В отладочной сборке переменная становится видна отладчику до конца своей области."""
+        if not self.отладка or not isinstance(тип, str) or это_задача(тип) or это_канал(тип) \
+                or тип.startswith("<") or тип == ПУСТО:
+            return
+        if тип not in self.отладочные_записи:
+            запись = "dan_write_quoted" if тип == СТР else self.запись(тип)
+            имя_записи = f"dan_dbgw_{len(self.отладочные_записи) + 1}"
+            self.отладочные_записи[тип] = (имя_записи,
+                f"static void {имя_записи}(const void *p) {{ {запись}(*({self.тип_c(тип)} const *)p); }}")
+        номер = self.служебное_имя("dv")
+        self.пиши(f"__attribute__((cleanup(dan_dbg_unvar))) int {номер} = "
+                  f"dan_dbg_var({строка_c(имя)}, &{имя_c}, {self.отладочные_записи[тип][0]});")
+
+    ОБЪЯВЛЕНИЯ_БЕЗ_КОДА = (у.ОбъявлениеТипа, у.ОбъявлениеВариантов, у.ОбъявлениеИнтерфейса, у.Функция)
+
     def инструкция(self, и):
+        if self.отладка and getattr(и, "строка", 0) > 0 and not isinstance(и, self.ОБЪЯВЛЕНИЯ_БЕЗ_КОДА) \
+                and type(и).__name__ not in ("ВнешнийБлок", "Подключение"):
+            self.пиши(f"dan_dbg_line({и.строка});")
         метка = None
         if self._куча_в(self._выражения(и)):
             метка = self.служебное_имя("m")
@@ -3581,6 +3877,7 @@ class Генератор:
         self.пиши(f"{self.тип_c(и.тип_итог)}{модификатор} {self.имя(и.имя)} = {значение};")
         if self.куча(и.тип_итог):
             self.области[-1].append((self.имя(и.имя), и.тип_итог))
+        self._отладить_переменную(и.имя, self.имя(и.имя), и.тип_итог)
 
     def _заменить(self, место, значение, тип):
         """Новое значение в месте хранения: сначала оно получает место, затем прежнее его теряет."""
@@ -3667,6 +3964,7 @@ class Генератор:
                         if имя != "_":
                             привязки.append(f"{self.тип_c(т)} const {self.имя(имя)} = "
                                             f"{значение}->u.v{номер}.{self.поле_c((тип, образец.имя), п)};")
+                            привязки.append((имя, т))
                 elif isinstance(образец, у.Диапазон):
                     условия.append(f"({значение} >= {self.выр(образец.начало)} && {значение} <= {self.выр(образец.конец)})")
                 else:
@@ -3682,7 +3980,11 @@ class Генератор:
             self.пиши(f"{начало} ({' || '.join(условия)}) {{")
             self.отступ += 1
             for строка in привязки:
-                self.пиши(строка)
+                if isinstance(строка, tuple):
+                    if len(ветвь.образцы) == 1:
+                        self._отладить_переменную(строка[0], self.имя(строка[0]), строка[1])
+                else:
+                    self.пиши(строка)
             self.отступ -= 1
             self.блок(ветвь.тело)
         if и.иначе is not None:
@@ -3733,12 +4035,14 @@ class Генератор:
         self.пиши(f"if ({тип_c}_has({временное})) {{")
         self.отступ += 1
         self.пиши(f"{self.тип_c(основа(тип))} const {self.имя(и.имя)} = {тип_c}_val({временное});")
+        self._отладить_переменную(и.имя, self.имя(и.имя), основа(тип))
         self.отступ -= 1
         self.блок(и.тогда)
         if getattr(и, "имя_ошибки", None):
             self.пиши("} else {")
             self.отступ += 1
             self.пиши(f"dan_str const {self.имя(и.имя_ошибки)} = {временное}.err;")
+            self._отладить_переменную(и.имя_ошибки, self.имя(и.имя_ошибки), СТР)
             self.отступ -= 1
             self.блок(и.иначе)
             self.пиши("}")
@@ -3756,6 +4060,7 @@ class Генератор:
         self.пиши(f"if (!{временное}.ok) {{")
         self.отступ += 1
         self.пиши(f"dan_str const {self.имя(и.имя)} = {временное}.err;")
+        self._отладить_переменную(и.имя, self.имя(и.имя), СТР)
         self.отступ -= 1
         self.блок(и.тогда)
         self._иначе_ветвь(и)
@@ -3871,6 +4176,7 @@ class Генератор:
             self.пиши(f"for (uint64_t {шаг} = 0; {шаг} < {число}; {шаг}++) {{")
             self.отступ += 1
             self.пиши(f"const int64_t {перем} = (int64_t)((uint64_t){первое} + {шаг});")
+            self._отладить_переменную(и.переменная, перем, ЦЕЛ)
             self.отступ -= 1
             self._тело_цикла(и.тело)
             self.пиши("}")
@@ -3901,6 +4207,7 @@ class Генератор:
         self.пиши(f"for (int64_t {номер} = 0; {номер} < {список}->len; {номер}++) {{")
         self.отступ += 1
         self.пиши(f"{self.тип_c(и.тип_элемента)} const {перем} = {список}->items[{номер}];")
+        self._отладить_переменную(и.переменная, перем, и.тип_элемента)
         self.отступ -= 1
         self._тело_цикла(и.тело)
         self.пиши("}")
@@ -3923,6 +4230,7 @@ class Генератор:
         self.пиши(f"    const {о} {полученное} = {dk}_recv({канал}, {и.строка});")
         self.пиши(f"    if (!{о}_has({полученное})) {{ dan_sweep({метка}); break; }}")
         self.пиши(f"    {self.тип_c(т)} const {перем} = {о}_val({полученное});")
+        self._отладить_переменную(и.переменная, перем, т)
         # полученное значение живёт до конца шага цикла
         self.метки_циклов.append((метка, len(self.области)))
         self.блок(и.тело)
@@ -4537,6 +4845,8 @@ class Генератор:
         return f"dan_str_to_float({значение}, {строка})"
 
 
-def сгенерировать(программа):
-    """Возвращает текст программы на C для проверенного дерева."""
-    return Генератор().программа(программа)
+def сгенерировать(программа, отладка=False):
+    """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика."""
+    генератор = Генератор()
+    генератор.отладка = отладка
+    return генератор.программа(программа)
