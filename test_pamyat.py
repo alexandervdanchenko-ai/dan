@@ -48,7 +48,7 @@ def под_санитайзером(текст, ввод_данных=None):
         with open(с, "w", encoding="utf-8") as ф:
             ф.write(dan.перевести(текст))
         исп = os.path.join(п, "программа")
-        subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-w", "-g", "-O1", "-fsanitize=address,undefined",
+        subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-ffp-contract=off", "-w", "-g", "-O1", "-fsanitize=address,undefined",
                         "-fno-sanitize-recover=undefined", с, "-o", исп, "-lm"], check=True)
         окружение = dict(os.environ, ASAN_OPTIONS="detect_leaks=1")
         р = subprocess.run([исп], capture_output=True, text=True, encoding="utf-8", timeout=300, env=окружение,

@@ -61,7 +61,7 @@ import uzly
 # неиспользуемые функции) из готовой программы удаляется всегда.
 # Компоновщик macOS удаляет неиспользуемый код своим параметром.
 УДАЛИТЬ_НЕНУЖНОЕ = "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections"
-ФЛАГИ_ОБЩИЕ = ["-std=c11", "-fwrapv", "-w", "-s", "-ffunction-sections", "-fdata-sections",
+ФЛАГИ_ОБЩИЕ = ["-std=c11", "-fwrapv", "-ffp-contract=off", "-w", "-s", "-ffunction-sections", "-fdata-sections",
                УДАЛИТЬ_НЕНУЖНОЕ, "-fno-asynchronous-unwind-tables", "-fno-ident"]
 ФЛАГИ_СКОРОСТЬ = ["-O2"]
 ФЛАГИ_РАЗМЕР = ["-Os"]

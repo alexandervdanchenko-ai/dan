@@ -63,6 +63,17 @@ jobs:
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
       - name: Фаззинг (по 45 секунд на каждую мишень)
         run: python fazzing.py --секунд=45
+      - name: Сверка сборок (gcc и clang, -O0, -O2, -Os)
+        run: |
+          sudo apt-get install -y gcc
+          python sverka_sborok.py 150 ${{ github.run_number }}
+      - name: Находки сверки сборок
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nahodki-sborok
+          path: фаззинг/находки_сборок
+          if-no-files-found: ignore
 
   ustanovka:
     name: Установка в Windows по инструкции

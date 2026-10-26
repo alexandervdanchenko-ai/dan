@@ -3188,6 +3188,9 @@ class Генератор:
             "#if defined(__wasi__) && !defined(_DEFAULT_SOURCE)", "#define _DEFAULT_SOURCE", "#endif",
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
               if self.нужна_система or self.профиль else []),
+            # каждое действие с дробными числами округляется отдельно, без слияния в FMA
+            # (то же задаёт параметр -ffp-contract=off; прагма - для других компиляторов C)
+            "#if defined(__clang__)", "#pragma STDC FP_CONTRACT OFF", "#endif",
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>", "#include <stdarg.h>", "#ifndef __wasi__", "#include <setjmp.h>", "#endif",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",

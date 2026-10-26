@@ -203,7 +203,7 @@ class ТестыГонок(unittest.TestCase):
             with open(с, "w", encoding="utf-8") as ф:
                 ф.write(dan.перевести(КОНВЕЙЕР))
             исп = os.path.join(п, "программа")
-            subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-w", "-g", "-O1", "-fsanitize=thread",
+            subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-ffp-contract=off", "-w", "-g", "-O1", "-fsanitize=thread",
                             с, "-o", исп, "-lm", "-pthread"], check=True)
             р = subprocess.run([исп], capture_output=True, text=True, encoding="utf-8", timeout=120,
                                env=dict(os.environ, TSAN_OPTIONS="halt_on_error=1"))
