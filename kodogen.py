@@ -30,18 +30,19 @@ import uzly as у
 import matematika
 import vysshaya  # регистрирует функции высшей и прикладной математики
 import dannye
-from proverka import это_канал, это_задача, элемент_канала, ДЛИН, КОМПЛ
+from proverka import это_канал, это_задача, элемент_канала, ДЛИН, КОМПЛ, ДАТА
+import sistema
 from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, НИЧЕГО, это_список, элемент,
                       это_необяз, основа, найти_в_библиотеке, это_словарь, ключ_словаря, значение_словаря,
                       это_результат, ОШИБКА, это_функция, разобрать_тип_функции, ДИАПАЗОН, НЕИЗВ)
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
-             МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void", ДЛИН: "dan_big", КОМПЛ: "dan_cx"}
+             МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void", ДЛИН: "dan_big", КОМПЛ: "dan_cx", ДАТА: "dan_date"}
 КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p", БАЙТЫ: "y", ПУСТО: "v", ДЛИН: "g",
-              КОМПЛ: "c"}
+              КОМПЛ: "c", ДАТА: "t"}
 ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool",
           РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes", ДЛИН: "dan_write_big",
-          КОМПЛ: "dan_write_cx"}
+          КОМПЛ: "dan_write_cx", ДАТА: "dan_write_date"}
 ОПЕРАЦИИ_КОМПЛ = {"+": "dan_cx_add", "-": "dan_cx_sub", "*": "dan_cx_mul", "/": "dan_cx_div"}
 ОПЕРАЦИИ_ДЛИН = {"+": "dan_big_add", "-": "dan_big_sub", "*": "dan_big_mul", "/": "dan_big_div", "%": "dan_big_mod"}
 ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
@@ -57,6 +58,10 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
     "DAN_MSG_RUNTIME_NOLINE": "Ошибка выполнения: %s\n",
     "DAN_MSG_CX_LOG_ZERO": "логарифм нуля не определён",
+    "DAN_MSG_BAD_MONTH": "номер месяца должен быть от 1 до 12",
+    "DAN_MSG_DATE_RANGE": "дата выходит за пределы 01.01.0001 - 31.12.9999",
+    "DAN_MSG_NO_DATE": "даты %02lld.%02lld.%04lld не существует",
+    "DAN_MSG_NOT_DATE": "строку \"%s\" нельзя преобразовать в дату: нужна запись вида 26.10.2026 или 2026-10-26",
     "DAN_MSG_EXT_RANGE": "число не помещается в 32-разрядное целое, которое принимает внешняя функция",
     "DAN_MSG_BIG_HUGE": "длинное число слишком велико: больше трёх миллиардов двоичных разрядов",
     "DAN_MSG_BIG_TO_INT": "значение длинного числа не помещается в тип цел",
@@ -511,6 +516,30 @@ static dan_str dan_buf_str(dan_buf *b) {
 }
 
 static void dan_buf_free(dan_buf *b) { if (b->s) free((dan_hdr *)(void *)b->s - 1); b->s = NULL; }
+
+/* the program's command line arguments (for аргументы()) */
+static int dan_argc;
+static char **dan_argv;
+
+/* on Windows names and texts for the system are converted from UTF-8 to
+   UTF-16, so that Cyrillic works regardless of the system code page */
+#ifdef _WIN32
+static wchar_t *dan_wide(dan_str s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    wchar_t *w = dan_alloc(sizeof(wchar_t) * (size_t)(n > 0 ? n : 1));
+    if (n <= 0) { w[0] = 0; return w; }
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+
+static dan_str dan_narrow(const wchar_t *w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *s = dan_str_new((size_t)(n > 0 ? n : 1));
+    if (n <= 0) { s[0] = 0; return s; }
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    return s;
+}
+#endif
 
 static dan_str dan_str_replace(dan_str s, dan_str a, dan_str b, int line) {
     if (!*a) dan_error(DAN_MSG_EMPTY_SEARCH, line);
@@ -1228,6 +1257,118 @@ static dan_big dan_big_from_str(dan_str s, int line) {
 }
 """
 
+ДАТЫ_C = r"""
+/* ---- calendar dates (дата): days since 01.01.1970, Gregorian calendar ---- */
+typedef struct { int64_t d; } dan_date;
+
+static int64_t dan_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static void dan_civil_from_days(int64_t z, int64_t *y, int64_t *m, int64_t *d) {
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = yoe + era * 400 + (*m <= 2);
+}
+static int64_t dan_days_in_month(int64_t y, int64_t m, int line) {
+    static const int t[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (m < 1 || m > 12) dan_error(DAN_MSG_BAD_MONTH, line);
+    return m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 29 : t[m - 1];
+}
+#define DAN_DATE_MIN (-719162)    /* 01.01.0001 */
+#define DAN_DATE_MAX 2932896      /* 31.12.9999 */
+static dan_date dan_date_check(int64_t d, int line) {
+    if (d < DAN_DATE_MIN || d > DAN_DATE_MAX) dan_error(DAN_MSG_DATE_RANGE, line);
+    dan_date r = { d };
+    return r;
+}
+static dan_date dan_date_make(int64_t y, int64_t m, int64_t d, int line) {
+    if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1 || d > dan_days_in_month(y, m, line)) {
+        char b[160];
+        snprintf(b, sizeof b, DAN_MSG_NO_DATE, (long long)d, (long long)m, (long long)y);
+        dan_error(b, line);
+    }
+    dan_date r = { dan_days_from_civil(y, m, d) };
+    return r;
+}
+/* «26.10.2026», «6.1.2026» or «2026-10-26»; 0 if the text is not a date */
+static int dan_date_scan(dan_str s, int64_t *y, int64_t *m, int64_t *d) {
+    const char *p = s;
+    int64_t n[3] = { 0, 0, 0 };
+    int digits[3] = { 0, 0, 0 }, k = 0;
+    char sep = 0;
+    while (*p == ' ') p++;
+    for (; *p && *p != ' '; p++) {
+        if (*p >= '0' && *p <= '9') {
+            if (digits[k] >= 4) return 0;
+            n[k] = n[k] * 10 + (*p - '0');
+            digits[k]++;
+        } else if ((*p == '.' || *p == '-' || *p == '/') && k < 2 && digits[k] && (!sep || sep == *p)) {
+            sep = *p;
+            k++;
+        } else {
+            return 0;
+        }
+    }
+    while (*p == ' ') p++;
+    if (*p || k != 2 || !digits[2]) return 0;
+    if (sep == '-' && digits[0] == 4) { *y = n[0]; *m = n[1]; *d = n[2]; return 1; }
+    if (sep != '-' && digits[2] == 4 && digits[0] <= 2 && digits[1] <= 2) { *d = n[0]; *m = n[1]; *y = n[2]; return 1; }
+    return 0;
+}
+static int dan_date_valid(int64_t y, int64_t m, int64_t d) {
+    if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1) return 0;
+    return d <= dan_days_in_month(y, m, 0);
+}
+static dan_date dan_date_from_str(dan_str s, int line) {
+    int64_t y, m, d;
+    if (!dan_date_scan(s, &y, &m, &d)) dan_conv_error(DAN_MSG_NOT_DATE, s, line);
+    return dan_date_make(y, m, d, line);
+}
+static dan_str dan_date_to_str(dan_date v) {
+    int64_t y, m, d;
+    char b[32];
+    dan_civil_from_days(v.d, &y, &m, &d);
+    snprintf(b, sizeof b, "%02d.%02d.%04d", (int)d, (int)m, (int)y);
+    return dan_strdup(b);
+}
+static void dan_write_date(dan_date v) {
+    int64_t y, m, d;
+    dan_civil_from_days(v.d, &y, &m, &d);
+    printf("%02d.%02d.%04d", (int)d, (int)m, (int)y);
+}
+static dan_date dan_date_add(dan_date a, int64_t n, int line) {
+    int64_t r;
+    if (__builtin_add_overflow(a.d, n, &r)) dan_error(DAN_MSG_DATE_RANGE, line);
+    return dan_date_check(r, line);
+}
+static dan_date dan_date_sub_days(dan_date a, int64_t n, int line) {
+    int64_t r;
+    if (__builtin_sub_overflow(a.d, n, &r)) dan_error(DAN_MSG_DATE_RANGE, line);
+    return dan_date_check(r, line);
+}
+static int64_t dan_date_diff(dan_date a, dan_date b) { return a.d - b.d; }
+static int dan_date_cmp(dan_date a, dan_date b) { return a.d < b.d ? -1 : a.d > b.d; }
+static bool dan_date_eq(dan_date a, dan_date b) { return a.d == b.d; }
+static int64_t dan_date_year(dan_date v) { int64_t y, m, d; dan_civil_from_days(v.d, &y, &m, &d); return y; }
+static int64_t dan_date_month(dan_date v) { int64_t y, m, d; dan_civil_from_days(v.d, &y, &m, &d); return m; }
+static int64_t dan_date_day(dan_date v) { int64_t y, m, d; dan_civil_from_days(v.d, &y, &m, &d); return d; }
+/* 1 - понедельник, 7 - воскресенье (01.01.1970 - четверг) */
+static int64_t dan_date_weekday(dan_date v) { return ((v.d % 7) + 7 + 3) % 7 + 1; }
+static int64_t dan_date_yday(dan_date v) { return v.d - dan_days_from_civil(dan_date_year(v), 1, 1) + 1; }
+"""
+
+
 КОМПЛЕКСНЫЕ_C = r"""
 /* ---- complex numbers (компл) ---- */
 typedef struct { double re, im; } dan_cx;
@@ -1788,7 +1929,7 @@ static void dan_key_error(dan_str key, int line) {
     dan_error(b.s, line);
 }
 """
-ХЕШИ = {ЦЕЛ: "dan_hash_i(k)", СТР: "dan_hash_s(k)", ЛОГ: "(uint64_t)(k)", РАЦ: "dan_hash_r(k)"}
+ХЕШИ = {ЦЕЛ: "dan_hash_i(k)", СТР: "dan_hash_s(k)", ЛОГ: "(uint64_t)(k)", РАЦ: "dan_hash_r(k)", ДАТА: "dan_hash_i((k).d)"}
 
 ОБЪЯВЛЕНИЯ_СЛОВАРЯ = """
 static {D} *{D}_share({D} *d);
@@ -1967,7 +2108,7 @@ static bool {D}_eq(const {D} *x, const {D} *y) {{
 """
 
 # Равенство элементов списка (для «содержит» и «найти»).
-РАВЕНСТВО = {КОМПЛ: "dan_cx_eq(a, b)", ДЛИН: "dan_big_eq(a, b)", ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
+РАВЕНСТВО = {ДАТА: "dan_date_eq(a, b)", КОМПЛ: "dan_cx_eq(a, b)", ДЛИН: "dan_big_eq(a, b)", ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
              РАЦ: "(dan_rat_cmp(a, b) == 0)", МН: "dan_poly_eq(a, b)", БАЙТЫ: "dan_bytes_eq(a, b)"}
 
 ШАБЛОН_ПОИСКА = """
@@ -2067,6 +2208,8 @@ def строка_c(текст):
             части.append("\\n")
         elif с == "\t":
             части.append("\\t")
+        elif с == "?":
+            части.append("\\?")      # «??)» и подобные в C - триграфы
         elif 32 <= байт < 127:
             части.append(с)
         else:
@@ -2114,6 +2257,8 @@ class Генератор:
         self.нужны_задачи = False  # программа запускает задачи или пользуется каналами
         self.нужны_длинные = False # программа пользуется длинными целыми
         self.нужны_компл = False   # программа пользуется комплексными числами
+        self.нужны_даты = False    # программа пользуется датами
+        self.нужна_система = False # программа пользуется системной библиотекой
         self.клоны = {}            # тип -> функция C, копирующая значение для другой задачи
         self.каналы = {}           # тип элементов канала -> часть имени функций C
         self.задачи_c = {}         # тип результата задачи -> структура C
@@ -2364,6 +2509,8 @@ class Генератор:
             self.нужны_длинные = True
         if тип == КОМПЛ:
             self.нужны_компл = True
+        if тип == ДАТА:
+            self.нужны_даты = True
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan *"
@@ -2387,6 +2534,14 @@ class Генератор:
         self.нужны_данные = True
         for тип_списка in ("[цел]", "[стр]"):
             self.структура(тип_списка)
+
+    def включить_систему(self):
+        if self.нужна_система:
+            return
+        self.нужна_система = True
+        self.нужны_даты = True
+        for тип in sistema.НУЖНЫЕ_ТИПЫ:
+            self.тип_c(тип)
 
     def включить_математику(self):
         """Библиотека и многочлены нужны: регистрируются все используемые ими типы списков."""
@@ -2440,7 +2595,8 @@ class Генератор:
             return self.значимый(тип) + "_str"
         return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
                 ЛОГ: "dan_bool_to_str", СТР: "dan_quote_str", МН: "dan_poly_to_str",
-                БАЙТЫ: "dan_bytes_show", ДЛИН: "dan_big_to_str", КОМПЛ: "dan_cx_to_str"}[тип]
+                БАЙТЫ: "dan_bytes_show", ДЛИН: "dan_big_to_str", КОМПЛ: "dan_cx_to_str",
+                ДАТА: "dan_date_to_str"}[тип]
 
     # ---------- имена и вывод ----------
 
@@ -2487,9 +2643,9 @@ class Генератор:
             self.функция(ф)
             self.пиши()
 
-        self.пиши("int main(void) {")
+        self.пиши("int main(int argc, char **argv) {")
         self.отступ += 1
-        self.пиши("dan_start();")
+        self.пиши("dan_argc = argc; dan_argv = argv; dan_start();")
         место_запуска = len(self.строки) - 1
         self.метка_функции, self.области, self.метки_циклов = "dan_main_mark", [[]], []
         self.текущий_результат = None
@@ -2507,6 +2663,8 @@ class Генератор:
 
         шапка = [
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
+            *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
+              if self.нужна_система else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
@@ -2516,6 +2674,9 @@ class Генератор:
         шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
         if self.нужны_данные:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in dannye.СООБЩЕНИЯ.items()]
+        if self.нужна_система:
+            шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in sistema.СООБЩЕНИЯ.items()]
+            шапка += ["#ifndef _WIN32", "#include <sys/wait.h>", "#endif"]
         if self.нужна_математика:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.СООБЩЕНИЯ.items()]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in matematika.ИМЕНА_C.items()]
@@ -2535,6 +2696,8 @@ class Генератор:
             части.append(ДЛИННЫЕ_C)
         if self.нужны_компл:
             части.append(КОМПЛЕКСНЫЕ_C)
+        if self.нужны_даты:
+            части.append(ДАТЫ_C)
         self._собрать_все_типы()
         части.append(self._определения_типов())
         части.append(self._определения_задач())
@@ -2583,6 +2746,8 @@ class Генератор:
         части.append(self._функции_задач())
         if self.нужны_данные:
             части.append(dannye.код_c())
+        if self.нужна_система:
+            части.append(sistema.код_c())
         if self.нужна_математика:
             части.append(matematika.КОД_C)
             части.append(matematika.код_c_дополнения())
@@ -3412,7 +3577,7 @@ class Генератор:
         if и.оператор == "=":
             self._заменить(цель, значение, и.тип_цели)
             return
-        результат = self._арифметика(и.оператор[0], цель, значение, и.тип_результата, и.строка)
+        результат = self._арифметика(и.оператор[0], цель, значение, и.тип_результата, и.строка, и)
         self._заменить(цель, результат, и.тип_цели)
 
     def и_ПрисваиваниеЭлемента(self, и):
@@ -3430,7 +3595,7 @@ class Генератор:
         значение = self.выр(и.значение)
         if и.оператор != "=":
             текущее = f"{структура}_get({объект}, {индекс}, {и.строка})"
-            значение = self._арифметика(и.оператор[0], текущее, значение, и.тип_результата, и.строка)
+            значение = self._арифметика(и.оператор[0], текущее, значение, и.тип_результата, и.строка, и)
         self.пиши(f"{структура}_set({объект}, {индекс}, {значение}, {и.строка});")
         self.отступ -= 1
         self.пиши("}")
@@ -3450,7 +3615,7 @@ class Генератор:
         else:
             место = self.служебное_имя("p")
             self.пиши(f"{self.тип_c(и.тип_элемента)} *const {место} = {D}_at({словарь}, {ключ}, {и.строка});")
-            результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка)
+            результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка, и)
             self._заменить(f"*{место}", результат, и.тип_элемента)
         self.отступ -= 1
         self.пиши("}")
@@ -3533,7 +3698,7 @@ class Генератор:
         if и.оператор == "=":
             self._заменить(f"*{место}", значение, и.тип_поля)
         else:
-            результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка)
+            результат = self._арифметика(и.оператор[0], f"*{место}", значение, и.тип_результата, и.строка, и)
             self._заменить(f"*{место}", результат, и.тип_поля)
         self.отступ -= 1
         self.пиши("}")
@@ -3976,7 +4141,7 @@ class Генератор:
             return f"(!{есть})" if оп == "==" else f"({есть})"
         л, п = self.выр(в.левый), self.выр(в.правый)
         if оп in ("+", "-", "*", "/", "%"):
-            return self._арифметика(оп, л, п, в.тип_выр, в.строка)
+            return self._арифметика(оп, л, п, в.тип_выр, в.строка, в)
         if оп == "^":
             if в.тип_выр == ЦЕЛ:
                 return f"dan_pow_int({л}, {п}, {в.строка})"
@@ -4017,6 +4182,8 @@ class Генератор:
             return f"(dan_rat_cmp({л}, {п}) {оп} 0)"
         if getattr(в, "тип_операндов", None) == ДЛИН:
             return f"(dan_big_cmp({л}, {п}) {оп} 0)"
+        if getattr(в, "тип_операндов", None) == ДАТА:
+            return f"(dan_date_cmp({л}, {п}) {оп} 0)"
         if getattr(в, "тип_операндов", None) == КОМПЛ:
             равно = f"dan_cx_eq({л}, {п})"
             return равно if оп == "==" else f"(!{равно})"
@@ -4025,8 +4192,17 @@ class Генератор:
             return равно if оп == "==" else f"(!{равно})"
         return f"({л} {оп} {п})"
 
-    def _арифметика(self, оп, л, п, тип, строка):
+    def _арифметика(self, оп, л, п, тип, строка, узел=None):
         """Код «л оп п», где оба операнда уже приведены к типу результата."""
+        дата = getattr(узел, "операция_даты", None)
+        if дата == "add":
+            return f"dan_date_add({л}, {п}, {строка})"
+        if дата == "radd":
+            return f"dan_date_add({п}, {л}, {строка})"
+        if дата == "sub":
+            return f"dan_date_sub_days({л}, {п}, {строка})"
+        if дата == "diff":
+            return f"dan_date_diff({л}, {п})"
         if тип == СТР:
             return f"dan_concat({л}, {п})"
         if тип == БАЙТЫ:
@@ -4091,6 +4267,9 @@ class Генератор:
         тип = в.объект.тип_выр
         if getattr(в, "свойство_задачи", False):
             return f"dan_task_ready(&{self.выр(в.объект)}.t)"
+        if тип == ДАТА:
+            return {"год": "dan_date_year({})", "месяц": "dan_date_month({})", "день": "dan_date_day({})",
+                    "день_недели": "dan_date_weekday({})", "день_года": "dan_date_yday({})"}[в.имя].format(self.выр(в.объект))
         if тип == КОМПЛ:
             return {"вещ": "({}).re", "мним": "({}).im", "модуль": "dan_cx_abs({})", "аргумент": "dan_cx_arg({})",
                     "сопряженное": "dan_cx_conj({})"}[в.имя].format(self.выр(в.объект))
@@ -4178,6 +4357,8 @@ class Генератор:
             _, описание = найти_в_библиотеке(каноническое)
             if описание.get("модуль") == "данные":
                 self.включить_данные()
+            elif описание.get("модуль") == "система":
+                self.включить_систему()
             else:
                 self.включить_математику()
             if описание["строка"][вариант]:
@@ -4196,10 +4377,13 @@ class Генератор:
             return f"dan_bytes_from_list({аргументы[0]}, {в.строка})"
         if имя == РАЦ and len(аргументы) == 2:
             return f"dan_rat_of({аргументы[0]}, {аргументы[1]}, {в.строка})"
+        if имя == ДАТА and len(аргументы) == 3:
+            self.нужны_даты = True
+            return f"dan_date_make({аргументы[0]}, {аргументы[1]}, {аргументы[2]}, {в.строка})"
         if имя == КОМПЛ and len(аргументы) == 2:
             self.нужны_компл = True
             return f"dan_cx_make({аргументы[0]}, {аргументы[1]})"
-        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ, БАЙТЫ, ДЛИН, КОМПЛ):
+        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ, БАЙТЫ, ДЛИН, КОМПЛ, ДАТА):
             return self._преобразование(имя, в.аргументы[0].тип_выр, аргументы[0], в.строка)
         return f"{self.имя(имя)}({', '.join(аргументы)})"
 
@@ -4241,7 +4425,8 @@ class Генератор:
             else:  # упорядочить_по: устойчивая сортировка слиянием по ключу
                 K = self.тип_c(результат)
                 сравнить = {ЦЕЛ: "(ka < kb ? -1 : ka > kb)", ДРОБ: "(ka < kb ? -1 : ka > kb)",
-                            РАЦ: "dan_rat_cmp(ka, kb)", СТР: "dan_str_cmp(ka, kb)"}[результат]
+                            РАЦ: "dan_rat_cmp(ka, kb)", СТР: "dan_str_cmp(ka, kb)",
+                            ДАТА: "dan_date_cmp(ka, kb)"}[результат]
                 код = (f"static {S} *{имя}(const {S} *l, {F} f) {{\n"
                        f"    int64_t n = l->len;\n    {S} *r = {S}_copy(l);\n"
                        f"    {K} *k = dan_alloc(sizeof({K}) * (size_t)(n ? n : 1));\n"
@@ -4269,6 +4454,11 @@ class Генератор:
     def _преобразование(self, куда, откуда, значение, строка):
         if куда == откуда:
             return значение
+        if ДАТА in (куда, откуда):
+            self.нужны_даты = True
+            if куда == СТР:
+                return f"dan_date_to_str({значение})"
+            return f"dan_date_from_str({значение}, {строка})"
         if КОМПЛ in (куда, откуда):
             self.нужны_компл = True
             if куда == СТР:

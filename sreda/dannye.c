@@ -6,23 +6,7 @@
 /* ---- paths: on Windows file names are converted from UTF-8 to UTF-16,
    so that Cyrillic names work regardless of the system code page ---- */
 
-#ifdef _WIN32
-static wchar_t *dan_wide(dan_str s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    wchar_t *w = dan_alloc(sizeof(wchar_t) * (size_t)(n > 0 ? n : 1));
-    if (n <= 0) { w[0] = 0; return w; }
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
-    return w;
-}
-
-static dan_str dan_narrow(const wchar_t *w) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-    char *s = dan_str_new((size_t)(n > 0 ? n : 1));
-    if (n <= 0) { s[0] = 0; return s; }
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
-    return s;
-}
-#endif
+/* dan_wide and dan_narrow are part of the common runtime */
 
 static FILE *dan_fopen(dan_str path, const char *mode) {
 #ifdef _WIN32

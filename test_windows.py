@@ -39,7 +39,7 @@ def выполнить_в_windows(текст, ввод_данных=""):
         р = subprocess.run([WINE, exe], input=ввод_данных.encode("utf-8"), capture_output=True,
                            timeout=300, cwd=папка, env=среда)
         return (р.returncode, р.stdout.decode("utf-8", "replace").replace("\r\n", "\n"),
-                р.stderr.decode("utf-8", "replace"))
+                р.stderr.decode("utf-8", "replace").replace("\r\n", "\n"))
 
 
 @unittest.skipUnless(ВКЛЮЧЕНО, "проверка Windows включается переменной DAN_WINDOWS=1 при наличии MinGW и Wine")
