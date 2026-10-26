@@ -65,8 +65,8 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
 }
 
 ОПЕРАЦИИ_КОМПЛ = {"+": "dan_cx_add", "-": "dan_cx_sub", "*": "dan_cx_mul", "/": "dan_cx_div"}
-ОПЕРАЦИИ_ДЛИН = {"+": "dan_big_add", "-": "dan_big_sub", "*": "dan_big_mul", "/": "dan_big_div", "%": "dan_big_mod"}
-ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
+ОПЕРАЦИИ_ДЛИН = {"+": "dan_big_add", "-": "dan_big_sub", "*": "dan_big_mul", "/": "dan_big_div_exact", "%": "dan_big_mod"}
+ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div_exact",
                "%": "dan_poly_mod"}
 ЦЕЛЫЕ_ДЕЙСТВИЯ = {"+": "dan_add", "-": "dan_sub", "*": "dan_mul"}
 ОПЕРАЦИИ_РАЦ = {"+": "dan_rat_add", "-": "dan_rat_sub", "*": "dan_rat_mul", "/": "dan_rat_div"}
@@ -75,6 +75,8 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_MSG_RUNTIME": "Ошибка выполнения в строке %d: %s\n",
     "DAN_MSG_RUNTIME_FILE": "Ошибка выполнения в файле %s, строка %d: %s\n",
     "DAN_MSG_DIV_ZERO": "деление на ноль",
+    "DAN_MSG_NOT_EXACT": "%s не делится нацело на %s, поэтому точное частное нельзя записать значением этого типа; "
+                         "для деления с остатком используйте частное(а, б) и а %% б",
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
     "DAN_MSG_RUNTIME_NOLINE": "Ошибка выполнения: %s\n",
@@ -401,6 +403,24 @@ static int64_t dan_div(int64_t a, int64_t b, int line) {
     if (a == INT64_MIN && b == -1) dan_error(DAN_MSG_TOO_BIG, line);
     int64_t q = a / b, r = a % b;
     if (r < 0) q += b > 0 ? -1 : 1;
+    return q;
+}
+
+/* Точное деление целых там, где частное обязано быть целым (параметр типа
+   Числовое со значением цел): если остаток не ноль, это ошибка, а не округление. */
+static void dan_not_exact(const char *a, const char *b, int line) {
+    char buf[300];
+    snprintf(buf, sizeof buf, DAN_MSG_NOT_EXACT, a, b);
+    dan_error(buf, line);
+}
+static int64_t dan_div_exact(int64_t a, int64_t b, int line) {
+    int64_t q = dan_div(a, b, line);
+    if (q * b != a) {
+        char x[32], y[32];
+        snprintf(x, sizeof x, "%lld", (long long)a);
+        snprintf(y, sizeof y, "%lld", (long long)b);
+        dan_not_exact(x, y, line);
+    }
     return q;
 }
 
@@ -1206,6 +1226,13 @@ static void dan_big_divmod(dan_big a, dan_big b, dan_big *q, dan_big *r, int lin
     *r = dan_big_submag(b, rr, 1);
 }
 static dan_big dan_big_div(dan_big a, dan_big b, int line) { dan_big q, r; dan_big_divmod(a, b, &q, &r, line); return q; }
+static dan_str dan_big_to_str(dan_big a);
+static dan_big dan_big_div_exact(dan_big a, dan_big b, int line) {
+    dan_big q, r;
+    dan_big_divmod(a, b, &q, &r, line);
+    if (r->sign) dan_not_exact(dan_big_to_str(a), dan_big_to_str(b), line);
+    return q;
+}
 static dan_big dan_big_mod(dan_big a, dan_big b, int line) { dan_big q, r; dan_big_divmod(a, b, &q, &r, line); return r; }
 
 static int dan_big_cmp(dan_big a, dan_big b) {
@@ -4568,8 +4595,8 @@ class Генератор:
         if тип == МН:
             return f"{ОПЕРАЦИИ_МН[оп]}({л}, {п}, {строка})"
         if тип == ЦЕЛ:
-            if оп == "/":
-                return f"dan_div({л}, {п}, {строка})"
+            if оп == "/":      # только в обобщённых функциях с Т = цел: частное обязано быть целым
+                return f"dan_div_exact({л}, {п}, {строка})"
             if оп == "%":
                 return f"dan_mod({л}, {п}, {строка})"
             return f"{ЦЕЛЫЕ_ДЕЙСТВИЯ[оп]}({л}, {п}, {строка})"

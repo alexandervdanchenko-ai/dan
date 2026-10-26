@@ -68,6 +68,12 @@
         "строка": [True],
         "описание": "разложение на простые множители: простые_множители(180) = [2, 2, 3, 3, 5]",
     },
+    "частное": {
+        "варианты": [([ЦЕЛ, ЦЕЛ], ЦЕЛ), (["длинное", "длинное"], "длинное"), (["мн", "мн"], "мн")],
+        "c": ["dan_div", "dan_big_div", "dan_poly_div"],
+        "строка": [True, True, True],
+        "описание": "частное при делении с остатком: частное(7, 2) = 3, частное(-7, 2) = -4 (остаток а % б не бывает отрицательным); для многочленов - частное при делении многочленов",
+    },
     "нод": {
         "варианты": [([ЦЕЛ, ЦЕЛ], ЦЕЛ), ([СПИСОК_ЦЕЛ], ЦЕЛ)],
         "c": ["dan_gcd", "dan_gcd_list"],
@@ -1007,6 +1013,14 @@ static void dan_poly_divmod(dan_mn a, dan_mn b, dan_mn *q, dan_mn *rem, int line
 }
 
 static dan_mn dan_poly_div(dan_mn a, dan_mn b, int line) { dan_mn q, r; dan_poly_divmod(a, b, &q, &r, line); return q; }
+static dan_str dan_poly_to_str(dan_mn p);
+/* «а / б» для многочленов: точное частное; если остаток не ноль, частное - не многочлен. */
+static dan_mn dan_poly_div_exact(dan_mn a, dan_mn b, int line) {
+    dan_mn q, r;
+    dan_poly_divmod(a, b, &q, &r, line);
+    if (r->deg >= 0) dan_not_exact(dan_poly_to_str(a), dan_poly_to_str(b), line);
+    return q;
+}
 static dan_mn dan_poly_mod(dan_mn a, dan_mn b, int line) { dan_mn q, r; dan_poly_divmod(a, b, &q, &r, line); return r; }
 
 static bool dan_poly_eq(dan_mn a, dan_mn b) {

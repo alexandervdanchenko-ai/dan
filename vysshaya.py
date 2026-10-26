@@ -269,8 +269,6 @@ for имя, c, описание in (
   "реальная ставка в процентах по номинальной ставке и инфляции (формула Фишера)")
 д("проценты_за_дни", [([РАЦ, РАЦ, ЦЕЛ, ЦЕЛ], РАЦ, "dan_daily_interest", True)],
   "проценты за дни: сумма × ставка / 100 × дней / дней_в_году")
-д("компенсация_за_задержку", [([РАЦ, РАЦ, ЦЕЛ], РАЦ, "dan_late_pay_comp", True)],
-  "компенсация за задержку выплат работнику по ст. 236 ТК РФ: сумма × ключевая ставка / 100 / 150 × дней")
 
 # ---------- разбор чисел с ошибкой как значением ----------
 
@@ -1351,11 +1349,6 @@ static dan_rat dan_daily_interest(dan_rat s, dan_rat r, int64_t days, int64_t ye
     if (year <= 0 || days < 0) dan_error(DAN_MSG_YEAR_DAYS, line);
     return dan_rat_div(dan_rat_mul(dan_rat_mul(s, dan_pct_r(r, line), line), dan_rat_from_int(days, line), line),
                        dan_rat_from_int(year, line), line);
-}
-static dan_rat dan_late_pay_comp(dan_rat s, dan_rat key_rate, int64_t days, int line) {
-    if (days < 0) dan_error(DAN_MSG_YEAR_DAYS, line);
-    return dan_rat_div(dan_rat_mul(dan_rat_mul(s, dan_pct_r(key_rate, line), line), dan_rat_from_int(days, line), line),
-                       dan_rat_from_int(150, line), line);
 }
 
 /* -- parsing numbers: errors as values -- */
