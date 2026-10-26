@@ -884,7 +884,8 @@ static void dan_pfont_load(dan_pdf *p, dan_pfont *f, dan_po *font) {
             int code = 0;
             for (size_t i = 0; i < diff->cnt; i++) {
                 dan_po *x = dan_pres(p, diff->v[i]);
-                if (x->t == PO_NUM && x->num >= 0 && x->num <= 0xFFFFFF) code = (int)x->num;
+                /* codes of a simple font are 0..255: the names after an invalid code are skipped */
+                if (x->t == PO_NUM) code = x->num >= 0 && x->num < 256 ? (int)x->num : -1;
                 else if (x->t == PO_NAME && code >= 0 && code < 256) {
                     uint32_t u = dan_pglyph_unicode((const char *)x->s);
                     if (u) f->simple[code] = u;

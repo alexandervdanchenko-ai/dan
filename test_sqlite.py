@@ -5,6 +5,7 @@
 и читаются без искажений.
 """
 
+import contextlib
 import os
 import random
 import sqlite3
@@ -99,13 +100,15 @@ class ТестыSQLite(unittest.TestCase):
 вывод("готово")
 """, п)
             self.assertEqual(код, 0, ош)
-            with sqlite3.connect(os.path.join(п, "дела.db")) as соединение:
+            with contextlib.closing(sqlite3.connect(os.path.join(п, "дела.db"))) as соединение:
                 прочитано = соединение.execute("SELECT н, текст, число, данные FROM т ORDER BY н").fetchall()
             self.assertEqual(прочитано, значения)
 
     def test_читает_файл_python(self):
         with tempfile.TemporaryDirectory() as п:
-            with sqlite3.connect(os.path.join(п, "реестр.db")) as соединение:
+            # with над соединением только подтверждает транзакцию; closing закрывает файл,
+            # иначе в Windows временную папку нельзя удалить
+            with contextlib.closing(sqlite3.connect(os.path.join(п, "реестр.db"))) as соединение, соединение:
                 соединение.execute("CREATE TABLE реестр (фио TEXT, сумма INTEGER, дата TEXT)")
                 соединение.executemany("INSERT INTO реестр VALUES (?, ?, ?)",
                                        [("Иванов И.И.", 1000, "2026-10-26"), ("Петрова А.А.", 2500, "2026-11-01"),

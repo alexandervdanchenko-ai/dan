@@ -231,6 +231,19 @@ class ТестыPDF(unittest.TestCase):
         self.assertEqual(код, 0, ош)
         self.assertEqual(len(вывод.splitlines()), 5, вывод)
 
+    def test_недопустимый_код_в_различиях_кодировки(self):
+        # имена после недопустимого кода пропускаются, а не продолжают предыдущий ряд кодов
+        for имя, коды in (("отрицательный", b"-1"), ("огромный", b"9999999999999999"), ("за_байтом", b"256")):
+            шрифт = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding<</Differences[65 /afii10017 %s /afii10018]>>>>" % коды
+            with open(self.файл(имя + ".pdf"), "wb") as ф:
+                ф.write(собрать_pdf(страница(поток(b"BT /F1 12 Tf (AB) Tj ET"), b"<</Font<</F1 5 0 R>>>>") + [(5, шрифт)]))
+        код, вывод, ош = выполнить(self.п, """для имя в ["отрицательный", "огромный", "за_байтом"] {
+    если пусть с = текст_pdf(прочитать_байты(имя + ".pdf")) { вывод(с) } иначе ошибка о { вывод(о) }
+}
+""")
+        self.assertEqual(код, 0, ош)
+        self.assertEqual(вывод.splitlines(), ['["АB"]'] * 3)
+
     def test_ошибки(self):
         with open(self.файл("текст.pdf"), "w", encoding="utf-8") as ф:
             ф.write("это не pdf")

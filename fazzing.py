@@ -26,6 +26,7 @@ zip-архивы, сжатые и зашифрованные данные, Base6
 Нужен clang с libFuzzer (в Ubuntu: пакеты clang и libclang-rt-dev).
 """
 
+import base64
 import os
 import re
 import shutil
@@ -300,7 +301,6 @@ def main(аргументы):
             итог = 1
             print(вывод[-6000:])
             if os.environ.get("GITHUB_ACTIONS"):       # замечание на странице проверки GitHub
-                import base64
                 строки = [с for с in вывод.splitlines()
                           if re.search(r"ERROR|SUMMARY|runtime error|^\s+#\d+ ", с)][:40]
                 for ф in найдено[:3]:
@@ -310,7 +310,8 @@ def main(аргументы):
                         строки.append(f"вход {os.path.basename(ф)} (Base64): " + base64.b64encode(данные).decode())
                     else:
                         строки.append(f"вход {os.path.basename(ф)}: {len(данные)} байт")
-                кратко = "\n".join(строки)[-30000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                # обрезается конец: причина ошибки в первых строках важнее входа в Base64
+                кратко = "\n".join(строки)[:30000].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
                 print(f"::error title=Находка фаззинга%3A {имя}::{кратко}")
             for ф in найдено:
                 print("  находка:", os.path.relpath(ф, ПАПКА))
