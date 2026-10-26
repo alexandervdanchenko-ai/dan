@@ -1,8 +1,11 @@
-# Выпуск версии: при отправке метки вида v1.1 GitHub создаёт страницу выпуска
-# с описанием из файла «выпуски/<метка>.md» и файлами для скачивания.
+# Выпуск версии. Запускается кнопкой «Run workflow» на странице Actions -> «Выпуск»
+# (или отправкой метки вида v1.1). Номер версии берётся из versiya.py, описание -
+# из файла «выпуски/v<номер>.md»; создаются метка версии и страница выпуска
+# с файлами для скачивания.
 name: Выпуск
 
 on:
+  workflow_dispatch:
   push:
     tags: ["v*"]
 
@@ -18,9 +21,18 @@ jobs:
       - name: Создать выпуск
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
-          номер="${TAG#v}"
+          номер=$(python3 -c "import versiya; print(versiya.ВЕРСИЯ)")
+          метка="v$номер"
+          if [ ! -f "выпуски/$метка.md" ]; then
+            echo "::error title=Нет описания выпуска::нужен файл выпуски/$метка.md"
+            exit 1
+          fi
+          if gh release view "$метка" > /dev/null 2>&1; then
+            echo "::notice title=Выпуск уже есть::$метка уже опубликован"
+            exit 0
+          fi
           файлы=("установить_windows.ps1")
           for ф in редактор/*.vsix; do [ -f "$ф" ] && файлы+=("$ф"); done
-          gh release create "$TAG" "${файлы[@]}" --title "Дан $номер" --notes-file "выпуски/$TAG.md" --latest
+          gh release create "$метка" "${файлы[@]}" --target "$GITHUB_SHA" --title "Дан $номер" \
+            --notes-file "выпуски/$метка.md" --latest
