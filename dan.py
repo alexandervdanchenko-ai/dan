@@ -425,6 +425,74 @@ def библиотеки_программы(код_c, папка, команда
     return библиотеки
 
 
+# ---- кэш собранных программ ----
+# Компилятор C занимает почти всё время сборки, а перевод в C - сотые доли
+# секунды. Поэтому готовая программа запоминается по отпечатку полного кода C,
+# параметров сборки, компилятора и версии Дана: повторная сборка той же
+# программы берёт готовый файл. Отключается переменной DAN_NO_CACHE=1.
+
+КЭШ_НАИБОЛЬШЕ = 300            # программ в кэше; самые давние удаляются
+
+
+def папка_кэша():
+    if os.environ.get("DAN_CACHE"):
+        return os.environ["DAN_CACHE"]
+    if os.name == "nt":
+        основа = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(основа, "Dan", "cache")
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "dan")
+
+
+def ключ_кэша(код_c, команда, флаги, библиотеки):
+    """Отпечаток сборки или None, если программу кэшировать нельзя."""
+    if os.environ.get("DAN_NO_CACHE") == "1":
+        return None
+    import hashlib
+    import versiya
+    о = hashlib.sha256()
+    for часть in (versiya.ВЕРСИЯ, sys.platform, " ".join(команда), " ".join(флаги), " ".join(библиотеки)):
+        о.update(часть.encode("utf-8", "surrogatepass") + b"\0")
+    # сам компилятор: путь, размер и время изменения (обновлённый компилятор - другая сборка)
+    for путь in [к for к in команда if os.path.isfile(к)] + [б for б in библиотеки if os.path.isfile(б)]:
+        с = os.stat(путь)
+        о.update(f"{путь}|{с.st_size}|{с.st_mtime_ns}".encode("utf-8", "surrogatepass") + b"\0")
+    о.update(код_c.encode("utf-8", "surrogatepass"))
+    return о.hexdigest()
+
+
+def взять_из_кэша(ключ, путь_exe):
+    готовый = os.path.join(папка_кэша(), ключ + (".exe" if os.name == "nt" else ""))
+    if not os.path.isfile(готовый):
+        return False
+    try:
+        if os.path.exists(путь_exe):
+            os.remove(путь_exe)
+        shutil.copyfile(готовый, путь_exe)
+        shutil.copymode(готовый, путь_exe)
+        os.utime(готовый)             # недавно использованный не удаляется первым
+        return True
+    except OSError:
+        return False
+
+
+def положить_в_кэш(ключ, путь_exe):
+    папка = папка_кэша()
+    try:
+        os.makedirs(папка, exist_ok=True)
+        цель = os.path.join(папка, ключ + (".exe" if os.name == "nt" else ""))
+        временный = цель + f".{os.getpid()}.tmp"
+        shutil.copyfile(путь_exe, временный)
+        shutil.copymode(путь_exe, временный)
+        os.replace(временный, цель)
+        файлы = [os.path.join(папка, и) for и in os.listdir(папка) if not и.endswith(".tmp")]
+        if len(файлы) > КЭШ_НАИБОЛЬШЕ:
+            файлы.sort(key=lambda п: os.stat(п).st_mtime)
+            for п in файлы[:len(файлы) - КЭШ_НАИБОЛЬШЕ]:
+                os.remove(п)
+    except OSError:
+        pass                          # кэш - только ускорение: без него сборка всё равно удалась
+
+
 def собрать(путь, исходник, малый=False, сжать=False, отладка=False):
     """Собирает исполняемый файл рядом с исходным. Возвращает путь к нему."""
     код_c = перевести(исходник, путь, отладка)
@@ -438,11 +506,16 @@ def собрать(путь, исходник, малый=False, сжать=Fals
     if отладка:
         флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-s"] + ["-O0", "-g"]
     библиотеки = библиотеки_программы(код_c, os.path.dirname(os.path.abspath(путь)), команда)
+    ключ = ключ_кэша(код_c, команда, флаги, библиотеки) if not сжать else None
+    if ключ and взять_из_кэша(ключ, путь_exe):
+        return путь_exe
     результат = _скомпилировать([*команда, *флаги], путь_c, путь_exe, библиотеки)
     if результат.returncode != 0:
         raise ОшибкаСборки("компилятор C сообщил об ошибке. Это ошибка самого компилятора Дан, "
                            "а не вашей программы; сохраните файл " + путь_c +
                            " для разбора.\n" + результат.stderr.strip())
+    if ключ:
+        положить_в_кэш(ключ, путь_exe)
     if сжать:
         было, стало = сжать_программу(путь_exe)
         print(f"Сжато упаковщиком UPX: {было} -> {стало} байт ({100 - стало * 100 // было}% меньше)")
