@@ -62,7 +62,8 @@ class ТестыMinGW(unittest.TestCase):
             команды.append(команда)
             return subprocess.CompletedProcess(команда, 0, stdout="", stderr="")
         with mock.patch.object(dan, "флаги_mingw", return_value=["-BC:\\KOROTKO\\"]), \
-             mock.patch.object(dan, "_скомпилировать", side_effect=скомпилировать):
+             mock.patch.object(dan, "_скомпилировать", side_effect=скомпилировать), \
+             mock.patch.dict(os.environ, {"DAN_COMPILER": ""}):
             import tempfile
             with tempfile.TemporaryDirectory() as папка:
                 путь = os.path.join(папка, "p.dan")

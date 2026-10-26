@@ -440,7 +440,10 @@ static double dan_nroot(double x, int64_t n, int line) {
     if (n < 1) dan_error(DAN_MSG_ROOT_DEG, line);
     if (n == 1) return x;
     if (n == 2) { if (x < 0) dan_error(DAN_MSG_ROOT, line); return sqrt(x); }
-    if (n == 3) return cbrt(x);
+    if (n == 3) {               /* cbrt не всегда даёт точный корень из точного куба: cbrt(27) = 3.0000000000000004 */
+        double r = cbrt(x), k = nearbyint(r);
+        return fabs(r - k) < 1e-9 && k * k * k == x ? k : r;
+    }
     if (x < 0) { if (n % 2 == 0) dan_error(DAN_MSG_ROOT, line); return -pow(-x, 1.0 / (double)n); }
     double r = pow(x, 1.0 / (double)n), k = nearbyint(r);
     if (fabs(r - k) < 1e-9 && pow(k, (double)n) == x) return k;

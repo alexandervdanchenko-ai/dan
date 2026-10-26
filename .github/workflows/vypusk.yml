@@ -1,7 +1,8 @@
 # Выпуск версии. Запускается кнопкой «Run workflow» на странице Actions -> «Выпуск»
-# (или отправкой метки вида v1.1). Номер версии берётся из versiya.py, описание -
-# из файла «выпуски/v<номер>.md»; создаются метка версии и страница выпуска
-# с файлами для скачивания.
+# (или отправкой метки вида v1.2). Номер версии берётся из versiya.py, описание -
+# из файла «выпуски/v<номер>.md». Собираются установщик и переносной архив для
+# Windows; создаются метка версии и страница выпуска с файлами для скачивания.
+# Если выпуск уже есть, его описание и файлы обновляются.
 name: Выпуск
 
 on:
@@ -15,35 +16,48 @@ permissions:
 jobs:
   vypusk:
     name: Страница выпуска
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v5
-      - name: Создать выпуск
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Сборка поставки
+        run: python поставка/собрать.py
+      - name: Создать или обновить выпуск
+        shell: python
         env:
           GH_TOKEN: ${{ github.token }}
-        # имена переменных оболочки - только латиницей: bash не принимает другие буквы.
-        # GitHub убирает из имён прикреплённых файлов русские буквы, поэтому файл
-        # установки прикрепляется под латинским именем install_windows.ps1.
-        # Если выпуск уже есть, его описание и файлы обновляются.
         run: |
-          version=$(python3 -c "import versiya; print(versiya.ВЕРСИЯ)")
-          tag="v$version"
-          notes="выпуски/$tag.md"
-          if [ ! -f "$notes" ]; then
-            echo "::error title=Нет описания выпуска::нужен файл $notes"
-            exit 1
-          fi
-          dir=$(mktemp -d)
-          cp установить_windows.ps1 "$dir/install_windows.ps1"
-          files=("$dir/install_windows.ps1")
-          for f in редактор/*.vsix; do [ -f "$f" ] && files+=("$f"); done
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --title "Дан $version" --notes-file "$notes"
-            for old in $(gh release view "$tag" --json assets -q '.assets[].name'); do
-              case "$old" in install_windows.ps1|*.vsix) ;; *) gh release delete-asset "$tag" "$old" -y ;; esac
-            done
-            gh release upload "$tag" "${files[@]}" --clobber
-          else
-            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "Дан $version" \
-              --notes-file "$notes" --latest
-          fi
+          import glob, os, shutil, subprocess, tempfile
+          import versiya
+          версия = versiya.ВЕРСИЯ
+          метка = "v" + версия
+          описание = os.path.join("выпуски", метка + ".md")
+          if not os.path.isfile(описание):
+              print(f"::error title=Нет описания выпуска::нужен файл {описание}")
+              raise SystemExit(1)
+          # GitHub убирает из имён прикреплённых файлов русские буквы: имена латиницей
+          папка = tempfile.mkdtemp()
+          shutil.copy("установить_windows.ps1", os.path.join(папка, "install_windows.ps1"))
+          файлы = [os.path.join(папка, "install_windows.ps1")]
+          файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-setup.exe"))
+          файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-windows.zip"))
+          файлы += glob.glob(os.path.join("редактор", "*.vsix"))
+          def gh(*а, проверять=True):
+              return subprocess.run(["gh", *а], check=проверять, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+          if gh("release", "view", метка, проверять=False).returncode == 0:
+              gh("release", "edit", метка, "--title", "Дан " + версия, "--notes-file", описание)
+              нужные = {os.path.basename(ф) for ф in файлы}
+              for имя in gh("release", "view", метка, "--json", "assets", "-q", ".assets[].name").stdout.split():
+                  if имя not in нужные:
+                      gh("release", "delete-asset", метка, имя, "-y")
+              gh("release", "upload", метка, *файлы, "--clobber")
+          else:
+              gh("release", "create", метка, *файлы, "--target", os.environ["GITHUB_SHA"],
+                 "--title", "Дан " + версия, "--notes-file", описание, "--latest")
+          print("выпуск", метка, "готов:", ", ".join(os.path.basename(ф) for ф in файлы))
