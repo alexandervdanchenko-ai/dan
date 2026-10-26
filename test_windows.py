@@ -32,7 +32,7 @@ def выполнить_в_windows(текст, ввод_данных=""):
         with open(путь_c, "w", encoding="utf-8") as ф:
             ф.write(код_c)
         окна = ["-mwindows"] if "#define DAN_GUI 1" in код_c else []
-        сборка = subprocess.run([MINGW, *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o", exe,
+        сборка = subprocess.run([MINGW, *dan.флаги_mingw(MINGW), *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o", exe,
                                  "-lm", "-Wl,--stack,67108864", *окна], capture_output=True, text=True)
         if сборка.returncode:
             raise AssertionError("сборка для Windows не удалась:\n" + сборка.stderr)
@@ -118,7 +118,7 @@ class ТестыСборкиДляWindows(unittest.TestCase):
             путь_c = os.path.join(папка, "p.c")
             with open(путь_c, "w", encoding="utf-8") as ф:
                 ф.write(код_c)
-            сборка = subprocess.run([MINGW, *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o",
+            сборка = subprocess.run([MINGW, *dan.флаги_mingw(MINGW), *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o",
                                      os.path.join(папка, "p.exe"), "-lm", "-mwindows",
                                      "-luser32", "-lgdi32", "-lcomdlg32"], capture_output=True, text=True)
             self.assertEqual(сборка.returncode, 0, сборка.stderr[-3000:])
