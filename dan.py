@@ -172,8 +172,7 @@ def собрать_веб(путь, исходник, малый=False):
         ф.write(код_c)
     флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф not in ("-fno-asynchronous-unwind-tables",)] + \
         (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ) + ["-Wl,-z,stack-size=8388608"]
-    результат = subprocess.run([*найти_компилятор_wasm(), *флаги, путь_c, "-o", путь_wasm],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    результат = _скомпилировать([*найти_компилятор_wasm(), *флаги], путь_c, путь_wasm, [])
     if результат.returncode != 0:
         raise ОшибкаСборки("компилятор C для WebAssembly сообщил об ошибке. Это ошибка самого компилятора Дан, "
                            "а не вашей программы; сохраните файл " + путь_c + " для разбора.\n" + результат.stderr.strip())
@@ -239,6 +238,56 @@ def выполнить_wasm(путь_wasm, аргументы):
     return итог["код"]
 
 
+def _путь_ascii(путь):
+    """Короткое имя Windows (8.3) для пути с русскими буквами или None."""
+    try:
+        import ctypes
+        буфер = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.kernel32.GetShortPathNameW(путь, буфер, len(буфер)) and буфер.value.isascii():
+            return буфер.value
+    except Exception:
+        pass
+    return None
+
+
+def _скомпилировать(команда, путь_c, путь_exe, после):
+    """Запускает компилятор C: команда + [путь_c, "-o", путь_exe] + после.
+    Компилятор MinGW в Windows передаёт имена файлов в кодировке системы и не
+    может записать файл с русскими буквами в имени, если система не русская.
+    Поэтому в Windows такие файлы собираются во временной папке с латинским
+    именем и переносятся на место."""
+    if os.name != "nt" or (путь_c + путь_exe).isascii():
+        return subprocess.run([*команда, путь_c, "-o", путь_exe, *после],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+    import tempfile
+    папка = None
+    for где in (None, os.environ.get("PUBLIC"), os.environ.get("SystemDrive", "C:") + "\\"):
+        try:
+            п = tempfile.mkdtemp(prefix="dan", dir=где)
+        except OSError:
+            continue
+        к = п if п.isascii() else _путь_ascii(п)
+        if к:
+            папка = (п, к)
+            break
+        shutil.rmtree(п, ignore_errors=True)
+    if папка is None:       # нет ни одной папки с латинским именем: пробуем как есть
+        return subprocess.run([*команда, путь_c, "-o", путь_exe, *после],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+    настоящая, короткая = папка
+    try:
+        shutil.copyfile(путь_c, os.path.join(настоящая, "p.c"))
+        итог = subprocess.run([*команда, os.path.join(короткая, "p.c"), "-o", os.path.join(короткая, "p.exe"), *после],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if итог.returncode == 0:
+            if os.path.exists(путь_exe):
+                os.remove(путь_exe)
+            shutil.move(os.path.join(настоящая, "p.exe"), путь_exe)
+        return итог
+    finally:
+        shutil.rmtree(настоящая, ignore_errors=True)
+
+
 def собрать_для(путь, исходник, система, малый=False):
     """Собирает программу для другой системы компилятором zig. Возвращает путь к файлу."""
     if система not in СИСТЕМЫ:
@@ -263,8 +312,7 @@ def собрать_для(путь, исходник, система, малый
         библиотеки.append("-pthread")
     if система == "linux" and "#define DAN_NET 1" in код_c:
         библиотеки.append("-ldl")
-    результат = subprocess.run([*zig, "-target", цель, *флаги, путь_c, "-o", путь_exe, *библиотеки],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    результат = _скомпилировать([*zig, "-target", цель, *флаги], путь_c, путь_exe, библиотеки)
     if результат.returncode != 0:
         raise ОшибкаСборки("компилятор zig сообщил об ошибке. Это ошибка самого компилятора Дан, а не вашей программы; "
                            "сохраните файл " + путь_c + " для разбора.\n" + результат.stderr.strip())
@@ -281,19 +329,18 @@ def собрать(путь, исходник, малый=False, сжать=Fals
         ф.write(код_c)
     компилятор = найти_компилятор()
     флаги = ФЛАГИ_ОБЩИЕ + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
+    if отладка:
+        флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-s"] + ["-O0", "-g"]
     if sys.platform == "darwin":
         # компоновщик macOS удаляет неиспользуемый код своим параметром
         флаги = [ф if ф != "-Wl,--gc-sections" else "-Wl,-dead_strip" for ф in флаги]
-    if отладка:
-        флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-s"] + ["-O0", "-g"]
     библиотеки = БИБЛИОТЕКИ + (["-pthread"] if "DAN_TASKS" in код_c and os.name != "nt" else [])
     библиотеки += библиотеки_c(код_c, os.path.dirname(os.path.abspath(путь)))
     if "#define DAN_GUI 1" in код_c and os.name == "nt":
         библиотеки.append("-mwindows")    # программа с окнами: без окна консоли за ним
     if "#define DAN_NET 1" in код_c and os.name != "nt":
         библиотеки.append("-ldl")        # загрузка libcurl (в новых glibc dlopen уже в самой libc)
-    результат = subprocess.run([компилятор, *флаги, путь_c, "-o", путь_exe, *библиотеки],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    результат = _скомпилировать([компилятор, *флаги], путь_c, путь_exe, библиотеки)
     if результат.returncode != 0:
         raise ОшибкаСборки("компилятор C сообщил об ошибке. Это ошибка самого компилятора Дан, "
                            "а не вашей программы; сохраните файл " + путь_c +
