@@ -19,6 +19,10 @@
 
 Параметры для «собрать» и «запустить»:
     --малый   оптимизировать программу по размеру, а не по скорости
+    --веб     собрать в WebAssembly: файл .wasm и страница .html для браузера
+              (нужен компилятор zig: pip install ziglang)
+    --для=система   собрать для другой системы: windows, linux, macos (Apple M1 и новее),
+              macos-intel (нужен компилятор zig: pip install ziglang)
     --сжать   сжать готовую программу упаковщиком UPX (алгоритм LZMA):
               файл становится в 2-3 раза меньше и запускается как обычно
 
@@ -104,6 +108,159 @@ def библиотеки_c(код_c, папка):
     return итог
 
 
+def найти_zig():
+    """Команда «zig cc» (компилятор C, умеющий собирать для любой системы) или None."""
+    zig = shutil.which("zig")
+    if zig:
+        return [zig, "cc"]
+    try:
+        import importlib.util
+        if importlib.util.find_spec("ziglang"):
+            return [sys.executable, "-m", "ziglang", "cc"]
+    except ImportError:
+        pass
+    return None
+
+
+# Сборка для другой системы (--для=...): цель zig и окончание имени файла.
+СИСТЕМЫ = {
+    "windows": ("x86_64-windows-gnu", "-windows.exe"),
+    "linux": ("x86_64-linux-gnu.2.28", "-linux"),
+    "macos": ("aarch64-macos", "-macos"),
+    "macos-intel": ("x86_64-macos", "-macos-intel"),
+}
+
+
+def найти_компилятор_wasm():
+    """Команда компилятора C для WebAssembly (WASI): zig или clang с WASI SDK."""
+    zig = найти_zig()
+    if zig:
+        return [*zig, "-target", "wasm32-wasi"]
+    sdk = os.environ.get("WASI_SDK_PATH")
+    if sdk and shutil.which("clang"):
+        return [shutil.which("clang"), "--target=wasm32-wasi", f"--sysroot={os.path.join(sdk, 'share', 'wasi-sysroot')}"]
+    raise ОшибкаСборки("для сборки программы в WebAssembly нужен компилятор zig. Установите его командой:\n"
+                       "  pip install ziglang\n"
+                       "(или укажите в переменной WASI_SDK_PATH папку WASI SDK для clang)")
+
+
+def собрать_веб(путь, исходник, малый=False):
+    """Собирает программу в WebAssembly: файл .wasm (WASI) и страницу .html для браузера."""
+    import veb
+    код_c = перевести(исходник, путь)
+    if "#define DAN_TASKS 1" in код_c:
+        raise ОшибкаСборки("параллельные задачи (запустить, параллельно, каналы) пока не поддерживаются "
+                           "в программах для WebAssembly")
+    if "#define DAN_GUI 1" in код_c:
+        raise ОшибкаСборки("окна (подключить \"окна\") есть только в программах для Windows")
+    if "__asm__(DAN_SYM(" in код_c:
+        raise ОшибкаСборки("функции библиотек C («внешняя») пока не поддерживаются в программах для WebAssembly: "
+                           "там другие размеры чисел C, и вызов с неточными типами останавливает программу")
+    основа = os.path.splitext(путь)[0]
+    путь_c, путь_wasm, путь_html = основа + ".c", основа + ".wasm", основа + ".html"
+    with open(путь_c, "w", encoding="utf-8") as ф:
+        ф.write(код_c)
+    флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф not in ("-fno-asynchronous-unwind-tables",)] + \
+        (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ) + ["-Wl,-z,stack-size=8388608"]
+    результат = subprocess.run([*найти_компилятор_wasm(), *флаги, путь_c, "-o", путь_wasm],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if результат.returncode != 0:
+        raise ОшибкаСборки("компилятор C для WebAssembly сообщил об ошибке. Это ошибка самого компилятора Дан, "
+                           "а не вашей программы; сохраните файл " + путь_c + " для разбора.\n" + результат.stderr.strip())
+    with open(путь_wasm, "rb") as ф:
+        байты = ф.read()
+    with open(путь_html, "w", encoding="utf-8") as ф:
+        ф.write(veb.страница(байты, os.path.basename(основа)))
+    return путь_wasm, путь_html
+
+
+def выполнить_wasm(путь_wasm, аргументы):
+    """Выполняет модуль WebAssembly исполнителем wasmtime (модуль Python или программа)."""
+    try:
+        import wasmtime
+    except ImportError:
+        wasmtime = None
+    if wasmtime is None:
+        программа = shutil.which("wasmtime")
+        if not программа:
+            raise ОшибкаСборки("для запуска программы WebAssembly здесь нужен исполнитель wasmtime "
+                               "(pip install wasmtime); страницу .html можно открыть в браузере")
+        return subprocess.run([программа, "run", "-W", "max-wasm-stack=33554432", "--dir=.", путь_wasm,
+                               *аргументы]).returncode
+    import threading
+    # Стек исполнителя (2 МБ) рассчитан так, чтобы глубокую рекурсию останавливала проверка
+    # Дана с понятным сообщением, а не сам исполнитель.
+    настройки_движка = wasmtime.Config()
+    настройки_движка.max_wasm_stack = 2 * 1024 * 1024
+    движок = wasmtime.Engine(настройки_движка)
+    хранилище = wasmtime.Store(движок)
+    связи = wasmtime.Linker(движок)
+    связи.define_wasi()
+    настройки = wasmtime.WasiConfig()
+    настройки.argv = [os.path.basename(путь_wasm), *аргументы]
+    настройки.inherit_stdin()
+    настройки.inherit_stdout()
+    настройки.inherit_stderr()
+    настройки.preopen_dir(".", ".")
+    хранилище.set_wasi(настройки)
+    модуль = wasmtime.Module.from_file(движок, путь_wasm)
+    экземпляр = связи.instantiate(хранилище, модуль)
+    sys.stdout.flush()
+    итог = {"код": 0}
+
+    def выполнить():
+        try:
+            экземпляр.exports(хранилище)["_start"](хранилище)
+        except wasmtime.ExitTrap as выход:
+            итог["код"] = выход.code
+        except wasmtime.Trap as о:
+            print(f"Ошибка выполнения: программа WebAssembly остановлена исполнителем ({о.message.splitlines()[0]})",
+                  file=sys.stderr)
+            итог["код"] = 1
+
+    прежний = threading.stack_size()
+    threading.stack_size(256 * 1024 * 1024)
+    try:
+        поток = threading.Thread(target=выполнить)
+        поток.start()
+        поток.join()
+    finally:
+        threading.stack_size(прежний)
+    return итог["код"]
+
+
+def собрать_для(путь, исходник, система, малый=False):
+    """Собирает программу для другой системы компилятором zig. Возвращает путь к файлу."""
+    if система not in СИСТЕМЫ:
+        raise ОшибкаСборки(f"неизвестная система «{система}»; можно: {', '.join(СИСТЕМЫ)}")
+    zig = найти_zig()
+    if not zig:
+        raise ОшибкаСборки("для сборки программы для другой системы нужен компилятор zig. Установите его командой:\n"
+                           "  pip install ziglang")
+    цель, окончание = СИСТЕМЫ[система]
+    код_c = перевести(исходник, путь)
+    основа = os.path.splitext(путь)[0]
+    путь_c, путь_exe = основа + ".c", основа + окончание
+    with open(путь_c, "w", encoding="utf-8") as ф:
+        ф.write(код_c)
+    флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-Wl,--gc-sections"] + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
+    библиотеки = ["-lm"]
+    if система == "windows":
+        библиотеки.append("-Wl,--stack,67108864")
+        if "#define DAN_GUI 1" in код_c:
+            библиотеки.append("-Wl,--subsystem,windows")
+    elif "DAN_TASKS" in код_c:
+        библиотеки.append("-pthread")
+    if система == "linux" and "#define DAN_NET 1" in код_c:
+        библиотеки.append("-ldl")
+    результат = subprocess.run([*zig, "-target", цель, *флаги, путь_c, "-o", путь_exe, *библиотеки],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if результат.returncode != 0:
+        raise ОшибкаСборки("компилятор zig сообщил об ошибке. Это ошибка самого компилятора Дан, а не вашей программы; "
+                           "сохраните файл " + путь_c + " для разбора.\n" + результат.stderr.strip())
+    return путь_exe
+
+
 def собрать(путь, исходник, малый=False, сжать=False, отладка=False):
     """Собирает исполняемый файл рядом с исходным. Возвращает путь к нему."""
     код_c = перевести(исходник, путь, отладка)
@@ -114,6 +271,9 @@ def собрать(путь, исходник, малый=False, сжать=Fals
         ф.write(код_c)
     компилятор = найти_компилятор()
     флаги = ФЛАГИ_ОБЩИЕ + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
+    if sys.platform == "darwin":
+        # компоновщик macOS удаляет неиспользуемый код своим параметром
+        флаги = [ф if ф != "-Wl,--gc-sections" else "-Wl,-dead_strip" for ф in флаги]
     if отладка:
         флаги = [ф for ф in ФЛАГИ_ОБЩИЕ if ф != "-s"] + ["-O0", "-g"]
     библиотеки = БИБЛИОТЕКИ + (["-pthread"] if "DAN_TASKS" in код_c and os.name != "nt" else [])
@@ -168,9 +328,14 @@ def main(аргументы):
         if номер is not None:
             для_программы = аргументы[номер + 1:]
             аргументы = аргументы[:номер + 1]
+    система = None
+    for а in list(аргументы):
+        if а.startswith("--для="):
+            система = а[len("--для="):]
+            аргументы.remove(а)
     параметры = {а for а in аргументы if а.startswith("--")}
     аргументы = [а for а in аргументы if not а.startswith("--")]
-    неизвестные = параметры - {"--малый", "--сжать", "--проверить"}
+    неизвестные = параметры - {"--малый", "--сжать", "--проверить", "--веб"}
     if len(аргументы) != 2 or аргументы[0] not in КОМАНДЫ or неизвестные:
         if неизвестные:
             print(f"Неизвестный параметр: {', '.join(sorted(неизвестные))}\n")
@@ -205,6 +370,16 @@ def main(аргументы):
             исполняемый = собрать(путь, исходник, отладка=True)
             sys.stdout.flush()
             return subprocess.run([os.path.abspath(исполняемый), *для_программы]).returncode
+        elif команда == "собрать" and система:
+            исполняемый = собрать_для(путь, исходник, система, малый)
+            print(f"Готово: {исполняемый} ({os.path.getsize(исполняемый)} байт) для системы {система}")
+        elif команда in ("собрать", "запустить") and "--веб" in параметры:
+            путь_wasm, путь_html = собрать_веб(путь, исходник, малый)
+            if команда == "собрать":
+                print(f"Готово: {путь_wasm} ({os.path.getsize(путь_wasm)} байт) и страница {путь_html} "
+                      f"(открывается в браузере)")
+            else:
+                return выполнить_wasm(путь_wasm, для_программы)
         elif команда == "собрать":
             исполняемый = собрать(путь, исходник, малый, сжать)
             print(f"Готово: {исполняемый} ({os.path.getsize(исполняемый)} байт)")

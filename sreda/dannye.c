@@ -731,6 +731,10 @@ __declspec(dllimport) BOOLEAN __stdcall SystemFunction036(PVOID buffer, ULONG le
 static void dan_random(uint8_t *out, size_t n, int line) {
 #ifdef _WIN32
     if (!SystemFunction036(out, (ULONG)n)) dan_error(DAN_MSG_RANDOM, line);
+#elif defined(__wasi__)
+    /* WebAssembly: random numbers of the host (getentropy gives at most 256 bytes at a time) */
+    for (size_t done = 0; done < n; done += 256)
+        if (getentropy(out + done, n - done < 256 ? n - done : 256) != 0) dan_error(DAN_MSG_RANDOM, line);
 #else
     FILE *f = fopen("/dev/urandom", "rb");
     if (!f || fread(out, 1, n, f) != n) dan_error(DAN_MSG_RANDOM, line);

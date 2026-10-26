@@ -144,6 +144,7 @@ def найти(имя):
     "DAN_TXT_RX_BIG": "шаблон слишком велик",
     "DAN_TXT_NET_NOCURL": "для работы с сетью нужна библиотека libcurl, но она не найдена (в Ubuntu и Debian "
                           "её устанавливает пакет libcurl4, в Fedora - libcurl)",
+    "DAN_TXT_NET_WASM": "в программе для WebAssembly запросы HTTP недоступны",
     "DAN_TXT_NET_NOWINHTTP": "не удалось загрузить системную библиотеку WinHTTP",
     "DAN_TXT_NET_PROTOCOL": "адрес должен начинаться с http:// или https://",
     "DAN_TXT_NET_URL": "неверная запись адреса",

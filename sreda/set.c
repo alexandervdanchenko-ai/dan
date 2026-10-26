@@ -11,10 +11,10 @@
    holds the status code and the response headers as text («200», then
    lines «name: value» with lower-case names), the second - the body. */
 
-#ifndef _WIN32
-#include <dlfcn.h>
-#else
+#if defined(_WIN32)
 #include <winhttp.h>
+#elif !defined(__wasi__)
+#include <dlfcn.h>
 #endif
 
 #ifndef DAN_LIB_LOCK
@@ -107,7 +107,15 @@ static int dan_net_has_body(dan_str method, dan_bytes body) {
     return body->len > 0 || strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0;
 }
 
-#ifndef _WIN32
+#if defined(__wasi__)
+
+/* WebAssembly: the program has no network of its own */
+static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes body, int64_t seconds, int line) {
+    (void)method; (void)headers; (void)body; (void)seconds;
+    return dan_net_fail(url, DAN_TXT_NET_WASM, line);
+}
+
+#elif !defined(_WIN32)
 
 /* ---- libcurl ---- */
 

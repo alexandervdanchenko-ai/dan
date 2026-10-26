@@ -63,6 +63,12 @@ if (Test-Path (Join-Path $Папка ".git")) {
     git clone $Репозиторий $Папка
 }
 
+Шаг "Устанавливаю дополнительные инструменты (WebAssembly, сборка для других систем)"
+python -m pip install --upgrade --quiet ziglang wasmtime
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Не удалось установить zig и wasmtime: сборка для браузера и других систем будет недоступна, остальное работает." -ForegroundColor Yellow
+}
+
 Шаг "Проверяю работу языка"
 Set-Location $Папка
 $env:PYTHONUTF8 = "1"

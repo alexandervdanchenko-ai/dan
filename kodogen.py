@@ -199,8 +199,19 @@ static void dan_stack_error(int line) {
 #define DAN_FRAME() ((uintptr_t)&dan_probe_)
 #define DAN_UNLIKELY(x) (x)
 #endif
+#ifdef __wasi__
+/* In WebAssembly the call stack of the engine is separate from the memory
+   of the program and cannot be measured, so the depth of calls is counted:
+   10000 calls fit into the stack of every engine, browsers included. */
+#define DAN_WASM_MAX_DEPTH 10000
+static int dan_wasm_depth;
+static inline void dan_wasm_leave(int *unused) { (void)unused; dan_wasm_depth--; }
+#define DAN_STACK_CHECK(line) __attribute__((cleanup(dan_wasm_leave))) int dan_depth_guard_ = \
+    (DAN_UNLIKELY(++dan_wasm_depth > DAN_WASM_MAX_DEPTH) ? (dan_stack_error(line), 0) : 0)
+#else
 #define DAN_STACK_CHECK(line) do { char dan_probe_; (void)dan_probe_; \
     if (DAN_UNLIKELY(DAN_FRAME() < dan_stack_base - dan_stack_limit)) dan_stack_error(line); } while (0)
+#endif
 
 static void *dan_alloc(size_t n) {
     void *p = malloc(n ? n : 1);
@@ -980,6 +991,8 @@ static void dan_start(void) {
     MEMORY_BASIC_INFORMATION mbi;
     if (VirtualQuery(&here, &mbi, sizeof mbi))
         size = (uintptr_t)&here - (uintptr_t)mbi.AllocationBase;
+#elif defined(__wasi__)
+    size = (uintptr_t)8 * 1024 * 1024;    /* the stack size given to the linker (-z stack-size) */
 #else
     struct rlimit rl;
     if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
@@ -2924,12 +2937,14 @@ class Генератор:
 
         шапка = [
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
+            "#if defined(__wasi__) && !defined(_DEFAULT_SOURCE)", "#define _DEFAULT_SOURCE", "#endif",
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
               if self.нужна_система else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
             "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
-            "#ifndef _WIN32", "#include <dirent.h>", "#include <sys/resource.h>", "#endif",
+            "#ifndef _WIN32", "#include <dirent.h>", "#include <unistd.h>", "#endif",
+            "#if !defined(_WIN32) && !defined(__wasi__)", "#include <sys/resource.h>", "#endif",
             "#ifdef _WIN32", "#include <windows.h>", "#endif", "",
         ]
         шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ.items()]
@@ -2937,7 +2952,7 @@ class Генератор:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in dannye.СООБЩЕНИЯ.items()]
         if self.нужна_система:
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in sistema.СООБЩЕНИЯ.items()]
-            шапка += ["#ifndef _WIN32", "#include <sys/wait.h>", "#endif"]
+            шапка += ["#if !defined(_WIN32) && !defined(__wasi__)", "#include <sys/wait.h>", "#endif"]
         if self.нужна_сеть or self.нужна_база:
             шапка += ["#define DAN_NET 1"]
         if self.нужны_окна:

@@ -10,7 +10,7 @@
    number (text), «t» - text, «b» - bytes. The module библиотека/sqlite.dan
    turns them into values of the type sqlite.Значение. */
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__wasi__)
 #include <dlfcn.h>
 #endif
 
@@ -66,8 +66,11 @@ DAN_LIB_LOCK(dan_sq_lock);
 #define DAN_SQ_UNLOCK() DAN_LIB_RELEASE(dan_sq_lock)
 
 static void *dan_sq_sym(void *lib, const char *name) {
-#ifdef _WIN32
+#if defined(_WIN32)
     return (void *)GetProcAddress((HMODULE)lib, name);
+#elif defined(__wasi__)
+    (void)lib; (void)name;
+    return NULL;
 #else
     return dlsym(lib, name);
 #endif
@@ -77,9 +80,11 @@ static int dan_sq_load(void) {
     DAN_SQ_LOCK();
     if (dan_sq.state == 0) {
         void *lib = NULL;
-#ifdef _WIN32
+#if defined(_WIN32)
         lib = (void *)LoadLibraryW(L"winsqlite3.dll");
         if (!lib) lib = (void *)LoadLibraryW(L"sqlite3.dll");
+#elif defined(__wasi__)
+        lib = NULL;                       /* WebAssembly cannot load libraries */
 #else
         static const char *const names[] = {
 #ifdef __APPLE__

@@ -147,7 +147,11 @@ static do_s dan_env_var(dan_str name) {
 
 static int64_t dan_run(dan_str command, int line) {
     fflush(stdout);
-#ifdef _WIN32
+#if defined(__wasi__)
+    (void)command;
+    dan_error(DAN_MSG_RUN_FAILED, line);
+    return -1;
+#elif defined(_WIN32)
     wchar_t *wc = dan_wide(command);
     int r = _wsystem(wc);
     free(wc);
@@ -163,6 +167,11 @@ static int64_t dan_run(dan_str command, int line) {
 
 static dr_s dan_run_output(dan_str command, int line) {
     fflush(stdout);
+#ifdef __wasi__
+    /* WebAssembly cannot start other programs */
+    (void)command;
+    return dr_s_err(dan_strdup(DAN_MSG_RUN_FAILED), line);
+#else
 #ifdef _WIN32
     wchar_t *wc = dan_wide(command);
     FILE *p = _wpopen(wc, L"rb");
@@ -187,7 +196,9 @@ static dr_s dan_run_output(dan_str command, int line) {
     int code = _pclose(p);
 #else
     int code = pclose(p);
+#ifndef __wasi__
     if (code != -1 && WIFEXITED(code)) code = WEXITSTATUS(code);
+#endif
 #endif
     if (code != 0) {
         dan_buf_free(&b);
@@ -197,6 +208,7 @@ static dr_s dan_run_output(dan_str command, int line) {
     }
     while (b.len > 0 && b.s[b.len - 1] == '\n') b.s[--b.len] = 0;   /* the final line ends are dropped */
     return dr_s_some(dan_buf_str(&b));
+#endif
 }
 
 static void dan_exit(int64_t code) {
