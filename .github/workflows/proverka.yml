@@ -29,7 +29,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0
+          sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0 clang
+          sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
           python -m pip install pypdf reportlab openpyxl python-docx
       - name: Программы для проверки документов (macOS, Windows)
         if: runner.os != 'Linux'
@@ -45,3 +46,20 @@ jobs:
         if: failure()
         shell: bash
         run: python .github/otchet.py вывод_тестов.txt
+
+  fazzing:
+    name: Фаззинг разборщиков
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: clang с libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang fonts-dejavu-core
+          sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
+      - name: Фаззинг (по 45 секунд на каждую мишень)
+        run: python fazzing.py --секунд=45

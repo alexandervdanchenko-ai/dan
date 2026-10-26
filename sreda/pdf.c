@@ -109,6 +109,10 @@ static int dan_pnumber_at(const dan_plex *l, size_t pos, size_t e, double *v, in
     }
     if (!digits || dots > 1) return 0;
     *v = strtod(t, NULL);
+    /* numbers of a real document are far smaller; a huge number of a damaged file is limited so
+       that turning it into an integer is always defined */
+    if (*v > 1e15) *v = 1e15;
+    if (*v < -1e15) *v = -1e15;
     *integer = dots == 0;
     return 1;
 }
@@ -271,7 +275,7 @@ static dan_po *dan_pparse(dan_pdf *p, dan_plex *l, int depth) {
                 dan_pskip(&t);
                 if (t.pos < t.end && t.s[t.pos] == 'R' && (t.pos + 1 >= t.end || dan_pws(t.s[t.pos + 1]) || dan_pdelim(t.s[t.pos + 1]))) {
                     dan_po *o = dan_pnew(p, PO_REF);
-                    o->num = v; o->gen = (int)g;
+                    o->num = v; o->gen = g > 65535 || g < 0 ? 0 : (int)g;
                     l->pos = t.pos + 1;
                     return o;
                 }
@@ -664,7 +668,7 @@ static const char *dan_popen(dan_pdf *p, const uint8_t *d, size_t n) {
     if (sx) {
         dan_plex l = { d, sx, n };
         dan_po *o = dan_pparse(p, &l, 0);
-        if (o && o->t == PO_NUM && o->num >= 0) {
+        if (o && o->t == PO_NUM && o->num >= 0 && o->num < (double)p->n) {
             size_t bits = 1 << 20;
             uint8_t *seen = dan_alloc(bits);
             memset(seen, 0, bits);

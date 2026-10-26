@@ -1,0 +1,29 @@
+From: =?UTF-8?B?0J7RgtC/0YDQsNCy0LjRgtC10LvRjCDQotC10YHRgg==?= <отправитель@пример.рф>
+To: =?UTF-8?B?0J/QvtC70YPRh9Cw0YLQtdC70Yw=?= <кому@example.com>
+Subject: =?UTF-8?B?0KLQtdC80LAg0L/QuNGB0YzQvNCwIMKr0ZHQu9C60LjCuw==?=
+Date: Mon, 26 Oct 2026 11:49:56 +0300
+Message-ID: <66724958ccae4323221253a9@пример.рф>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_dan_2c8080b57b1980f7"
+
+--=_dan_2c8080b57b1980f7
+Content-Type: multipart/alternative; boundary="=_dan_2c8080b57b1980f7a"
+
+--=_dan_2c8080b57b1980f7a
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+0KLQtdC60YHRgiDQv9C40YHRjNC80LAuCtCS0YLQvtGA0LDRjyDRgdGC0YDQvtC60LAu
+--=_dan_2c8080b57b1980f7a
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PHA+0KLQtdC60YHRgjwvcD4=
+--=_dan_2c8080b57b1980f7a--
+--=_dan_2c8080b57b1980f7
+Content-Type: text/plain; charset=utf-8; name="=?UTF-8?B?0LLQu9C+0LbQtdC90LjQtS50eHQ=?="
+Content-Disposition: attachment; filename="=?UTF-8?B?0LLQu9C+0LbQtdC90LjQtS50eHQ=?="
+Content-Transfer-Encoding: base64
+
+0LLQu9C+0LbQtdC90LjQtQ==
+--=_dan_2c8080b57b1980f7--

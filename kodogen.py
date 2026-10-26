@@ -166,7 +166,23 @@ typedef const char *dan_str;
 /* with tasks: the first error stops the program, other tasks wait for the end */
 static void (*dan_on_error)(void);
 
+/* A runtime function that returns an error as a value (type «!») can catch the
+   errors of the parts it is built from: they come back to it here instead of
+   stopping the program. */
+#ifndef __wasi__                   /* WebAssembly has no setjmp: there errors always stop the program */
+static DAN_TLS jmp_buf *dan_catch;
+static DAN_TLS char dan_caught[512];
+#else
+#define dan_catch NULL
+#endif
+
 static void dan_error(const char *text, int line) {
+#ifndef __wasi__
+    if (dan_catch) {
+        snprintf(dan_caught, sizeof dan_caught, "%s", text);
+        longjmp(*dan_catch, 1);
+    }
+#endif
 #ifdef DAN_DEBUG
     dan_dbg_error(text, line);
 #endif
@@ -453,12 +469,21 @@ static bool dan_str_eq(dan_str a, dan_str b) { return strcmp(a, b) == 0; }
 
 /* ---- characters of UTF-8 strings ---- */
 
-static size_t dan_utf8_len(unsigned char c) { return c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4; }
+/* length of the character at s in bytes. Text read from files and bytes may be
+   damaged: a byte that does not start a whole UTF-8 character counts as one
+   character, so the end of the string is never passed. */
+static size_t dan_utf8_len_at(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    size_t k = p[0] < 0xC2 ? 1 : p[0] < 0xE0 ? 2 : p[0] < 0xF0 ? 3 : p[0] < 0xF5 ? 4 : 1;
+    for (size_t i = 1; i < k; i++)
+        if ((p[i] & 0xC0) != 0x80) return 1;
+    return k;
+}
 
 /* byte offset of character number i (i may equal the length: end of string) */
 static const char *dan_utf8_at(dan_str s, int64_t i) {
     const char *p = s;
-    while (i > 0 && *p) { p += dan_utf8_len((unsigned char)*p); i--; }
+    while (i > 0 && *p) { p += dan_utf8_len_at(p); i--; }
     return i == 0 ? p : NULL;
 }
 
@@ -475,7 +500,7 @@ static dan_str dan_str_sub(const char *a, const char *b) {
 static dan_str dan_str_char_at(dan_str s, int64_t i, int line) {
     const char *p = i >= 0 ? dan_utf8_at(s, i) : NULL;
     if (!p || !*p) dan_index_error(i, dan_str_len(s), line);
-    return dan_str_sub(p, p + dan_utf8_len((unsigned char)*p));
+    return dan_str_sub(p, p + dan_utf8_len_at(p));
 }
 
 /* characters a..b inclusive; b == a - 1 gives an empty string */
@@ -491,7 +516,7 @@ static int64_t dan_str_find(dan_str s, dan_str t) {
     const char *f = strstr(s, t);
     if (!f) return -1;
     int64_t n = 0;
-    for (const char *p = s; p < f; p += dan_utf8_len((unsigned char)*p)) n++;
+    for (const char *p = s; p < f; p += dan_utf8_len_at(p)) n++;
     return n;
 }
 
@@ -524,8 +549,8 @@ static dan_str dan_str_case(dan_str s, int upper) {
             i++;
             continue;
         }
-        size_t k = dan_utf8_len(c);
-        if (k == 2 && i + 1 < n) {
+        size_t k = dan_utf8_len_at((const char *)r + i);
+        if (k == 2) {
             unsigned cp = ((unsigned)(c & 0x1F) << 6) | (r[i + 1] & 0x3F);
             if (upper) {
                 if (cp >= 0x430 && cp <= 0x44F) cp -= 0x20;
@@ -635,8 +660,7 @@ static dan_str dan_quote_str(dan_str s) {
 /* Number of characters (not bytes) in a UTF-8 string. */
 static int64_t dan_str_len(dan_str s) {
     int64_t n = 0;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
-        if ((*p & 0xC0) != 0x80) n++;
+    for (const char *p = s; *p; n++) p += (unsigned char)*p < 0x80 ? 1 : dan_utf8_len_at(p);
     return n;
 }
 
@@ -2426,8 +2450,8 @@ static const struct { dan_hdr h; char s[2]; } dan_ascii_s[128] = {
 static dl_Ls *dan_str_chars(dan_str s) {
     dl_Ls *r = dl_Ls_from(0, NULL);
     for (const char *p = s; *p;) {
-        size_t k = dan_utf8_len((unsigned char)*p);
-        dl_Ls_push(r, k == 1 ? dan_ascii_s[(unsigned char)*p].s : dan_str_sub(p, p + k));
+        size_t k = dan_utf8_len_at(p);
+        dl_Ls_push(r, (unsigned char)*p < 0x80 ? dan_ascii_s[(unsigned char)*p].s : dan_str_sub(p, p + k));
         p += k;
     }
     return r;
@@ -2978,7 +3002,7 @@ class Генератор:
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
               if self.нужна_система else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
-            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>", "#include <stdarg.h>",
+            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>", "#include <stdarg.h>", "#ifndef __wasi__", "#include <setjmp.h>", "#endif",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
             "#ifndef _WIN32", "#include <dirent.h>", "#include <unistd.h>", "#endif",
             "#if !defined(_WIN32) && !defined(__wasi__)", "#include <sys/resource.h>", "#endif",
@@ -4624,8 +4648,10 @@ class Генератор:
         к, з = ключ_словаря(тип), значение_словаря(тип)
         ключи = ", ".join(self.выр(у_) for у_ in в.ключи)
         значения = ", ".join(self.выр(у_) for у_ in в.значения)
+        # приведение к типу параметра: для значений-указателей (словарь в словаре) новые gcc
+        # без него не собирают программу
         return (f"{D}_from({len(в.ключи)}, ({self.тип_c(к)}[]){{{ключи}}}, "
-                f"({self.тип_c(з)}[]){{{значения}}})")
+                f"(const {self.тип_c(з)} *)({self.тип_c(з)}[]){{{значения}}})")
 
     def в_Индекс(self, в):
         тип = в.объект.тип_выр

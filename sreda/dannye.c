@@ -775,7 +775,7 @@ static dan_bytes dan_decrypt(dan_bytes data, dan_str password, int line) {
     if (data->len < DAN_ENC_HEADER + 16 || memcmp(in, "DANC", 4) != 0) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
     if (in[4] != 1) dan_error(DAN_MSG_ENC_VERSION, line);
     uint32_t iter = dan_le32(in + 5);
-    if (iter == 0 || iter > 100000000u) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
+    if (iter == 0 || iter > DAN_ENC_ITER * 4) dan_error(DAN_MSG_NOT_ENCRYPTED, line);    /* a forged count must not hang the program */
     size_t n = (size_t)data->len - DAN_ENC_HEADER - 16;
     uint8_t key[32], tag[16];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), in + 9, 16, iter, key, 32);
@@ -1429,6 +1429,10 @@ typedef struct {
     int aes; int aes_strength; uint16_t aes_method; uint16_t aes_version;
 } dan_zip_entry;
 
+/* buffers of the archive being read: when a damaged archive is read with an error as a value
+   (dan_zip_unpack_try), they are freed after the error */
+static DAN_TLS void *dan_zip_tmp[2];
+
 static dan_zip_entry *dan_zip_entries(dan_bytes z, int64_t *count, int line) {
     const uint8_t *p = z->data;
     size_t n = (size_t)z->len;
@@ -1442,6 +1446,7 @@ static dan_zip_entry *dan_zip_entries(dan_bytes z, int64_t *count, int line) {
     uint16_t entries = dan_le16(p + eocd + 10);
     uint32_t cd_offset = dan_le32(p + eocd + 16);
     dan_zip_entry *e = dan_alloc(sizeof(dan_zip_entry) * (size_t)(entries ? entries : 1));
+    dan_zip_tmp[0] = e;
     size_t pos = cd_offset;
     for (int i = 0; i < entries; i++) {
         if (pos + 46 > n || dan_le32(p + pos) != 0x02014b50) dan_error(DAN_MSG_CORRUPT, line);
@@ -1506,6 +1511,7 @@ static uint8_t *dan_zip_entry_data(const uint8_t *p, size_t n, const dan_zip_ent
     size_t start = lh + 30 + dan_le16(p + lh + 26) + dan_le16(p + lh + 28);
     if (start + x->csize > n) dan_error(DAN_MSG_CORRUPT, line);
     uint8_t *data = dan_alloc((size_t)x->csize + 1);
+    dan_zip_tmp[1] = data;
     memcpy(data, p + start, x->csize);
     size_t dlen = x->csize;
     uint16_t method = x->method;
@@ -1534,11 +1540,21 @@ static uint8_t *dan_zip_entry_data(const uint8_t *p, size_t n, const dan_zip_ent
     }
     uint8_t *plain;
     if (method == 0) { plain = data; *plen = dlen; }
-    else if (method == 8) { plain = dan_inflate_raw(data, dlen, plen, NULL, line); free(data); }
+    else if (method == 8) {
+        /* when the error is caught, damaged data must not leave the output of inflate behind */
+        dan_inf s = { data, dlen, 0, 0, 0, NULL, 0, 0, line, dan_catch != NULL, 0 };
+        dan_inflate_into(&s);
+        free(data);
+        if (s.bad) { free(s.out); dan_zip_tmp[1] = NULL; dan_error(DAN_MSG_CORRUPT, line); }
+        plain = s.out ? s.out : dan_alloc(1);
+        *plen = s.outlen;
+        dan_zip_tmp[1] = plain;
+    }
     else { char t[32]; snprintf(t, sizeof t, "%u", method); dan_conv_error(DAN_MSG_ZIP_METHOD, t, line); return NULL; }
     if (*plen != x->usize) dan_error(DAN_MSG_CORRUPT, line);
     if (!(x->aes && x->aes_version == 2) && dan_crc32_update(0, plain, *plen) != x->crc)
         dan_error(DAN_MSG_CORRUPT, line);
+    dan_zip_tmp[1] = NULL;
     return plain;
 }
 
@@ -1584,8 +1600,29 @@ static dl_Ly *dan_zip_unpack(dan_bytes z, int line) {
         dl_Ly_push(r, dan_bytes_from_str(e[i].name));
         dl_Ly_push(r, dan_bytes_wrap(plain, (int64_t)plen));
     }
+    dan_zip_tmp[0] = NULL;
     free(e);
     return r;
+}
+
+/* the same, but a damaged archive gives an error instead of stopping the program */
+static dr_Ly dan_zip_unpack_try(dan_bytes z, int line) {
+#ifdef __wasi__
+    return dr_Ly_some(dan_zip_unpack(z, line));
+#else
+    jmp_buf here, *outer = dan_catch;
+    dan_zip_tmp[0] = dan_zip_tmp[1] = NULL;
+    if (setjmp(here)) {
+        dan_catch = outer;
+        free(dan_zip_tmp[0]); free(dan_zip_tmp[1]);
+        dan_zip_tmp[0] = dan_zip_tmp[1] = NULL;
+        return dr_Ly_err(dan_strdup(dan_caught), line);
+    }
+    dan_catch = &here;
+    dl_Ly *r = dan_zip_unpack(z, line);
+    dan_catch = outer;
+    return dr_Ly_some(r);
+#endif
 }
 
 static dl_Ls *dan_extract_zip_plain(dan_str zip_path, dan_str folder, int line) {
