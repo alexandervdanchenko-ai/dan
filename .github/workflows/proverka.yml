@@ -31,10 +31,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0 clang
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
-          python -m pip install pypdf reportlab openpyxl python-docx
+          python -m pip install pypdf reportlab openpyxl python-docx markdown
       - name: Программы для проверки документов (macOS, Windows)
         if: runner.os != 'Linux'
-        run: python -m pip install pypdf reportlab openpyxl python-docx
+        run: python -m pip install pypdf reportlab openpyxl python-docx markdown
       - name: Компилятор C
         shell: bash
         run: |

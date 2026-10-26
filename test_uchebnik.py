@@ -50,6 +50,7 @@ class ТестыУчебника(unittest.TestCase):
         for г in uchebnik.главы():
             self.assertTrue(прочитать(г).startswith(f"# Глава {int(os.path.basename(г)[:2])}."), г)
 
+    @unittest.skipUnless(__import__("importlib").util.find_spec("markdown"), "нет пакета markdown")
     def test_книга_собирается(self):
         with tempfile.TemporaryDirectory() as папка:
             uchebnik.собрать_html(папка)
