@@ -97,7 +97,7 @@ def проверить(число=1000, зерно=1, собирать=50, за�
             with open(путь_c, "w", encoding="utf-8") as ф:
                 ф.write(код)
             сборка = subprocess.run([компилятор, *dan.ФЛАГИ_ОБЩИЕ, *dan.ФЛАГИ_СКОРОСТЬ, путь_c, "-o", exe,
-                                     *dan.БИБЛИОТЕКИ], capture_output=True, text=True)
+                                     *dan.библиотеки_программы(код, папка)], capture_output=True, text=True)
             if сборка.returncode:
                 проблемы.append(("код C не собирается", т, сборка.stderr[-1000:]))
                 continue
