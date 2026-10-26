@@ -489,6 +489,7 @@ def положить_в_кэш(ключ, путь_exe):
         shutil.copymode(путь_exe, временный)
         os.replace(временный, цель)
         файлы = [os.path.join(папка, и) for и in os.listdir(папка) if not и.endswith(".tmp")]
+        файлы = [п for п in файлы if os.path.isfile(п)]      # папка «пакеты» - хранилище пакетов, не программа
         if len(файлы) > КЭШ_НАИБОЛЬШЕ:
             файлы.sort(key=lambda п: os.stat(п).st_mtime)
             for п in файлы[:len(файлы) - КЭШ_НАИБОЛЬШЕ]:

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import dan
 from paketi import команда, Проект, ОшибкаПакетов, контрольная_сумма
@@ -66,8 +67,13 @@ class ТестыПакетов(unittest.TestCase):
                                       ensure_ascii=False)}, "v0.1")
         self.проект = os.path.join(self.корень, "проект")
         os.makedirs(self.проект)
+        # пакеты запоминаются в кэше Дана: у тестов свой кэш
+        self.среда = mock.patch.dict(os.environ, {"DAN_CACHE": os.path.join(self.корень, "кэш")})
+        self.среда.start()
+        os.environ.pop("DAN_NO_CACHE", None)
 
     def tearDown(self):
+        self.среда.stop()
         self.tmp.cleanup()
 
     def выполнить(self, *аргументы):
@@ -141,6 +147,55 @@ class ТестыПакетов(unittest.TestCase):
         with self.assertRaises(ОшибкаПакетов) as о:
             Проект(self.проект).добавить("пени", self.пени, "v0.1")
         self.assertIn("согласуйте версии", str(о.exception))
+
+    def test_замороженная_установка_и_согласованность(self):
+        self.выполнить("добавить", "ставки", self.ставки, "v1.0")
+        self.assertEqual(self.выполнить("установить", "--заморожено"), 0)
+        self.assertEqual(Проект(self.проект).несогласованность(), [])
+        # в пакеты.json сменили версию, а замок не обновили
+        описание_путь = os.path.join(self.проект, "пакеты.json")
+        описание = читать(описание_путь)
+        описание["зависимости"]["ставки"]["версия"] = "v2.0"
+        записать(описание_путь, описание)
+        замок_до = читать(os.path.join(self.проект, "пакеты.замок.json"))
+        with self.assertRaises(ОшибкаПакетов) as о:
+            Проект(self.проект).установить(заморожено=True)
+        self.assertIn("ставки: в пакеты.json версия v2.0", str(о.exception))
+        self.assertEqual(читать(os.path.join(self.проект, "пакеты.замок.json")), замок_до)
+        self.assertEqual(self.выполнить("проверить"), 1)
+        # новый пакет в пакеты.json без записи в замке
+        описание["зависимости"]["ставки"]["версия"] = "v1.0"
+        описание["зависимости"]["пени"] = {"адрес": self.пени, "версия": "v0.1"}
+        записать(описание_путь, описание)
+        self.assertEqual(Проект(self.проект).несогласованность(),
+                         ["пени: есть в пакеты.json, но не записан в пакеты.замок.json"])
+        self.assertEqual(self.выполнить("установить", "--заморожено"), 1)
+        # обычная установка дописывает замок
+        self.assertEqual(self.выполнить("установить"), 0)
+        self.assertEqual(self.выполнить("установить", "--заморожено"), 0)
+
+    def test_установка_без_сети_из_кэша(self):
+        self.выполнить("добавить", "ставки", self.ставки, "v1.0")
+        сумма = читать(os.path.join(self.проект, "пакеты.замок.json"))["ставки"]["сумма"]
+        self.assertTrue(os.path.isdir(os.path.join(self.корень, "кэш", "пакеты", сумма)))
+        # репозитория больше нет: пакет ставится из кэша
+        shutil.rmtree(self.ставки)
+        shutil.rmtree(os.path.join(self.проект, "пакеты"))
+        проект = Проект(self.проект)
+        проект.установить()
+        self.assertTrue(any("(из кэша)" in с for с in проект.сообщения), проект.сообщения)
+        self.assertEqual(self.выполнить("проверить"), 0)
+        # испорченная копия в кэше не принимается
+        with open(os.path.join(self.корень, "кэш", "пакеты", сумма, "ставки.dan"), "a", encoding="utf-8") as ф:
+            ф.write("// подмена\n")
+        shutil.rmtree(os.path.join(self.проект, "пакеты"))
+        with self.assertRaises(ОшибкаПакетов) as о:
+            Проект(self.проект).установить()
+        self.assertIn("не удалось получить пакет", str(о.exception))
+        # с DAN_NO_CACHE=1 кэш не используется
+        with mock.patch.dict(os.environ, {"DAN_NO_CACHE": "1"}):
+            import paketi
+            self.assertIsNone(paketi.хранилище())
 
     def test_неверные_имя_и_адрес(self):
         with self.assertRaises(ОшибкаПакетов):
