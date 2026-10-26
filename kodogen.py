@@ -30,16 +30,20 @@ import uzly as у
 import matematika
 import vysshaya  # регистрирует функции высшей и прикладной математики
 import dannye
-from proverka import это_канал, это_задача, элемент_канала
+from proverka import это_канал, это_задача, элемент_канала, ДЛИН, КОМПЛ
 from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ, ПУСТО, НИЧЕГО, это_список, элемент,
                       это_необяз, основа, найти_в_библиотеке, это_словарь, ключ_словаря, значение_словаря,
                       это_результат, ОШИБКА, это_функция, разобрать_тип_функции, ДИАПАЗОН, НЕИЗВ)
 
 БАЗОВЫЕ_C = {ЦЕЛ: "int64_t", ДРОБ: "double", СТР: "dan_str", ЛОГ: "bool", РАЦ: "dan_rat",
-             МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void"}
-КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p", БАЙТЫ: "y", ПУСТО: "v"}
+             МН: "dan_mn", БАЙТЫ: "dan_bytes", ПУСТО: "void", ДЛИН: "dan_big", КОМПЛ: "dan_cx"}
+КОДЫ_ТИПОВ = {ЦЕЛ: "i", ДРОБ: "f", СТР: "s", ЛОГ: "b", РАЦ: "r", МН: "p", БАЙТЫ: "y", ПУСТО: "v", ДЛИН: "g",
+              КОМПЛ: "c"}
 ЗАПИСЬ = {ЦЕЛ: "dan_write_int", ДРОБ: "dan_write_float", СТР: "dan_write_str", ЛОГ: "dan_write_bool",
-          РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes"}
+          РАЦ: "dan_write_rat", МН: "dan_write_poly", БАЙТЫ: "dan_write_bytes", ДЛИН: "dan_write_big",
+          КОМПЛ: "dan_write_cx"}
+ОПЕРАЦИИ_КОМПЛ = {"+": "dan_cx_add", "-": "dan_cx_sub", "*": "dan_cx_mul", "/": "dan_cx_div"}
+ОПЕРАЦИИ_ДЛИН = {"+": "dan_big_add", "-": "dan_big_sub", "*": "dan_big_mul", "/": "dan_big_div", "%": "dan_big_mod"}
 ОПЕРАЦИИ_МН = {"+": "dan_poly_add", "-": "dan_poly_sub", "*": "dan_poly_mul", "/": "dan_poly_div",
                "%": "dan_poly_mod"}
 ЦЕЛЫЕ_ДЕЙСТВИЯ = {"+": "dan_add", "-": "dan_sub", "*": "dan_mul"}
@@ -52,6 +56,11 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
     "DAN_MSG_MOD_ZERO": "остаток от деления на ноль",
     "DAN_MSG_NO_MEMORY": "недостаточно памяти",
     "DAN_MSG_RUNTIME_NOLINE": "Ошибка выполнения: %s\n",
+    "DAN_MSG_CX_LOG_ZERO": "логарифм нуля не определён",
+    "DAN_MSG_EXT_RANGE": "число не помещается в 32-разрядное целое, которое принимает внешняя функция",
+    "DAN_MSG_BIG_HUGE": "длинное число слишком велико: больше трёх миллиардов двоичных разрядов",
+    "DAN_MSG_BIG_TO_INT": "значение длинного числа не помещается в тип цел",
+    "DAN_MSG_NOT_BIG": "«%s» - не целое число",
     "DAN_MSG_DEADLOCK": "Ошибка выполнения: взаимная блокировка - все задачи ждут друг друга, и ни одна не может продолжить:\n",
     "DAN_TXT_MAIN_WAITS": "  главная программа ждёт ",
     "DAN_TXT_TASK_WAITS": "  задача, запущенная в строке %d, ждёт ",
@@ -257,6 +266,9 @@ static inline void dan_hdr_give(dan_hdr *h, dan_destroy_fn d) {
     if (--h->rc <= 0) { h->rc = 0; dan_zct_push(h, d); }
 }
 
+#define DAN_XSTR_(x) #x
+#define DAN_XSTR(x) DAN_XSTR_(x)
+#define DAN_SYM(n) DAN_XSTR(__USER_LABEL_PREFIX__) n
 #define DAN_ID(x) (x)
 #define DAN_NOREL(x) ((void)0)
 
@@ -929,6 +941,403 @@ static void dan_start(void) {
 }
 """
 
+ДЛИННЫЕ_C = r"""
+/* ---- long integers (длинное): sign and magnitude in base 2^32 ---- */
+typedef struct { dan_hdr h; int32_t sign, n; uint32_t d[]; } dan_big_s;
+typedef const dan_big_s *dan_big;
+
+static void dan_big_destroy(dan_hdr *h) { free(h); }
+static dan_big_s *dan_big_alloc(int64_t n) {
+    if (n > 100000000) dan_error(DAN_MSG_BIG_HUGE, 0);
+    dan_big_s *b = dan_alloc(sizeof *b + sizeof(uint32_t) * (size_t)(n ? n : 1));
+    dan_hdr_new(&b->h, dan_big_destroy);
+    b->sign = 0;
+    b->n = (int32_t)n;
+    return b;
+}
+static dan_big dan_big_norm(dan_big_s *b) {
+    while (b->n > 0 && b->d[b->n - 1] == 0) b->n--;
+    if (b->n == 0) b->sign = 0;
+    return b;
+}
+static inline dan_big dan_big_share(dan_big b) { if (b) dan_hdr_share((dan_hdr *)&b->h); return b; }
+static inline void dan_big_release(dan_big b) { if (b) dan_hdr_release((dan_hdr *)&b->h, dan_big_destroy); }
+static inline void dan_big_give(dan_big b) { if (b) dan_hdr_give((dan_hdr *)&b->h, dan_big_destroy); }
+static dan_big dan_big_clone(dan_big b) {
+    dan_big_s *r = dan_alloc(sizeof *r + sizeof(uint32_t) * (size_t)(b->n ? b->n : 1));
+    dan_hdr_detached(&r->h);
+    r->sign = b->sign; r->n = b->n;
+    memcpy(r->d, b->d, sizeof(uint32_t) * (size_t)b->n);
+    return r;
+}
+
+static dan_big dan_big_from_int(int64_t v) {
+    dan_big_s *b = dan_big_alloc(2);
+    uint64_t m = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    b->d[0] = (uint32_t)m;
+    b->d[1] = (uint32_t)(m >> 32);
+    b->sign = v < 0 ? -1 : v > 0;
+    return dan_big_norm(b);
+}
+
+static int dan_mag_cmp(const uint32_t *a, int32_t an, const uint32_t *b, int32_t bn) {
+    if (an != bn) return an < bn ? -1 : 1;
+    for (int32_t i = an - 1; i >= 0; i--) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+/* |a| + |b| or |a| - |b| (|a| >= |b|) with the given sign */
+static dan_big dan_big_addmag(dan_big a, dan_big b, int32_t sign) {
+    if (a->n < b->n) { dan_big t = a; a = b; b = t; }
+    dan_big_s *r = dan_big_alloc((int64_t)a->n + 1);
+    uint64_t c = 0;
+    for (int32_t i = 0; i < a->n; i++) {
+        c += (uint64_t)a->d[i] + (i < b->n ? b->d[i] : 0);
+        r->d[i] = (uint32_t)c;
+        c >>= 32;
+    }
+    r->d[a->n] = (uint32_t)c;
+    r->sign = sign;
+    return dan_big_norm(r);
+}
+static dan_big dan_big_submag(dan_big a, dan_big b, int32_t sign) {
+    dan_big_s *r = dan_big_alloc(a->n);
+    int64_t br = 0;
+    for (int32_t i = 0; i < a->n; i++) {
+        int64_t t = (int64_t)a->d[i] - (i < b->n ? b->d[i] : 0) - br;
+        br = t < 0;
+        r->d[i] = (uint32_t)(t + (br ? ((int64_t)1 << 32) : 0));
+    }
+    r->sign = sign;
+    return dan_big_norm(r);
+}
+static dan_big dan_big_add_signed(dan_big a, dan_big b, int32_t bsign) {
+    if (b->sign == 0) return a->sign ? a : dan_big_from_int(0);
+    if (a->sign == 0) {
+        if (bsign == b->sign) return b;
+        dan_big_s *r = (dan_big_s *)dan_big_clone(b);
+        dan_hdr_new(&r->h, dan_big_destroy);
+        r->sign = bsign;
+        return r;
+    }
+    if (a->sign == bsign) return dan_big_addmag(a, b, a->sign);
+    int c = dan_mag_cmp(a->d, a->n, b->d, b->n);
+    if (c == 0) return dan_big_from_int(0);
+    return c > 0 ? dan_big_submag(a, b, a->sign) : dan_big_submag(b, a, bsign);
+}
+static dan_big dan_big_add(dan_big a, dan_big b, int line) { (void)line; return dan_big_add_signed(a, b, b->sign); }
+static dan_big dan_big_sub(dan_big a, dan_big b, int line) { (void)line; return dan_big_add_signed(a, b, -b->sign); }
+static dan_big dan_big_neg(dan_big a, int line) { return dan_big_sub(dan_big_from_int(0), a, line); }
+
+static dan_big dan_big_mul(dan_big a, dan_big b, int line) {
+    (void)line;
+    if (!a->sign || !b->sign) return dan_big_from_int(0);
+    dan_big_s *r = dan_big_alloc((int64_t)a->n + b->n);
+    memset(r->d, 0, sizeof(uint32_t) * (size_t)r->n);
+    for (int32_t i = 0; i < a->n; i++) {
+        uint64_t c = 0, x = a->d[i];
+        if (!x) continue;
+        for (int32_t j = 0; j < b->n; j++) {
+            c += x * b->d[j] + r->d[i + j];
+            r->d[i + j] = (uint32_t)c;
+            c >>= 32;
+        }
+        for (int32_t k = i + b->n; c; k++) { c += r->d[k]; r->d[k] = (uint32_t)c; c >>= 32; }
+    }
+    r->sign = a->sign * b->sign;
+    return dan_big_norm(r);
+}
+
+/* Division of magnitudes (Knuth, algorithm D): q = u / v, r = u % v. */
+static void dan_mag_divmod(const uint32_t *u, int32_t m, const uint32_t *v, int32_t n, uint32_t *q, uint32_t *r) {
+    const uint64_t B = (uint64_t)1 << 32;
+    if (n == 1) {
+        uint64_t k = 0;
+        for (int32_t j = m - 1; j >= 0; j--) {
+            uint64_t cur = (k << 32) | u[j];
+            q[j] = (uint32_t)(cur / v[0]);
+            k = cur % v[0];
+        }
+        r[0] = (uint32_t)k;
+        return;
+    }
+    int s = __builtin_clz(v[n - 1]);
+    uint32_t *vn = dan_alloc(sizeof(uint32_t) * (size_t)n), *un = dan_alloc(sizeof(uint32_t) * (size_t)(m + 1));
+    for (int32_t i = n - 1; i > 0; i--) vn[i] = (uint32_t)(((uint64_t)v[i] << s) | ((uint64_t)v[i - 1] >> (32 - s)));
+    vn[0] = (uint32_t)((uint64_t)v[0] << s);
+    un[m] = (uint32_t)((uint64_t)u[m - 1] >> (32 - s));
+    for (int32_t i = m - 1; i > 0; i--) un[i] = (uint32_t)(((uint64_t)u[i] << s) | ((uint64_t)u[i - 1] >> (32 - s)));
+    un[0] = (uint32_t)((uint64_t)u[0] << s);
+    for (int32_t j = m - n; j >= 0; j--) {
+        uint64_t num = ((uint64_t)un[j + n] << 32) | un[j + n - 1];
+        uint64_t qhat = num / vn[n - 1], rhat = num % vn[n - 1];
+        while (qhat >= B || qhat * vn[n - 2] > ((rhat << 32) | un[j + n - 2])) {
+            qhat--;
+            rhat += vn[n - 1];
+            if (rhat >= B) break;
+        }
+        int64_t k = 0, t;
+        for (int32_t i = 0; i < n; i++) {
+            uint64_t p = qhat * vn[i];
+            t = (int64_t)un[i + j] - k - (int64_t)(p & 0xFFFFFFFFu);
+            un[i + j] = (uint32_t)t;
+            k = (int64_t)(p >> 32) - (t >> 32);
+        }
+        t = (int64_t)un[j + n] - k;
+        un[j + n] = (uint32_t)t;
+        q[j] = (uint32_t)qhat;
+        if (t < 0) {
+            q[j]--;
+            k = 0;
+            for (int32_t i = 0; i < n; i++) {
+                t = (int64_t)un[i + j] + vn[i] + k;
+                un[i + j] = (uint32_t)t;
+                k = t >> 32;
+            }
+            un[j + n] = (uint32_t)((int64_t)un[j + n] + k);
+        }
+    }
+    for (int32_t i = 0; i < n - 1; i++) r[i] = (uint32_t)(((uint64_t)un[i] >> s) | ((uint64_t)un[i + 1] << (32 - s)));
+    r[n - 1] = un[n - 1] >> s;
+    free(vn);
+    free(un);
+}
+
+/* School division with remainder: a = b * q + r, 0 <= r < |b| (as for цел). */
+static void dan_big_divmod(dan_big a, dan_big b, dan_big *q, dan_big *r, int line) {
+    if (!b->sign) dan_error(DAN_MSG_DIV_ZERO, line);
+    if (dan_mag_cmp(a->d, a->n, b->d, b->n) < 0) {
+        dan_big_s *q0 = dan_big_alloc(0);
+        if (a->sign >= 0) { *q = q0; *r = a; return; }
+        /* -|a| = b * (-sign b) + (|b| - |a|) */
+        *q = dan_big_from_int(-b->sign);
+        *r = dan_big_submag(b, a, 1);
+        return;
+    }
+    dan_big_s *qq = dan_big_alloc((int64_t)a->n - b->n + 1), *rr = dan_big_alloc(b->n);
+    dan_mag_divmod(a->d, a->n, b->d, b->n, qq->d, rr->d);
+    qq->sign = 1; rr->sign = 1;
+    dan_big_norm(qq); dan_big_norm(rr);
+    if (a->sign > 0) {
+        qq->sign = qq->n ? b->sign : 0;
+        *q = qq; *r = rr;
+        return;
+    }
+    if (rr->n == 0) {
+        qq->sign = qq->n ? -b->sign : 0;
+        *q = qq; *r = rr;
+        return;
+    }
+    dan_big one = dan_big_from_int(1);
+    dan_big q1 = dan_big_add(qq, one, line);
+    dan_big_s *qs = (dan_big_s *)q1;
+    qs->sign = -b->sign;
+    *q = q1;
+    *r = dan_big_submag(b, rr, 1);
+}
+static dan_big dan_big_div(dan_big a, dan_big b, int line) { dan_big q, r; dan_big_divmod(a, b, &q, &r, line); return q; }
+static dan_big dan_big_mod(dan_big a, dan_big b, int line) { dan_big q, r; dan_big_divmod(a, b, &q, &r, line); return r; }
+
+static int dan_big_cmp(dan_big a, dan_big b) {
+    if (a->sign != b->sign) return a->sign < b->sign ? -1 : 1;
+    int c = dan_mag_cmp(a->d, a->n, b->d, b->n);
+    return a->sign < 0 ? -c : c;
+}
+static bool dan_big_eq(dan_big a, dan_big b) { return dan_big_cmp(a, b) == 0; }
+
+static dan_big dan_big_pow(dan_big a, int64_t e, int line) {
+    if (e < 0) {
+        if (a->n == 1 && a->d[0] == 1) return (a->sign > 0 || e % 2 == 0) ? dan_big_from_int(1) : a;
+        if (!a->sign) dan_error(DAN_MSG_DIV_ZERO, line);
+        dan_error(DAN_MSG_NEG_POW, line);
+    }
+    dan_big r = dan_big_from_int(1), x = a;
+    while (e > 0) {
+        if (e & 1) r = dan_big_mul(r, x, line);
+        e >>= 1;
+        if (e) x = dan_big_mul(x, x, line);
+    }
+    return r;
+}
+
+static int64_t dan_big_to_int(dan_big a, int line) {
+    if (a->n > 2) dan_error(DAN_MSG_BIG_TO_INT, line);
+    uint64_t m = a->n == 0 ? 0 : a->n == 1 ? a->d[0] : ((uint64_t)a->d[1] << 32) | a->d[0];
+    if (a->sign >= 0 ? m > (uint64_t)INT64_MAX : m > (uint64_t)INT64_MAX + 1) dan_error(DAN_MSG_BIG_TO_INT, line);
+    return a->sign < 0 ? (int64_t)((uint64_t)0 - m) : (int64_t)m;
+}
+static double dan_big_to_float(dan_big a) {
+    double r = 0;
+    for (int32_t i = a->n - 1; i >= 0; i--) r = r * 4294967296.0 + a->d[i];
+    return a->sign < 0 ? -r : r;
+}
+
+static dan_str dan_big_to_str(dan_big a) {
+    if (!a->sign) return dan_strdup("0");
+    int32_t n = a->n;
+    uint32_t *t = dan_alloc(sizeof(uint32_t) * (size_t)n);
+    memcpy(t, a->d, sizeof(uint32_t) * (size_t)n);
+    size_t cap = (size_t)n * 10 + 2, len = 0;
+    char *buf = dan_alloc(cap);
+    while (n > 0) {
+        uint64_t k = 0;
+        for (int32_t j = n - 1; j >= 0; j--) {
+            uint64_t cur = (k << 32) | t[j];
+            t[j] = (uint32_t)(cur / 1000000000u);
+            k = cur % 1000000000u;
+        }
+        while (n > 0 && t[n - 1] == 0) n--;
+        for (int i = 0; i < 9 && (n > 0 || k); i++) { buf[len++] = (char)('0' + k % 10); k /= 10; }
+    }
+    if (a->sign < 0) buf[len++] = '-';
+    char *s = dan_str_new(len);
+    for (size_t i = 0; i < len; i++) s[i] = buf[len - 1 - i];
+    free(t);
+    free(buf);
+    return s;
+}
+static void dan_write_big(dan_big a) { fputs(dan_big_to_str(a), stdout); }
+
+static dan_big dan_big_from_str(dan_str s, int line) {
+    const char *p = s;
+    while (*p == ' ' || *p == '\\t') p++;
+    int neg = 0;
+    if (*p == '-' || *p == '+') neg = *p++ == '-';
+    size_t digits = 0;
+    for (const char *q = p; *q; q++) if (*q >= '0' && *q <= '9') digits++;
+    dan_big_s *r = dan_big_alloc((int64_t)(digits / 9 + 2));
+    memset(r->d, 0, sizeof(uint32_t) * (size_t)r->n);
+    int32_t used = 0, any = 0;
+    uint64_t chunk = 0, mult = 1;
+    for (;; p++) {
+        if (*p == '_' || *p == ' ') continue;
+        if (*p && (*p < '0' || *p > '9')) dan_conv_error(DAN_MSG_NOT_BIG, s, line);
+        if (*p) { any = 1; chunk = chunk * 10 + (uint64_t)(*p - '0'); mult *= 10; }
+        if (mult == 1000000000u || (!*p && mult > 1)) {
+            uint64_t c = chunk;
+            for (int32_t i = 0; i < used; i++) { c += (uint64_t)r->d[i] * mult; r->d[i] = (uint32_t)c; c >>= 32; }
+            if (c) r->d[used++] = (uint32_t)c;
+            chunk = 0; mult = 1;
+        }
+        if (!*p) break;
+    }
+    if (!any) dan_conv_error(DAN_MSG_NOT_BIG, s, line);
+    r->n = used;
+    r->sign = neg ? -1 : 1;
+    return dan_big_norm(r);
+}
+"""
+
+КОМПЛЕКСНЫЕ_C = r"""
+/* ---- complex numbers (компл) ---- */
+typedef struct { double re, im; } dan_cx;
+static inline dan_cx dan_cx_make(double re, double im) { dan_cx z; z.re = re; z.im = im; return z; }
+static inline dan_cx dan_cx_add(dan_cx a, dan_cx b, int line) { (void)line; return dan_cx_make(a.re + b.re, a.im + b.im); }
+static inline dan_cx dan_cx_sub(dan_cx a, dan_cx b, int line) { (void)line; return dan_cx_make(a.re - b.re, a.im - b.im); }
+static inline dan_cx dan_cx_mul(dan_cx a, dan_cx b, int line) {
+    (void)line;
+    return dan_cx_make(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+}
+/* division without overflow of intermediate products (Smith's method) */
+static dan_cx dan_cx_div(dan_cx a, dan_cx b, int line) {
+    if (b.re == 0 && b.im == 0) dan_error(DAN_MSG_DIV_ZERO, line);
+    if (fabs(b.re) >= fabs(b.im)) {
+        double r = b.im / b.re, d = b.re + b.im * r;
+        return dan_cx_make((a.re + a.im * r) / d, (a.im - a.re * r) / d);
+    }
+    double r = b.re / b.im, d = b.re * r + b.im;
+    return dan_cx_make((a.re * r + a.im) / d, (a.im * r - a.re) / d);
+}
+static inline dan_cx dan_cx_neg(dan_cx a) { return dan_cx_make(-a.re, -a.im); }
+static inline bool dan_cx_eq(dan_cx a, dan_cx b) { return a.re == b.re && a.im == b.im; }
+static inline double dan_cx_abs(dan_cx a) { return hypot(a.re, a.im); }
+static inline double dan_cx_arg(dan_cx a) { return atan2(a.im, a.re); }
+static inline dan_cx dan_cx_conj(dan_cx a) { return dan_cx_make(a.re, -a.im); }
+static dan_cx dan_cx_exp(dan_cx a) { double e = exp(a.re); return dan_cx_make(e * cos(a.im), e * sin(a.im)); }
+static dan_cx dan_cx_ln(dan_cx a, int line) {
+    if (a.re == 0 && a.im == 0) dan_error(DAN_MSG_CX_LOG_ZERO, line);
+    return dan_cx_make(log(dan_cx_abs(a)), dan_cx_arg(a));
+}
+/* principal square root: the real part is never negative */
+static dan_cx dan_cx_sqrt(dan_cx a) {
+    if (a.re == 0 && a.im == 0) return a;
+    double m = dan_cx_abs(a);
+    double re = sqrt((m + fabs(a.re)) / 2);
+    if (a.re >= 0) return dan_cx_make(re, a.im / (2 * re));
+    double im = a.im < 0 ? -re : re;
+    return dan_cx_make(fabs(a.im) / (2 * re), im);
+}
+/* whole powers are computed by multiplication, so (1 + i)^2 is exactly 2i */
+static dan_cx dan_cx_pow_int(dan_cx a, int64_t e, int line) {
+    if (e < 0) {
+        if (a.re == 0 && a.im == 0) dan_error(DAN_MSG_DIV_ZERO, line);
+        return dan_cx_div(dan_cx_make(1, 0), dan_cx_pow_int(a, e == INT64_MIN ? INT64_MAX : -e, line), line);
+    }
+    dan_cx r = dan_cx_make(1, 0);
+    while (e > 0) {
+        if (e & 1) r = dan_cx_mul(r, a, line);
+        e >>= 1;
+        if (e) a = dan_cx_mul(a, a, line);
+    }
+    return r;
+}
+static dan_cx dan_cx_pow(dan_cx a, dan_cx b, int line) {
+    if (b.im == 0 && b.re == floor(b.re) && fabs(b.re) < 9e18) return dan_cx_pow_int(a, (int64_t)b.re, line);
+    if (a.re == 0 && a.im == 0) {
+        if (b.re > 0) return a;
+        dan_error(DAN_MSG_DIV_ZERO, line);
+    }
+    return dan_cx_exp(dan_cx_mul(b, dan_cx_ln(a, line), line));
+}
+
+static void dan_cx_part(char *buf, size_t size, double v) {
+    dan_format_float(buf, size, v);
+    size_t n = strlen(buf);
+    if (n > 2 && buf[n - 2] == '.' && buf[n - 1] == '0') buf[n - 2] = 0;    /* 3.0 -> 3 */
+}
+/* written as in mathematics: 3 + 4i, 2 - i, 5i, -1 */
+static dan_str dan_cx_to_str(dan_cx a) {
+    char re[64], im[64], out[160];
+    double ai = a.im;
+    dan_cx_part(re, sizeof re, a.re);
+    dan_cx_part(im, sizeof im, fabs(ai));
+    const char *imp = strcmp(im, "1") == 0 ? "" : im;
+    if (ai == 0) snprintf(out, sizeof out, "%s", re);
+    else if (a.re == 0) snprintf(out, sizeof out, "%s%si", ai < 0 ? "-" : "", imp);
+    else snprintf(out, sizeof out, "%s %s %si", re, ai < 0 ? "-" : "+", imp);
+    return dan_strdup(out);
+}
+static void dan_write_cx(dan_cx a) { fputs(dan_cx_to_str(a), stdout); }
+static dan_cx dan_cx_from_str(dan_str s, int line) {
+    char *end;
+    double v = strtod(s, &end);
+    if (end == s) dan_conv_error(DAN_MSG_NOT_FLOAT, s, line);
+    return dan_cx_make(v, 0);
+}
+"""
+
+# Комплексные корни квадратного уравнения: после определения списка [компл].
+КОМПЛЕКСНЫЕ_КОРНИ_C = r"""
+static dl_Lc *dan_cx_quadratic(double a, double b, double c) {
+    dl_Lc *r = dl_Lc_from(0, NULL);
+    if (a == 0) {
+        if (b != 0) dl_Lc_push(r, dan_cx_make(-c / b, 0));
+        return r;
+    }
+    double d = b * b - 4 * a * c;
+    if (d >= 0) {
+        double s = sqrt(d);
+        dl_Lc_push(r, dan_cx_make((-b + s) / (2 * a), 0));
+        if (d > 0) dl_Lc_push(r, dan_cx_make((-b - s) / (2 * a), 0));
+    } else {
+        double s = sqrt(-d);
+        dl_Lc_push(r, dan_cx_make(-b / (2 * a), s / (2 * a)));
+        dl_Lc_push(r, dan_cx_make(-b / (2 * a), -s / (2 * a)));
+    }
+    return r;
+}
+"""
+
 # Задачи и каналы: потоки операционной системы. Значения, переданные задаче
 # или в канал, копируются, поэтому общих изменяемых данных у задач нет и
 # подсчёт мест хранения остаётся обычным (без атомарных операций). Общий
@@ -1558,7 +1967,7 @@ static bool {D}_eq(const {D} *x, const {D} *y) {{
 """
 
 # Равенство элементов списка (для «содержит» и «найти»).
-РАВЕНСТВО = {ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
+РАВЕНСТВО = {КОМПЛ: "dan_cx_eq(a, b)", ДЛИН: "dan_big_eq(a, b)", ЦЕЛ: "(a == b)", ДРОБ: "(a == b)", ЛОГ: "(a == b)", СТР: "dan_str_eq(a, b)",
              РАЦ: "(dan_rat_cmp(a, b) == 0)", МН: "dan_poly_eq(a, b)", БАЙТЫ: "dan_bytes_eq(a, b)"}
 
 ШАБЛОН_ПОИСКА = """
@@ -1703,6 +2112,8 @@ class Генератор:
         self.метка_функции = None  # отметка таблицы временных значений в начале функции
         self.метки_циклов = []     # отметки в начале шага каждого вложенного цикла
         self.нужны_задачи = False  # программа запускает задачи или пользуется каналами
+        self.нужны_длинные = False # программа пользуется длинными целыми
+        self.нужны_компл = False   # программа пользуется комплексными числами
         self.клоны = {}            # тип -> функция C, копирующая значение для другой задачи
         self.каналы = {}           # тип элементов канала -> часть имени функций C
         self.задачи_c = {}         # тип результата задачи -> структура C
@@ -1833,7 +2244,7 @@ class Генератор:
         """Хранит ли значение типа ссылки на значения в памяти, у которых
         учитываются места хранения (строки, списки, словари, ячейки и т.п.)."""
         в_работе = в_работе if в_работе is not None else set()
-        if тип in (СТР, БАЙТЫ) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
+        if тип in (СТР, БАЙТЫ, ДЛИН) or это_список(тип) or это_словарь(тип) or это_функция(тип) \
                 or тип in self.перечисления or это_результат(тип) or self.по_ссылке(тип) or это_канал(тип):
             return True
         if это_необяз(тип):
@@ -1855,6 +2266,9 @@ class Генератор:
             return "dan_str_" + действие
         if тип == БАЙТЫ:
             return "dan_bytes_" + действие
+        if тип == ДЛИН:
+            self.нужны_длинные = True
+            return "dan_big_" + действие
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan_" + действие
@@ -1946,6 +2360,10 @@ class Генератор:
         return self.перечисления_c[тип]
 
     def тип_c(self, тип):
+        if тип == ДЛИН:
+            self.нужны_длинные = True
+        if тип == КОМПЛ:
+            self.нужны_компл = True
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan *"
@@ -2022,7 +2440,7 @@ class Генератор:
             return self.значимый(тип) + "_str"
         return {ЦЕЛ: "dan_int_to_str", ДРОБ: "dan_float_to_str", РАЦ: "dan_rat_to_str",
                 ЛОГ: "dan_bool_to_str", СТР: "dan_quote_str", МН: "dan_poly_to_str",
-                БАЙТЫ: "dan_bytes_show"}[тип]
+                БАЙТЫ: "dan_bytes_show", ДЛИН: "dan_big_to_str", КОМПЛ: "dan_cx_to_str"}[тип]
 
     # ---------- имена и вывод ----------
 
@@ -2054,8 +2472,11 @@ class Генератор:
         self.рекурсивные = рекурсивные_функции(функции)
         прочие = [и for и in программа.инструкции if not isinstance(и, у.Функция)]
 
+        внешние = self._внешние_функции(программа)
         # Сначала генерируется тело программы: при этом выясняется,
         # какие типы списков нужны, и их определения ставятся выше.
+        if внешние:
+            self.строки += внешние
         if функции:
             self.пиши("/* ---- program functions ---- */")
             for ф in функции:
@@ -2110,6 +2531,10 @@ class Генератор:
         части = ["\n".join(шапка), СРЕДА]
         if self.нужны_задачи:
             части.append(ЗАДАЧИ_C)
+        if self.нужны_длинные:
+            части.append(ДЛИННЫЕ_C)
+        if self.нужны_компл:
+            части.append(КОМПЛЕКСНЫЕ_C)
         self._собрать_все_типы()
         части.append(self._определения_типов())
         части.append(self._определения_задач())
@@ -2151,6 +2576,8 @@ class Генератор:
         части.append(self._функции_перечислений())
         части.append(self._функции_расширения())
         части.append("\n".join(self.помощники.values()))
+        if "[компл]" in self.списки:
+            части.append(КОМПЛЕКСНЫЕ_КОРНИ_C)
         части.append(self._функции_клонов())
         части.append(self._функции_каналов())
         части.append(self._функции_задач())
@@ -2528,6 +2955,8 @@ class Генератор:
             return "dan_str_clone"
         if тип == БАЙТЫ:
             return "dan_bytes_clone"
+        if тип == ДЛИН:
+            return "dan_big_clone"
         if это_канал(тип):
             self.канал_c(тип)
             return "dan_chan_clone"
@@ -2767,6 +3196,53 @@ class Генератор:
             return f"(dan_rat_cmp({а}, {б}) == 0)"
         raise ValueError(шаблон)
 
+    ВНЕШНИЕ_C = {"цел": "int64_t", "цел32": "int32_t", "дроб": "double", "дроб32": "float", "лог": "int",
+                 "стр": "const char *", "стр?": "const char *"}
+
+    def _внешние_функции(self, программа):
+        """Функции библиотек C: объявление под служебным именем и обёртка с типами Дана."""
+        строки = []
+        for блок in программа.инструкции:
+            if not isinstance(блок, у.ВнешнийБлок):
+                continue
+            if блок.библиотека:
+                строки.append(f"/* DAN_LINK: {блок.библиотека} */")
+            for ф in блок.функции:
+                self.счётчик += 1
+                служебное = f"dan_ext_{self.счётчик}"
+                рез = ф.тип_результата
+                рез_c = self.ВНЕШНИЕ_C.get(рез, "void") if рез else "void"
+                параметры_c = ", ".join(self.ВНЕШНИЕ_C[п.тип] for п in ф.параметры) or "void"
+                строки.append(f"extern {рез_c} {служебное}({параметры_c}) __asm__(DAN_SYM({строка_c(ф.имя_c)}));")
+                тип_дана = {"цел32": ЦЕЛ, "дроб32": ДРОБ}
+                параметры = ", ".join(f"{self.тип_c(тип_дана.get(п.тип, п.тип))} a{и}" for и, п in enumerate(ф.параметры))
+                проверки, аргументы = [], []
+                for и, п in enumerate(ф.параметры):
+                    if п.тип == "цел32":
+                        проверки.append(f"if (a{и} < INT32_MIN || a{и} > INT32_MAX) dan_error(DAN_MSG_EXT_RANGE, {ф.строка});")
+                        аргументы.append(f"(int32_t)a{и}")
+                    elif п.тип == "дроб32":
+                        аргументы.append(f"(float)a{и}")
+                    elif п.тип == "лог":
+                        аргументы.append(f"(int)a{и}")
+                    else:
+                        аргументы.append(f"a{и}")
+                вызов = f"{служебное}({', '.join(аргументы)})"
+                if not рез:
+                    возврат, тип_р = f"{вызов};", "void"
+                elif рез == "стр":
+                    возврат, тип_р = f"const char *r = {вызов}; return r ? dan_strdup(r) : dan_empty_s.s;", "dan_str"
+                elif рез == "стр?":
+                    о = self.тип_c("стр?")
+                    возврат, тип_р = f"const char *r = {вызов}; return r ? {о}_some(dan_strdup(r)) : {о}_none();", о
+                elif рез == "лог":
+                    возврат, тип_р = f"return {вызов} != 0;", "bool"
+                else:
+                    тип_р = self.тип_c(тип_дана.get(рез, рез))
+                    возврат = f"return ({тип_р}){вызов};"
+                строки.append(f"static {тип_р} {self.имя(ф.имя)}({параметры or 'void'}) {{ {' '.join(проверки)} {возврат} }}")
+        return строки
+
     def _заголовок(self, ф):
         результат = self.тип_c(ф.тип_результата) if ф.тип_результата else "void"
         параметры = ", ".join(f"{self.тип_c(п.тип)} const {self.имя(п.имя)}" for п in ф.параметры)
@@ -2984,6 +3460,9 @@ class Генератор:
 
     def и_ОбъявлениеВариантов(self, и):
         pass
+
+    def и_ВнешнийБлок(self, и):
+        pass                       # объявления функций C стоят перед функциями программы
 
     def и_Выбор(self, и):
         тип = и.значение.тип_выр
@@ -3441,6 +3920,14 @@ class Генератор:
             return f"dan_rat_to_float({код})" if из_типа == РАЦ else f"((double)({код}))"
         if в_тип == РАЦ and из_типа == ЦЕЛ:
             return f"dan_rat_from_int({код}, {строка})"
+        if в_тип == ДЛИН and из_типа == ЦЕЛ:
+            self.нужны_длинные = True
+            return f"dan_big_from_int({код})"
+        if в_тип == КОМПЛ:
+            self.нужны_компл = True
+            if из_типа == РАЦ:
+                return f"dan_cx_make(dan_rat_to_float({код}), 0)"
+            return f"dan_cx_make((double)({код}), 0)"
         return код
 
     def в_ЦелоеЧисло(self, в):
@@ -3474,6 +3961,10 @@ class Генератор:
             return f"dan_poly_neg({self.выр(в.операнд)}, {в.строка})"
         if в.оператор == "-" and в.тип_выр == ЦЕЛ:
             return f"dan_neg({self.выр(в.операнд)}, {в.строка})"
+        if в.оператор == "-" and в.тип_выр == ДЛИН:
+            return f"dan_big_neg({self.выр(в.операнд)}, {в.строка})"
+        if в.оператор == "-" and в.тип_выр == КОМПЛ:
+            return f"dan_cx_neg({self.выр(в.операнд)})"
         оп = "-" if в.оператор == "-" else "!"
         return f"({оп}{self.выр(в.операнд)})"
 
@@ -3491,6 +3982,12 @@ class Генератор:
                 return f"dan_pow_int({л}, {п}, {в.строка})"
             if в.тип_выр == РАЦ:
                 return f"dan_rat_pow({л}, {п}, {в.строка})"
+            if в.тип_выр == ДЛИН:
+                return f"dan_big_pow({л}, {п}, {в.строка})"
+            if в.тип_выр == КОМПЛ:
+                if (getattr(в.правый, "привести_к", None) or в.правый.тип_выр) == ЦЕЛ:
+                    return f"dan_cx_pow_int({л}, {п}, {в.строка})"
+                return f"dan_cx_pow({л}, {п}, {в.строка})"
             if в.тип_выр == МН:
                 return f"dan_poly_pow({л}, {п}, {в.строка})"
             return f"pow({л}, {п})"
@@ -3518,6 +4015,11 @@ class Генератор:
             return равно if оп == "==" else f"(!{равно})"
         if getattr(в, "тип_операндов", None) == РАЦ:
             return f"(dan_rat_cmp({л}, {п}) {оп} 0)"
+        if getattr(в, "тип_операндов", None) == ДЛИН:
+            return f"(dan_big_cmp({л}, {п}) {оп} 0)"
+        if getattr(в, "тип_операндов", None) == КОМПЛ:
+            равно = f"dan_cx_eq({л}, {п})"
+            return равно if оп == "==" else f"(!{равно})"
         if getattr(в, "тип_операндов", None) == МН:
             равно = f"dan_poly_eq({л}, {п})"
             return равно if оп == "==" else f"(!{равно})"
@@ -3531,6 +4033,10 @@ class Генератор:
             return f"dan_bytes_concat({л}, {п})"
         if тип == РАЦ:
             return f"{ОПЕРАЦИИ_РАЦ[оп]}({л}, {п}, {строка})"
+        if тип == ДЛИН:
+            return f"{ОПЕРАЦИИ_ДЛИН[оп]}({л}, {п}, {строка})"
+        if тип == КОМПЛ:
+            return f"{ОПЕРАЦИИ_КОМПЛ[оп]}({л}, {п}, {строка})"
         if тип == МН:
             return f"{ОПЕРАЦИИ_МН[оп]}({л}, {п}, {строка})"
         if тип == ЦЕЛ:
@@ -3585,6 +4091,9 @@ class Генератор:
         тип = в.объект.тип_выр
         if getattr(в, "свойство_задачи", False):
             return f"dan_task_ready(&{self.выр(в.объект)}.t)"
+        if тип == КОМПЛ:
+            return {"вещ": "({}).re", "мним": "({}).im", "модуль": "dan_cx_abs({})", "аргумент": "dan_cx_arg({})",
+                    "сопряженное": "dan_cx_conj({})"}[в.имя].format(self.выр(в.объект))
         if тип in self.собственные:
             return f"({self.выр(в.объект)}).{self.поле_c(тип, в.имя)}"
         if тип == РАЦ:
@@ -3687,7 +4196,10 @@ class Генератор:
             return f"dan_bytes_from_list({аргументы[0]}, {в.строка})"
         if имя == РАЦ and len(аргументы) == 2:
             return f"dan_rat_of({аргументы[0]}, {аргументы[1]}, {в.строка})"
-        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ, БАЙТЫ):
+        if имя == КОМПЛ and len(аргументы) == 2:
+            self.нужны_компл = True
+            return f"dan_cx_make({аргументы[0]}, {аргументы[1]})"
+        if имя in (СТР, ЦЕЛ, ДРОБ, РАЦ, БАЙТЫ, ДЛИН, КОМПЛ):
             return self._преобразование(имя, в.аргументы[0].тип_выр, аргументы[0], в.строка)
         return f"{self.имя(имя)}({', '.join(аргументы)})"
 
@@ -3757,6 +4269,20 @@ class Генератор:
     def _преобразование(self, куда, откуда, значение, строка):
         if куда == откуда:
             return значение
+        if КОМПЛ in (куда, откуда):
+            self.нужны_компл = True
+            if куда == СТР:
+                return f"dan_cx_to_str({значение})"
+            return self.привести(значение, откуда, КОМПЛ, строка)
+        if ДЛИН in (куда, откуда):
+            self.нужны_длинные = True
+            if куда == ДЛИН:
+                return f"dan_big_from_int({значение})" if откуда == ЦЕЛ else f"dan_big_from_str({значение}, {строка})"
+            if куда == ЦЕЛ:
+                return f"dan_big_to_int({значение}, {строка})"
+            if куда == ДРОБ:
+                return f"dan_big_to_float({значение})"
+            return f"dan_big_to_str({значение})"
         if куда == СТР and (это_необяз(откуда) or откуда in self.собственные):
             return self.в_строку(откуда, значение)
         if куда == СТР and откуда in self.перечисления:

@@ -17,6 +17,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -80,6 +81,20 @@ def сжать_программу(путь_exe):
     return было, os.path.getsize(путь_exe)
 
 
+def библиотеки_c(код_c, папка):
+    """Библиотеки C, которые подключает программа («внешняя "m" { ... }»): параметры компоновщика."""
+    итог = []
+    for имя in re.findall(r"^/\* DAN_LINK: (.+) \*/$", код_c, re.M):
+        if any(имя.endswith(р) for р in (".a", ".so", ".dll", ".lib", ".o")) or "/" in имя or "\\" in имя:
+            путь = имя if os.path.isabs(имя) else os.path.join(папка, имя)
+            параметр = путь
+        else:
+            параметр = "-l" + имя
+        if параметр not in итог:
+            итог.append(параметр)
+    return итог
+
+
 def собрать(путь, исходник, малый=False, сжать=False):
     """Собирает исполняемый файл рядом с исходным. Возвращает путь к нему."""
     код_c = перевести(исходник, путь)
@@ -91,6 +106,7 @@ def собрать(путь, исходник, малый=False, сжать=Fals
     компилятор = найти_компилятор()
     флаги = ФЛАГИ_ОБЩИЕ + (ФЛАГИ_РАЗМЕР if малый else ФЛАГИ_СКОРОСТЬ)
     библиотеки = БИБЛИОТЕКИ + (["-pthread"] if "DAN_TASKS" in код_c and os.name != "nt" else [])
+    библиотеки += библиотеки_c(код_c, os.path.dirname(os.path.abspath(путь)))
     результат = subprocess.run([компилятор, *флаги, путь_c, "-o", путь_exe, *библиотеки],
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
     if результат.returncode != 0:
