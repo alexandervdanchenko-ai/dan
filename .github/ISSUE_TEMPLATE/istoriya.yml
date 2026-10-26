@@ -1,0 +1,22 @@
+name: История задачи
+description: Что хотелось сделать на Дане и где было неудобно - без требований к форме
+labels: ["история задачи"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Расскажите своими словами о настоящей задаче. Готовое решение придумывать не нужно: из нескольких таких историй потом складывается предложение.
+  - type: textarea
+    id: hotel
+    attributes:
+      label: Что вы хотели сделать
+      description: Например, «собрать данные из двадцати таблиц Excel в одну»
+    validations:
+      required: true
+  - type: textarea
+    id: neudobno
+    attributes:
+      label: Где было неудобно или непонятно
+      description: Можно приложить программу, которая получилась, и сообщение об ошибке
+    validations:
+      required: false
