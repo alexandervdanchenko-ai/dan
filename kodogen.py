@@ -121,6 +121,10 @@ from proverka import (ЦЕЛ, ДРОБ, СТР, ЛОГ, РАЦ, МН, БАЙТЫ
                        "используйте рац(а) ^ н или дробное число",
     "DAN_TXT_BYTES": "байты",
     "DAN_TRUE": "истина",
+    "DAN_TEST_PASSED": "пройден: %s\n",
+    "DAN_TEST_FAILED": "ПРОВАЛЕН: %s (строка %d): %s\n",
+    "DAN_TEST_FAILED_FILE": "ПРОВАЛЕН: %s (%s, строка %d): %s\n",
+    "DAN_TEST_TOTAL": "Тестов: %d, пройдено: %d, провалено: %d\n",
     "DAN_FALSE": "ложь",
 }
 
@@ -172,6 +176,7 @@ static void (*dan_on_error)(void);
 #ifndef __wasi__                   /* WebAssembly has no setjmp: there errors always stop the program */
 static DAN_TLS jmp_buf *dan_catch;
 static DAN_TLS char dan_caught[512];
+static DAN_TLS int dan_caught_line;
 #else
 #define dan_catch NULL
 #endif
@@ -180,6 +185,7 @@ static void dan_error(const char *text, int line) {
 #ifndef __wasi__
     if (dan_catch) {
         snprintf(dan_caught, sizeof dan_caught, "%s", text);
+        dan_caught_line = line;
         longjmp(*dan_catch, 1);
     }
 #endif
@@ -3041,6 +3047,9 @@ class Генератор:
             self.функция(ф)
             self.пиши()
 
+        if getattr(self, "тесты", False):
+            self._главная_тестов([ф for ф in функции if getattr(ф, "тест", None)])
+            return self._собрать_текст(программа, место_лямбд)
         self.пиши("int main(int argc, char **argv) {")
         self.отступ += 1
         self.пиши("dan_argc = argc; dan_argv = argv; dan_start();")
@@ -3059,6 +3068,42 @@ class Генератор:
             self.строки[место_запуска] += " dan_tasks_init();"
         self.отступ -= 1
         self.пиши("}")
+        return self._собрать_текст(программа, место_лямбд)
+
+    def _главная_тестов(self, тесты):
+        """main сборки для «dan тестировать»: тесты по очереди; ошибка теста не останавливает остальные."""
+        self.пиши("int main(int argc, char **argv) {")
+        self.отступ += 1
+        self.пиши("dan_argc = argc; dan_argv = argv; dan_start();" + (" dan_tasks_init();" if self.нужны_задачи else ""))
+        self.пиши("int dan_failed = 0;")
+        self.пиши("#ifndef __wasi__")
+        self.пиши("jmp_buf dan_here;")
+        for ф in тесты:
+            название = строка_c(ф.тест)
+            self.пиши("{")
+            self.пиши("    const size_t dan_m = dan_mark();")
+            self.пиши("    if (!setjmp(dan_here)) {")
+            self.пиши(f"        dan_catch = &dan_here; {self.имя(ф.имя)}(); dan_catch = NULL;")
+            self.пиши(f"        printf(DAN_TEST_PASSED, {название});")
+            self.пиши("    } else {")
+            self.пиши("        dan_catch = NULL; dan_failed++;")
+            self.пиши("        int l = dan_caught_line;")
+            self.пиши("        if (l >= DAN_FILE_STEP && l / DAN_FILE_STEP < DAN_FILE_COUNT)")
+            self.пиши(f"            printf(DAN_TEST_FAILED_FILE, {название}, dan_files[l / DAN_FILE_STEP], l % DAN_FILE_STEP, dan_caught);")
+            self.пиши(f"        else printf(DAN_TEST_FAILED, {название}, l, dan_caught);")
+            self.пиши("    }")
+            self.пиши("    dan_sweep(dan_m);")
+            self.пиши("    fflush(stdout);")
+            self.пиши("}")
+        self.пиши(f"printf(DAN_TEST_TOTAL, {len(тесты)}, {len(тесты)} - dan_failed, dan_failed);")
+        self.пиши("#else")
+        self.пиши('fputs("тесты в программе для WebAssembly не выполняются\\n", stderr); dan_failed = 1;')
+        self.пиши("#endif")
+        self.пиши("return dan_failed ? 1 : 0;")
+        self.отступ -= 1
+        self.пиши("}")
+
+    def _собрать_текст(self, программа, место_лямбд):
         if self.лямбды_код:
             self.строки[место_лямбд:место_лямбд] = ["/* ---- anonymous functions ---- */"] + self.лямбды_код
 
@@ -4995,8 +5040,10 @@ class Генератор:
         return f"dan_str_to_float({значение}, {строка})"
 
 
-def сгенерировать(программа, отладка=False):
-    """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика."""
+def сгенерировать(программа, отладка=False, тесты=False):
+    """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика;
+    «тесты» - сборка, которая выполняет тесты программы вместо неё самой."""
     генератор = Генератор()
     генератор.отладка = отладка
+    генератор.тесты = тесты
     return генератор.программа(программа)

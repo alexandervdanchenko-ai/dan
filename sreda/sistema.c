@@ -808,3 +808,37 @@ static int64_t dan_char_code(dan_str s, int line) {
     const char *p = s;
     return dan_utf8_decode(&p);
 }
+
+
+/* ==== утверждения ==== */
+
+static void dan_assert(bool ok, int line) { if (!ok) dan_error(DAN_MSG_ASSERT, line); }
+static void dan_assert_msg(bool ok, dan_str why, int line) { if (!ok) dan_error(why, line); }
+
+static void dan_assert_fail(const char *got, const char *want, int line) {
+    size_t n = strlen(got) + strlen(want) + 64;
+    char *m = malloc(n);
+    if (!m) dan_error(DAN_MSG_ASSERT, line);
+    snprintf(m, n, DAN_TXT_ASSERT_EQ, want, got);
+    dan_error(m, line);           /* the text is copied by the error: the block is left to the system */
+}
+static void dan_assert_eq_int(int64_t got, int64_t want, int line) {
+    if (got != want) dan_assert_fail(dan_int_to_str(got), dan_int_to_str(want), line);
+}
+static void dan_assert_eq_float(double got, double want, int line) {
+    if (!(got == want || (got != got && want != want)))
+        dan_assert_fail(dan_float_to_str(got), dan_float_to_str(want), line);
+}
+static void dan_assert_eq_str(dan_str got, dan_str want, int line) {
+    if (strcmp(got, want) != 0) {
+        size_t a = strlen(got) + 3, b = strlen(want) + 3;
+        char *g = malloc(a + 4), *w = malloc(b + 4);
+        if (!g || !w) dan_error(DAN_MSG_ASSERT, line);
+        snprintf(g, a + 4, "\"%s\"", got);
+        snprintf(w, b + 4, "\"%s\"", want);
+        dan_assert_fail(g, w, line);
+    }
+}
+static void dan_assert_eq_bool(bool got, bool want, int line) {
+    if (got != want) dan_assert_fail(got ? DAN_TRUE : DAN_FALSE, want ? DAN_TRUE : DAN_FALSE, line);
+}
