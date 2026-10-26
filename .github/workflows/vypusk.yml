@@ -1,0 +1,26 @@
+# Выпуск версии: при отправке метки вида v1.1 GitHub создаёт страницу выпуска
+# с описанием из файла «выпуски/<метка>.md» и файлами для скачивания.
+name: Выпуск
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  vypusk:
+    name: Страница выпуска
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Создать выпуск
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          номер="${TAG#v}"
+          файлы=("установить_windows.ps1")
+          for ф in редактор/*.vsix; do [ -f "$ф" ] && файлы+=("$ф"); done
+          gh release create "$TAG" "${файлы[@]}" --title "Дан $номер" --notes-file "выпуски/$TAG.md" --latest
