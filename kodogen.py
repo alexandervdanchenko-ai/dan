@@ -2559,6 +2559,7 @@ class Генератор:
         self.отладочные_записи = {}
         self.нужна_система = False # программа пользуется системной библиотекой
         self.нужна_сеть = False    # программа выполняет запросы HTTP
+        self.нужен_pdf = False     # программа читает или создаёт PDF
         self.нужна_база = False    # программа работает с базой данных SQLite
         self.нужны_окна = False    # программа создаёт окна
         self.клоны = {}            # тип -> функция C, копирующая значение для другой задачи
@@ -2977,7 +2978,7 @@ class Генератор:
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
               if self.нужна_система else []),
             "#include <stdint.h>", "#include <inttypes.h>", "#include <stdbool.h>",
-            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>",
+            "#include <stdio.h>", "#include <stdlib.h>", "#include <string.h>", "#include <stddef.h>", "#include <ctype.h>", "#include <stdarg.h>",
             "#include <errno.h>", "#include <math.h>", "#include <time.h>", "#include <sys/stat.h>",
             "#ifndef _WIN32", "#include <dirent.h>", "#include <unistd.h>", "#endif",
             "#if !defined(_WIN32) && !defined(__wasi__)", "#include <sys/resource.h>", "#endif",
@@ -3080,6 +3081,8 @@ class Генератор:
         части.append(self._функции_задач())
         if self.нужны_данные:
             части.append(dannye.код_c())
+            if self.нужен_pdf:
+                части.append(dannye.код_pdf())
         if self.нужна_система:
             части.append(sistema.код_c())
         if self.нужна_сеть:
@@ -4738,6 +4741,8 @@ class Генератор:
             _, описание = найти_в_библиотеке(каноническое)
             if описание.get("модуль") == "данные":
                 self.включить_данные()
+                if описание.get("часть") == "pdf":
+                    self.нужен_pdf = True
             elif описание.get("модуль") == "система":
                 self.включить_систему()
                 if описание.get("часть") == "сеть" and not self.нужна_сеть:

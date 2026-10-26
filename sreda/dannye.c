@@ -1116,16 +1116,21 @@ typedef struct {
     uint32_t bitbuf; int bitcnt;
     uint8_t *out; size_t outlen, outcap;
     int line;
+    int soft, bad;      /* soft: damaged data does not stop the program, bad is set and output is kept */
 } dan_inf;
 
 typedef struct { int16_t count[16]; int16_t symbol[288]; } dan_huff;
 
-static void dan_inf_fail(dan_inf *s) { dan_error(DAN_MSG_CORRUPT, s->line); }
+static void dan_inf_fail(dan_inf *s) {
+    if (!s->soft) dan_error(DAN_MSG_CORRUPT, s->line);
+    s->bad = 1;
+}
 
 static int dan_inf_bits(dan_inf *s, int need) {
+    if (s->bad) return 0;
     uint32_t v = s->bitbuf;
     while (s->bitcnt < need) {
-        if (s->pos >= s->inlen) dan_inf_fail(s);
+        if (s->pos >= s->inlen) { dan_inf_fail(s); return 0; }
         v |= (uint32_t)s->in[s->pos++] << s->bitcnt;
         s->bitcnt += 8;
     }
@@ -1135,6 +1140,8 @@ static int dan_inf_bits(dan_inf *s, int need) {
 }
 
 static void dan_inf_put(dan_inf *s, uint8_t b) {
+    if (s->bad) return;
+    if (s->soft && s->outlen >= ((size_t)1 << 29)) { s->bad = 1; return; }     /* more than 512 MB: a "bomb" */
     if (s->outlen == s->outcap) { s->outcap = s->outcap ? s->outcap * 2 : 65536; s->out = dan_realloc(s->out, s->outcap); }
     s->out[s->outlen++] = b;
 }
@@ -1156,6 +1163,7 @@ static int dan_huff_decode(dan_inf *s, const dan_huff *h) {
     int code = 0, first = 0, index = 0;
     for (int len = 1; len < 16; len++) {
         code |= dan_inf_bits(s, 1);
+        if (s->bad) return 256;
         int count = h->count[len];
         if (code - count < first) return h->symbol[index + (code - first)];
         index += count;
@@ -1164,22 +1172,22 @@ static int dan_huff_decode(dan_inf *s, const dan_huff *h) {
         code <<= 1;
     }
     dan_inf_fail(s);
-    return -1;
+    return 256;
 }
 
 static void dan_inf_codes(dan_inf *s, const dan_huff *lc, const dan_huff *dc) {
-    for (;;) {
+    while (!s->bad) {
         int sym = dan_huff_decode(s, lc);
         if (sym < 256) { dan_inf_put(s, (uint8_t)sym); continue; }
         if (sym == 256) return;
         sym -= 257;
-        if (sym >= 29) dan_inf_fail(s);
+        if (sym >= 29) { dan_inf_fail(s); return; }
         size_t len = dan_len_base[sym] + (size_t)dan_inf_bits(s, dan_len_extra[sym]);
         int ds = dan_huff_decode(s, dc);
-        if (ds >= 30) dan_inf_fail(s);
+        if (ds >= 30) { dan_inf_fail(s); return; }
         size_t dist = dan_dist_base[ds] + (size_t)dan_inf_bits(s, dan_dist_extra[ds]);
-        if (dist > s->outlen) dan_inf_fail(s);
-        while (len--) dan_inf_put(s, s->out[s->outlen - dist]);
+        if (dist > s->outlen || dist == 0) { dan_inf_fail(s); return; }
+        while (len-- && !s->bad) dan_inf_put(s, s->out[s->outlen - dist]);
     }
 }
 
@@ -1191,11 +1199,11 @@ static void dan_inflate_into(dan_inf *s) {
         if (type == 0) {
             s->bitbuf = 0;
             s->bitcnt = 0;
-            if (s->pos + 4 > s->inlen) dan_inf_fail(s);
+            if (s->pos + 4 > s->inlen) { dan_inf_fail(s); return; }
             unsigned len = s->in[s->pos] | s->in[s->pos + 1] << 8;
             unsigned nlen = s->in[s->pos + 2] | s->in[s->pos + 3] << 8;
             s->pos += 4;
-            if (len != (~nlen & 0xFFFF) || s->pos + len > s->inlen) dan_inf_fail(s);
+            if (len != (~nlen & 0xFFFF) || s->pos + len > s->inlen) { dan_inf_fail(s); return; }
             for (unsigned i = 0; i < len; i++) dan_inf_put(s, s->in[s->pos + i]);
             s->pos += len;
         } else if (type == 1) {
@@ -1211,32 +1219,33 @@ static void dan_inflate_into(dan_inf *s) {
             dan_inf_codes(s, &fl, &fd);
         } else if (type == 2) {
             int nlen = dan_inf_bits(s, 5) + 257, ndist = dan_inf_bits(s, 5) + 1, ncode = dan_inf_bits(s, 4) + 4;
-            if (nlen > 286 || ndist > 30) dan_inf_fail(s);
+            if (nlen > 286 || ndist > 30) { dan_inf_fail(s); return; }
             uint8_t lengths[320] = { 0 };
             for (int i = 0; i < ncode; i++) lengths[dan_cl_order[i]] = (uint8_t)dan_inf_bits(s, 3);
             dan_huff lencode, lc, dc;
-            if (dan_huff_build(&lencode, lengths, 19) != 0) dan_inf_fail(s);
+            if (dan_huff_build(&lencode, lengths, 19) != 0) { dan_inf_fail(s); return; }
             int idx = 0;
-            while (idx < nlen + ndist) {
+            while (idx < nlen + ndist && !s->bad) {
                 int sym = dan_huff_decode(s, &lencode);
                 if (sym < 16) { lengths[idx++] = (uint8_t)sym; continue; }
                 int len = 0, rep;
-                if (sym == 16) { if (idx == 0) dan_inf_fail(s); len = lengths[idx - 1]; rep = 3 + dan_inf_bits(s, 2); }
+                if (sym == 16) { if (idx == 0) { dan_inf_fail(s); return; } len = lengths[idx - 1]; rep = 3 + dan_inf_bits(s, 2); }
                 else if (sym == 17) rep = 3 + dan_inf_bits(s, 3);
                 else rep = 11 + dan_inf_bits(s, 7);
-                if (idx + rep > nlen + ndist) dan_inf_fail(s);
+                if (idx + rep > nlen + ndist) { dan_inf_fail(s); return; }
                 while (rep--) lengths[idx++] = (uint8_t)len;
             }
-            if (lengths[256] == 0) dan_inf_fail(s);
-            if (dan_huff_build(&lc, lengths, nlen) < 0) dan_inf_fail(s);
-            if (dan_huff_build(&dc, lengths + nlen, ndist) < 0) dan_inf_fail(s);
+            if (s->bad) return;
+            if (lengths[256] == 0) { dan_inf_fail(s); return; }
+            if (dan_huff_build(&lc, lengths, nlen) < 0) { dan_inf_fail(s); return; }
+            if (dan_huff_build(&dc, lengths + nlen, ndist) < 0) { dan_inf_fail(s); return; }
             dan_inf_codes(s, &lc, &dc);
-        } else dan_inf_fail(s);
-    } while (!last);
+        } else { dan_inf_fail(s); return; }
+    } while (!last && !s->bad);
 }
 
 static uint8_t *dan_inflate_raw(const uint8_t *in, size_t n, size_t *outlen, size_t *used, int line) {
-    dan_inf s = { in, n, 0, 0, 0, NULL, 0, 0, line };
+    dan_inf s = { in, n, 0, 0, 0, NULL, 0, 0, line, 0, 0 };
     dan_inflate_into(&s);
     *outlen = s.outlen;
     if (used) *used = s.pos;
