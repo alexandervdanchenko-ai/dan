@@ -339,10 +339,60 @@ static inline void *dan_env_clone(void *e) { return e ? ((dan_envb *)e)->c(e) : 
 
 /* Strings: the header is right before the characters. Text that did not
    come from dan_str_new (a C literal) has no header and is never freed. */
-static void dan_str_destroy(dan_hdr *h) { free(h); }
+/* Short strings (up to 55 characters with the header in 64 bytes) are the most
+   frequent objects: their blocks are kept in per-thread lists by size and
+   reused without malloc and free. A block of a pooled string is marked
+   DAN_POOLED; its class is found from the length of the text, which never
+   grows after creation (a shorter text gives a smaller class: the block is
+   only bigger than needed). Under the address sanitizer the lists are off,
+   so that it still finds use after free. */
+#define DAN_POOLED 4u
+#if defined(__SANITIZE_ADDRESS__)
+#define DAN_NO_POOL 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DAN_NO_POOL 1
+#endif
+#endif
+#ifndef DAN_NO_POOL
+#define DAN_POOL_CLASSES 4                  /* blocks of 16, 32, 48 and 64 bytes */
+#define DAN_POOL_KEEP 4096                  /* free blocks kept per class */
+typedef struct dan_pblock { struct dan_pblock *next; } dan_pblock;
+static DAN_TLS dan_pblock *dan_pool[DAN_POOL_CLASSES + 1];
+static DAN_TLS int dan_pool_n[DAN_POOL_CLASSES + 1];
+static inline int dan_pool_class(size_t bytes) { return (int)((bytes + 15) / 16); }
+#endif
+static void dan_str_destroy(dan_hdr *h) {
+#ifndef DAN_NO_POOL
+    if (h->flags & DAN_POOLED) {
+        int c = dan_pool_class(sizeof *h + strlen((const char *)(h + 1)) + 1);
+        if (dan_pool_n[c] < DAN_POOL_KEEP) {
+            dan_pblock *b = (dan_pblock *)(void *)h;
+            b->next = dan_pool[c];
+            dan_pool[c] = b;
+            dan_pool_n[c]++;
+            return;
+        }
+    }
+#endif
+    free(h);
+}
 static char *dan_str_new(size_t n) {
-    dan_hdr *h = dan_alloc(sizeof *h + n + 1);
-    dan_hdr_new(h, dan_str_destroy);
+    dan_hdr *h;
+#ifndef DAN_NO_POOL
+    size_t bytes = sizeof *h + n + 1;
+    int c = dan_pool_class(bytes);
+    if (c <= DAN_POOL_CLASSES) {
+        if (dan_pool[c]) { h = (dan_hdr *)(void *)dan_pool[c]; dan_pool[c] = dan_pool[c]->next; dan_pool_n[c]--; }
+        else h = dan_alloc((size_t)c * 16);
+        dan_hdr_new(h, dan_str_destroy);
+        h->flags |= DAN_POOLED;
+    } else
+#endif
+    {
+        h = dan_alloc(sizeof *h + n + 1);
+        dan_hdr_new(h, dan_str_destroy);
+    }
     char *s = (char *)(h + 1);
     s[n] = 0;
     return s;
@@ -672,6 +722,10 @@ static void dan_format_float(char *buf, size_t size, double v) {
     double mag = v < 0 ? -v : v;
     int start = 1;
     while (mag >= 10.0 && start < 17) { mag /= 10.0; start++; }
+    /* a normal double is read back exactly from 17 digits, and when a shorter
+       text exists, the 15-digit text is that same text: so 15, 16 and 17 digits
+       are enough. Subnormal numbers have fewer bits and are tried from start. */
+    if ((v < 0 ? -v : v) >= 2.2250738585072014e-308 && start < 15) start = 15;
     for (int prec = start; prec <= 17; prec++) {
         snprintf(buf, size, "%.*g", prec, v);
         if (strtod(buf, NULL) == v) break;
@@ -679,7 +733,16 @@ static void dan_format_float(char *buf, size_t size, double v) {
     if (!strpbrk(buf, ".eEn")) strcat(buf, ".0");
 }
 
-static void dan_write_int(int64_t v) { printf("%" PRId64, v); }
+/* decimal digits of an integer, written backwards from end; returns the start */
+static char *dan_itoa(int64_t v, char *end) {
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    *--end = 0;
+    do { *--end = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) *--end = '-';
+    return end;
+}
+
+static void dan_write_int(int64_t v) { char b[24]; fputs(dan_itoa(v, b + sizeof b), stdout); }
 static void dan_write_float(double v) { char b[64]; dan_format_float(b, sizeof b, v); fputs(b, stdout); }
 static void dan_write_bool(bool v) { fputs(v ? DAN_TRUE : DAN_FALSE, stdout); }
 
@@ -690,9 +753,12 @@ static void dan_newline(void) { putchar('\n'); }
 /* ---- conversions ---- */
 
 static dan_str dan_int_to_str(int64_t v) {
-    char b[32];
-    snprintf(b, sizeof b, "%" PRId64, v);
-    return dan_strdup(b);
+    char b[24];
+    char *p = dan_itoa(v, b + sizeof b);
+    size_t n = (size_t)(b + sizeof b - 1 - p);
+    char *r = dan_str_new(n);
+    memcpy(r, p, n + 1);
+    return r;
 }
 
 static dan_str dan_float_to_str(double v) {

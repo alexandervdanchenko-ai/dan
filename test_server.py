@@ -140,7 +140,7 @@ class ТестыСервера(unittest.TestCase):
         json_ = подсказки(11, len("пусть з = json."))
         self.assertIn("разобрать", json_)
         self.assertIn("записать_красиво", json_)
-        self.assertNotIn("разобрать_значение", json_)
+        self.assertNotIn("строка_в_текст", json_)
 
     def test_описание_и_переход(self):
         self.открыть(ПРОГРАММА)
