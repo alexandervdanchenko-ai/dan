@@ -262,6 +262,13 @@ class Дисплей:
         self.процесс.terminate()
         self.процесс.wait()
 
+    @unittest.skipUnless(os.name == "nt", "настоящие окна системы есть только в Windows")
+    def test_окна_в_windows_по_настоящему(self):
+        """В Windows программа открывает окна системы и сама нажимает свои кнопки."""
+        код, вывод, ош = выполнить(ПРОГРАММА)
+        self.assertEqual(код, 0, ош)
+        self.assertEqual([с for с in вывод.splitlines() if с != "закрытие"], ОЖИДАЕТСЯ)
+
 
 @unittest.skipUnless(test_windows.ВКЛЮЧЕНО and XVFB, "нужны DAN_WINDOWS=1, MinGW, Wine и Xvfb")
 class ТестыОконWindows(unittest.TestCase):
