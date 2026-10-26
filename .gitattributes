@@ -7,3 +7,5 @@
 *.pdf binary
 *.docx binary
 *.xlsx binary
+# образцы и находки фаззинга - точные байты
+фаззинг/** binary
