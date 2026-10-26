@@ -75,7 +75,17 @@ jobs:
         env:
           DAN_FOLDER: ${{ runner.temp }}\проекты\Дан
           DAN_NO_TESTS: "1"
-        run: powershell -ExecutionPolicy Bypass -File установить_windows.ps1
+        run: |
+          powershell -ExecutionPolicy Bypass -File установить_windows.ps1 *> установка.txt
+          $код = $LASTEXITCODE
+          Get-Content установка.txt
+          exit $код
+      - name: Вывод установки
+        if: failure()
+        shell: bash
+        run: |
+          текст=$(tail -c 6000 установка.txt | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\r//g;s/\n/%0A/g')
+          echo "::error title=Установка не удалась::$текст"
       - name: Сборка программы с русским именем в установленной папке
         shell: powershell
         env:
