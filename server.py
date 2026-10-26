@@ -26,6 +26,7 @@ import traceback
 import urllib.parse
 
 import uzly as у
+import versiya
 from lexer import разобрать as токены, ОшибкаЛексера, КЛЮЧЕВЫЕ_СЛОВА, без_ё, Т
 from parser import разобрать as дерево, ОшибкаРазбора
 from proverka import проверить, ОшибкаПроверки, найти_в_библиотеке, ВСТРОЕННЫЕ, СВОЙСТВА, МЕТОДЫ_СТР, \
@@ -277,7 +278,7 @@ class Сервер:
                 "documentSymbolProvider": True,
                 "documentFormattingProvider": True,
             },
-            "serverInfo": {"name": "Дан", "version": "0.21"},
+            "serverInfo": {"name": "Дан", "version": versiya.ВЕРСИЯ},
         }
 
     def м_initialized(self, п):

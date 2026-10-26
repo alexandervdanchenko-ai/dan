@@ -19,7 +19,8 @@ from parser import ОшибкаРазбора, разобрать
 
 def блоки(файл):
     with open(os.path.join(ПАПКА, файл), encoding="utf-8") as ф:
-        return re.findall(r"```\n(.*?)```", ф.read(), re.S)
+        # блоки с указанием языка (```ebnf - грамматика) - не программы на Дане
+        return [код for язык, код in re.findall(r"^```(\w*)\n(.*?)^```", ф.read(), re.S | re.M) if not язык]
 
 
 def сообщение(блок):
@@ -45,6 +46,25 @@ class ТестыПримеровДокументации(unittest.TestCase):
                         self.assertIsNotNone(ошибка, "пример должен показывать ошибку")
                     else:
                         self.assertIsNone(ошибка)
+
+
+class ТестыПриложенийСпецификации(unittest.TestCase):
+
+    def test_ключевые_слова_совпадают_с_лексером(self):
+        from lexer import КЛЮЧЕВЫЕ_СЛОВА
+        with open(os.path.join(ПАПКА, "spec.md"), encoding="utf-8") as ф:
+            текст = ф.read()
+        строка = re.search(r"\*\*Ключевые слова\*\* \(их нельзя использовать как имена\): (.*)", текст).group(1)
+        self.assertEqual(set(re.findall(r"`([^`]+)`", строка)), set(КЛЮЧЕВЫЕ_СЛОВА))
+        таблица = текст[текст.index("### 2.4. Ключевые слова"):текст.index("### 2.5.")]
+        self.assertEqual(set(re.findall(r"`([^`]+)`", таблица)) & set(КЛЮЧЕВЫЕ_СЛОВА), set(КЛЮЧЕВЫЕ_СЛОВА))
+
+    def test_зарезервированные_имена_совпадают_с_проверкой(self):
+        from proverka import ВСТРОЕННЫЕ
+        with open(os.path.join(ПАПКА, "spec.md"), encoding="utf-8") as ф:
+            текст = ф.read()
+        строка = re.search(r"\*\*Зарезервированные имена\*\*(.*)", текст).group(1)
+        self.assertEqual(set(re.findall(r"`([^`]+)`", строка)), set(ВСТРОЕННЫЕ))
 
 
 if __name__ == "__main__":
