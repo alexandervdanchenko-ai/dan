@@ -1471,9 +1471,16 @@ static inline void dan_prof_leave(dan_prof_frame *f) {
 }
 
 static void dan_prof_dump(void) {
+#ifdef _WIN32
+    /* the path may contain Cyrillic letters: the wide (UTF-16) variant does not depend on the code page */
+    const wchar_t *path = _wgetenv(L"DAN_PROFILE");
+    if (!path || !*path) return;
+    FILE *out = _wfopen(path, L"wb");
+#else
     const char *path = getenv("DAN_PROFILE");
     if (!path || !*path) return;
     FILE *out = fopen(path, "wb");
+#endif
     if (!out) return;
     fprintf(out, "%" PRIu64 "\n", dan_prof_now() - dan_prof_begin);
     for (int i = 0; i < DAN_PROF_COUNT; i++) {
