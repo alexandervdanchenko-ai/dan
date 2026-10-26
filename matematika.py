@@ -1239,22 +1239,67 @@ static dl_Lr *dan_solve_rat2(dan_mn a, dan_mn b, int line) { return dan_solve_ra
 
 typedef struct { double v; int exact; dan_rat r; } dan_root;
 
-/* Newton steps in extended precision from a bracketed root; the result is
-   the double closest to the true root. */
+/* Error-free transformations (Knuth, Dekker): a + b = s + e and a * b = p + e
+   exactly, in plain double arithmetic. They give the same result on every
+   processor, unlike long double (80 bits on x86, 64 bits on ARM) or fused
+   multiply-add, which the compiler is told not to use (-ffp-contract=off). */
+static void dan_two_sum(double a, double b, double *s, double *e) {
+    double x = a + b, z = x - a;
+    *e = (a - (x - z)) + (b - z);
+    *s = x;
+}
+
+static void dan_split(double a, double *h, double *l) {
+    double c = 134217729.0 * a;          /* 2^27 + 1 */
+    double big = c - a;
+    *h = c - big;
+    *l = a - *h;
+}
+
+static void dan_two_prod(double a, double b, double *p, double *e) {
+    double x = a * b, ah, al, bh, bl;
+    dan_split(a, &ah, &al);
+    dan_split(b, &bh, &bl);
+    *e = al * bl - (((x - ah * bh) - al * bh) - ah * bl);
+    *p = x;
+}
+
+/* Value of the polynomial c[0..n] at x by compensated Horner's scheme:
+   as accurate as if computed with twice the precision of double. */
+static double dan_horner_comp(const double *c, int n, double x) {
+    double s = c[n], err = 0;
+    for (int j = n - 1; j >= 0; j--) {
+        double p, pe, se;
+        dan_two_prod(s, x, &p, &pe);
+        dan_two_sum(p, c[j], &s, &se);
+        err = err * x + (pe + se);
+    }
+    return s + err;
+}
+
+/* Newton steps from a bracketed root with an accurate value of the
+   polynomial; then the neighbouring doubles are compared, so the result is
+   the double closest to the true root on every processor. */
 static double dan_polish(const double *c, int n, double x0) {
-    long double x = x0;
+    double x = x0;
     for (int it = 0; it < 10; it++) {
-        long double f = 0, d = 0;
-        for (int j = n; j >= 0; j--) { d = d * x + f; f = f * x + c[j]; }
+        double f = dan_horner_comp(c, n, x), d = 0;
+        for (int j = n; j >= 1; j--) d = d * x + c[j] * j;
         if (f == 0 || d == 0) break;
-        long double y = x - f / d;
+        double y = x - f / d;
         if (y == x) break;
         x = y;
     }
-    double r = (double)x;
-    /* if the Newton step went astray, keep the bracketed value */
-    if (r != r || fabs(r - x0) > 1e-6 * (fabs(x0) + 1)) return x0;
-    return r;
+    if (x != x || fabs(x - x0) > 1e-6 * (fabs(x0) + 1)) return x0;   /* the Newton step went astray */
+    for (int it = 0; it < 4; it++) {
+        double fx = fabs(dan_horner_comp(c, n, x));
+        double lo = nextafter(x, -INFINITY), hi = nextafter(x, INFINITY);
+        double flo = fabs(dan_horner_comp(c, n, lo)), fhi = fabs(dan_horner_comp(c, n, hi));
+        if (flo < fx && flo <= fhi) x = lo;
+        else if (fhi < fx) x = hi;
+        else break;
+    }
+    return x;
 }
 
 /* Real roots of a polynomial with double coefficients c[0..n] that have

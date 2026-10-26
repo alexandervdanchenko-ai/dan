@@ -119,7 +119,7 @@ class ТестыЛексераНаДане(unittest.TestCase):
                                timeout=600)
             self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
             путь = None
-            for строка in р.stdout.decode("utf-8").split("\n"):
+            for строка in р.stdout.decode("utf-8").replace("\r\n", "\n").split("\n"):
                 if строка.startswith("== "):
                     путь = строка[3:]
                     итог[путь] = []
@@ -236,7 +236,7 @@ class ТестыРазбораНаДане(unittest.TestCase):
                                capture_output=True, timeout=600)
             self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
             путь = None
-            for строка in р.stdout.decode("utf-8").split("\n"):
+            for строка in р.stdout.decode("utf-8").replace("\r\n", "\n").split("\n"):
                 if строка.startswith("== "):
                     путь = строка[3:]
                     итог[путь] = []
@@ -337,7 +337,7 @@ class ТестыМодулейНаДане(unittest.TestCase):
                                capture_output=True, timeout=600)
             self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
             путь = None
-            for строка in р.stdout.decode("utf-8").split("\n"):
+            for строка in р.stdout.decode("utf-8").replace("\r\n", "\n").split("\n"):
                 if строка.startswith("== "):
                     путь = строка[3:]
                     итог[путь] = []
