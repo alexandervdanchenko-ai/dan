@@ -1028,7 +1028,13 @@ class ТестыСамосборки(unittest.TestCase):
                 ф.write('для а в аргументы() { вывод("значение: " + а) }\nвывод(2 + 2)\nзавершить(3)\n')
             код, вывод_, ошибки = self.дан(self.первая, "запустить", путь, "один", "два слова")
             self.assertEqual(код, 3, вывод_ + ошибки)
-            self.assertEqual(вывод_, "значение: один\nзначение: два слова\n4\n", ошибки)
+            if вывод_ != "значение: один\nзначение: два слова\n4\n":
+                # подробности для разбора: какие файлы появились и что выводит собранная программа сама
+                файлы = sorted(os.listdir(папка))
+                exe = [ф for ф in файлы if ф.startswith("привет") and not ф.endswith((".dan", ".c"))]
+                прямо = subprocess.run([os.path.join(папка, exe[0]), "один"], capture_output=True) if exe else None
+                self.fail(f"вывод {вывод_!r}, ошибки {ошибки!r}, файлы {файлы}, "
+                          f"прямой запуск: {прямо.returncode if прямо else None} {прямо.stdout if прямо else b''!r}")
             код, вывод_, ошибки = self.дан(self.первая, "собрать", путь)
             self.assertEqual(код, 0, ошибки)
             self.assertTrue(вывод_.startswith("Готово: "), вывод_)
