@@ -1091,6 +1091,45 @@ class ТестыСамосборки(unittest.TestCase):
             код, вывод_, _ = self.дан(self.первая, "объяснить", путь + ":1")
             self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
 
+    def test_тестировать_как_у_python(self):
+        import test_testy
+        with tempfile.TemporaryDirectory() as папка:
+            файлы = {
+                "п.dan": test_testy.ПРОГРАММА,
+                "з.dan": 'функ знак(х: цел) -> стр {\n    если х > 0 {\n        вернуть "плюс"\n    }\n'
+                         '    если х < 0 { вернуть "минус" }\n    вернуть "ноль"\n}\n'
+                         'тест "плюс" { утвердить_равно(знак(5), "плюс") }\n',
+                "ошибка.dan": 'тест "т" { утвердить(1) }\n',
+                "без.dan": "вывод(1)\n",
+            }
+            for имя, текст in файлы.items():
+                with open(os.path.join(папка, имя), "w", encoding="utf-8") as ф:
+                    ф.write(текст)
+            for аргументы in (["--покрытие", "з.dan"], ["п.dan"], ["--покрытие", "."], ["без.dan"], ["ошибка.dan"]):
+                with self.subTest(аргументы=аргументы):
+                    нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "тестировать", *аргументы],
+                                           capture_output=True, timeout=600, cwd=папка, env=self.среда)
+                    код, вывод_, _ = self.дан(self.первая, "тестировать", *аргументы, папка=папка)
+                    self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
+
+    def test_замерить_и_профиль(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "з.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write('функ ф(н: цел) -> цел {\n    перем с = 0\n    для к в 1..н { с += к }\n    вернуть с\n}\n'
+                        'замер "сумма" { ф(100) }\nвывод(ф(10))\n')
+            среда = dict(self.среда, DAN_CACHE=os.path.join(папка, "кэш"))
+            р = subprocess.run([os.path.abspath(self.первая), "замерить", путь], capture_output=True, timeout=600, env=среда)
+            self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
+            self.assertRegex(р.stdout.decode("utf-8"), r"  сумма: [\d,]+ (нс|мкс|мс) \(разброс ±[\d,]+%, выполнено раз: \d+\)")
+            р = subprocess.run([os.path.abspath(self.первая), "замерить", путь], capture_output=True, timeout=600, env=среда)
+            self.assertRegex(р.stdout.decode("utf-8"), r"; в прошлый раз [\d,]+ (нс|мкс|мс)")
+            р = subprocess.run([os.path.abspath(self.первая), "профиль", путь], capture_output=True, timeout=600, env=среда)
+            self.assertEqual(р.returncode, 0, р.stderr)
+            self.assertEqual(р.stdout.decode("utf-8").replace("\r\n", "\n"), "55\n")
+            self.assertIn("Профиль: программа работала", р.stderr.decode("utf-8"))
+            self.assertRegex(р.stderr.decode("utf-8"), r"\s+1  ф \(з.dan:1\)")
+
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "привет.dan")
