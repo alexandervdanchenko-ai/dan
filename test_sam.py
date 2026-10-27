@@ -949,6 +949,46 @@ class ТестыДокументацииНаДане(unittest.TestCase):
 
 
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыОбъясненияНаДане(unittest.TestCase):
+    """Объяснение строк на Дане (сам/объяснение.dan) даёт тот же текст, что objasnenie.py, для каждой строки."""
+
+    @classmethod
+    def setUpClass(cls):
+        путь = os.path.join(САМ, "объяснения.dan")
+        with open(путь, encoding="utf-8") as ф:
+            cls.программа = dan.собрать(путь, ф.read())
+
+    def test_все_строки(self):
+        import objasnenie
+        from moduli import ОшибкаМодуля
+        файлы = (sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan")))
+                 + sorted(glob.glob(os.path.join(ПАПКА, "каталог", "программы", "*.dan")))[::4]
+                 + sorted(glob.glob(os.path.join(ПАПКА, "каталог", "ошибки", "*.dan")))[::4])
+        with tempfile.TemporaryDirectory() as папка:
+            пары = []
+            for номер, путь in enumerate(файлы):
+                пары += [путь, os.path.join(папка, f"{номер}.txt")]
+            for начало in range(0, len(пары), 40):
+                р = subprocess.run([os.path.abspath(self.программа), *пары[начало:начало + 40]], capture_output=True,
+                                   timeout=900, env=dict(os.environ, DAN_HOME=ПАПКА))
+                self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+            for номер, путь in enumerate(файлы):
+                текст = прочитать(путь)
+                части = []
+                for строка in range(1, len(текст.split("\n")) + 2):
+                    try:
+                        части.append(objasnenie.объяснить(текст, путь, строка))
+                    except (ОшибкаЛексера, ОшибкаРазбора, ОшибкаМодуля) as о:
+                        части.append("ОШИБКА " + str(о))
+                with open(os.path.join(папка, f"{номер}.txt"), encoding="utf-8") as ф:
+                    есть = ф.read().split("\n=====\n")
+                with self.subTest(файл=os.path.relpath(путь, ПАПКА)):
+                    for н, (д, п) in enumerate(zip(есть, части)):
+                        self.assertEqual(д, п, f"строка {н + 1}")
+                    self.assertEqual(len(есть), len(части))
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыСамосборки(unittest.TestCase):
     """Компилятор на Дане (сам/дан.dan) собирает сам себя: код C второй и третьей ступеней совпадает,
     а программы он проверяет, собирает и запускает так же, как компилятор на Python."""
@@ -1032,6 +1072,24 @@ class ТестыСамосборки(unittest.TestCase):
             код, вывод_, _ = self.дан(self.первая, "собрать", путь)
             self.assertEqual((код, вывод_), (1, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
             self.assertIn("так называется папка", вывод_)
+
+    def test_объяснить(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "о.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("пусть доля = 3 / 4\nдля к в 1..3 { вывод(к) }\n")
+            for аргументы in ([путь + ":1"], [путь, "2"], [путь + ":9"]):
+                with self.subTest(аргументы=аргументы):
+                    нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "объяснить", *аргументы],
+                                           capture_output=True, timeout=300, env=self.среда)
+                    код, вывод_, _ = self.дан(self.первая, "объяснить", *аргументы)
+                    self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("пусть = 3\n")
+            нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "объяснить", путь + ":1"],
+                                   capture_output=True, timeout=300, env=self.среда)
+            код, вывод_, _ = self.дан(self.первая, "объяснить", путь + ":1")
+            self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
 
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
