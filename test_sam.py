@@ -675,5 +675,122 @@ class ТестыПроверкиНаДане(unittest.TestCase):
             self.сверить(основные)
 
 
+
+# ---------- порождение кода C на Дане и самосборка ----------
+
+class ТестыТаблицСреды(unittest.TestCase):
+
+    def test_среда_совпадает_с_компилятором(self):
+        # сам/среда.dan создаётся сценарием сам/создать_среду.py из текстов компилятора на Python
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("создать_среду", os.path.join(САМ, "создать_среду.py"))
+        модуль = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(модуль)
+        with open(os.path.join(САМ, "среда.dan"), encoding="utf-8") as ф:
+            self.assertEqual(ф.read(), модуль.текст(), "тексты среды устарели: запустите python сам/создать_среду.py")
+
+
+def код_python(путь, режим=""):
+    """Код C компилятора на Python или None, если в программе есть ошибки."""
+    import kodogen
+    import proverka
+    try:
+        программа = загрузить(прочитать(путь), путь)
+        proverka.проверить(программа)
+    except Exception:
+        return None
+    return kodogen.сгенерировать(программа, отладка=режим == "отладка", тесты=режим == "тесты", профиль=режим == "профиль")
+
+
+def параметры_перевода():
+    return [f"--версия={versiya.ВЕРСИЯ}", "--редакции=" + ",".join(versiya.РЕДАКЦИИ), f"--библиотека={БИБЛИОТЕКА}",
+            f"--среда={os.path.join(ПАПКА, 'sreda')}", f"--разделитель={os.sep}"]
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыПорожденияНаДане(unittest.TestCase):
+    """Порождение кода на Дане (сам/порождение.dan) даёт код C, побайтно равный коду kodogen.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        путь = os.path.join(САМ, "перевод.dan")
+        with open(путь, encoding="utf-8") as ф:
+            cls.программа = dan.собрать(путь, ф.read())
+
+    def сверить(self, файлы, режим=""):
+        параметры = параметры_перевода() + (["--" + режим] if режим else [])
+        with tempfile.TemporaryDirectory() as папка:
+            пары = []
+            for номер, путь in enumerate(файлы):
+                пары += [путь, os.path.join(папка, f"{номер}.c")]
+            for начало in range(0, len(пары), 80):
+                р = subprocess.run([os.path.abspath(self.программа), *параметры, *пары[начало:начало + 80]],
+                                   capture_output=True, timeout=900)
+                self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+            for номер, путь in enumerate(файлы):
+                нужно = код_python(путь, режим)
+                выход = os.path.join(папка, f"{номер}.c")
+                есть = None
+                if os.path.exists(выход):
+                    with open(выход, encoding="utf-8", newline="") as ф:
+                        есть = ф.read()
+                with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь, режим=режим):
+                    if нужно != есть:
+                        self.assertIsNotNone(есть, "компилятор на Дане не создал код")
+                        self.assertIsNotNone(нужно, "компилятор на Python нашёл ошибки")
+                        for н, (д, п) in enumerate(zip(есть.split("\n"), нужно.split("\n"))):
+                            if д != п:
+                                self.fail(f"строка {н + 1}:\nДан:    {д}\nPython: {п}")
+                        self.assertEqual(len(есть), len(нужно))
+
+    def сверить_тексты(self, тексты, режим=""):
+        with tempfile.TemporaryDirectory() as папка:
+            файлы = []
+            for номер, текст in enumerate(тексты):
+                путь = os.path.join(папка, f"т{номер}.dan")
+                with open(путь, "w", encoding="utf-8", newline="") as ф:
+                    ф.write(текст)
+                файлы.append(путь)
+            self.сверить(файлы, режим)
+
+    def test_программы_репозитория(self):
+        self.сверить([os.path.abspath(п) for п in файлы_репозитория()])
+
+    def test_программы_из_тестов(self):
+        self.сверить_тексты(тексты_из_тестов())
+
+    def test_отладка_тесты_профиль(self):
+        файлы = sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan")))
+        тексты = тексты_из_тестов()
+        for режим in ("отладка", "тесты", "профиль"):
+            self.сверить(файлы, режим)
+            self.сверить_тексты(тексты[::3], режим)
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыСамосборки(unittest.TestCase):
+    """Компилятор на Дане собирает сам себя: код C второй и третьей ступеней совпадает."""
+
+    def test_вторая_и_третья_ступени(self):
+        путь = os.path.join(САМ, "перевод.dan")
+        with open(путь, encoding="utf-8") as ф:
+            исходник = ф.read()
+        первая = dan.собрать(путь, исходник)            # ступень 1: собрана компилятором на Python
+        код_0 = dan.перевести(исходник, путь)
+        with tempfile.TemporaryDirectory() as папка:
+            def перевести(программа, выход):
+                р = subprocess.run([os.path.abspath(программа), *параметры_перевода(), путь, выход],
+                                   capture_output=True, timeout=900)
+                self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+                self.assertEqual(р.stdout, b"")
+                with open(выход, encoding="utf-8", newline="") as ф:
+                    return ф.read()
+            код_2 = перевести(первая, os.path.join(папка, "ступень2.c"))
+            self.assertEqual(код_2, код_0, "ступень 1 создала не тот код, что компилятор на Python")
+            вторая = dan.собрать_код(код_2, os.path.join(папка, "ступень2"), САМ)
+            код_3 = перевести(вторая, os.path.join(папка, "ступень3.c"))
+            self.assertEqual(код_3, код_2, "код C второй и третьей ступеней различается")
+
+
 if __name__ == "__main__":
     unittest.main()
