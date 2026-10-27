@@ -142,6 +142,14 @@
     + "        if (a->items[i]->len != n) dan_error(DAN_MSG_LP_DIMS, line);\n        if (b->items[i].n < 0) dan_error(DAN_MSG_LP_RHS, line);\n    }\n    int64_t w = n + m + 1;                      /* столбцы: x, дополнительные, правая часть */\n    dan_rat *t = dan_alloc(sizeof(dan_rat) * (size_t)((m + 1) * w));\n    int64_t *basis = dan_alloc(sizeof(int64_t) * (size_t)(m ? m : 1));\n    dan_rat zero = { 0, 1 }, one = { 1, 1 };\n    for (int64_t i = 0; i < (m + 1) * w; i++) t[i] = zero;\n    for (int64_t i = 0; i < m; i++) {\n        for (int64_t j = 0; j < n; j++) t[i * w + j] = a->items[i]->items[j];\n        t[i * w + n + i] = one;\n        t[i * w + w - 1] = b->items[i];\n        basis[i] = n + i;\n    }\n    for (int64_t j = 0; j < n; j++) t[m * w + j] = minimize ? c->items[j] : dan_rat_neg(c->items[j], line);\n    for (;;) {\n        int64_t col = -1;\n        for (int64_t j = 0; j < w - 1; j++) if (t[m * w + j].n < 0) { col = j; break; }   /* правило Бленда */\n        if (col < 0) break;\n        int64_t row = -1;\n        dan_rat best = zero;\n        for (int64_t i = 0; i < m; i++) {\n            if (t[i * w + col].n <= 0) continue;\n            dan_rat ratio = dan_rat_div(t[i * w + w - 1], t[i * w + col], line);\n            if (row < 0 || dan_rat_cmp(ratio, best) < 0 || (dan_rat_cmp(ratio, best) == 0 && basis[i] < basis[row])) {\n                row = i; best = ratio;\n            }\n        }\n        if (row < 0) { free(t); free(basis); return do_Lr_none(); }   /* целевая функция не ограничена */\n        dan_rat pv = t[row * w + col];\n        for (int64_t j = 0; j < w; j++) t[row * w + j] = dan_rat_div(t[row * w + j], pv, line);\n        for (int64_t i = 0; i <= m; i++) {\n            if (i == row || t[i * w + col].n == 0) continue;\n            dan_rat f = t[i * w + col];\n            for (int64_t j = 0; j < w; j++) t[i * w + j] = dan_rat_sub(t[i * w + j], dan_rat_mul(f, t[row * w + j], line), line);\n        }\n        basis[row] = col;\n    }\n    dl_Lr *x = dl_Lr_from(0, NULL);\n    for (int64_t j = 0; j < n; j++) dl_Lr_push(x, zero);\n    for (int64_t i = 0; i < m; i++) if (basis[i] < n) x->items[basis[i]] = t[i * w + w - 1];\n    free(t);\n    free(basis);\n    return do_Lr_some(x);\n}\nstatic do_Lr dan_lp_max(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, int line) { return dan_lp(c, a, b, false, line); }\nstatic do_Lr dan_lp_min(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, int line) { return dan_lp(c, a, b, true, line); }\n")
 }
 
+/// Версия компилятора.
+общий функ версия() -> стр { вернуть "1.4" }
+
+/// Редакции языка: год и описание.
+общий функ редакции() -> [[стр]] {
+    вернуть [["2026", "первая редакция (Дан 1.0)"]]
+}
+
 /// Сообщения (имя макроса C и текст) по наборам.
 общий функ сообщения(набор: стр) -> [[стр]] {
     выбор набор {
@@ -414,6 +422,7 @@
     о["выполнить_команду"] = Описание("система", "", ["dan_run"], [истина])
     о["вывод_команды"] = Описание("система", "", ["dan_run_output"], [истина])
     о["завершить"] = Описание("система", "", ["dan_exit"], [ложь])
+    о["вывод_ошибки"] = Описание("система", "", ["dan_eprint"], [ложь])
     о["совпадает"] = Описание("система", "", ["dan_rx_full"], [истина])
     о["найти_шаблон"] = Описание("система", "", ["dan_rx_first"], [истина])
     о["найти_все"] = Описание("система", "", ["dan_rx_all"], [истина])

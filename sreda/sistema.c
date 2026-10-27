@@ -216,6 +216,15 @@ static void dan_exit(int64_t code) {
     exit((int)code);
 }
 
+static void dan_eprint(dan_str s) {
+    DAN_OUT_LOCK();
+    fflush(stdout);
+    fputs(s, stderr);
+    fputc('\n', stderr);
+    fflush(stderr);
+    DAN_OUT_UNLOCK();
+}
+
 /* ---- regular expressions (шаблоны) ----
    The pattern is compiled into a program for a Pike VM: all variants are
    followed simultaneously, so matching takes time proportional to the

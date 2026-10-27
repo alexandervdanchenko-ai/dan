@@ -9,6 +9,7 @@
 import glob
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -769,27 +770,53 @@ class ТестыПорожденияНаДане(unittest.TestCase):
 
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыСамосборки(unittest.TestCase):
-    """Компилятор на Дане собирает сам себя: код C второй и третьей ступеней совпадает."""
+    """Компилятор на Дане (сам/дан.dan) собирает сам себя: код C второй и третьей ступеней совпадает,
+    а программы он проверяет, собирает и запускает так же, как компилятор на Python."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.путь = os.path.join(САМ, "дан.dan")
+        with open(cls.путь, encoding="utf-8") as ф:
+            cls.исходник = ф.read()
+        cls.первая = dan.собрать(cls.путь, cls.исходник)        # ступень 1: собрана компилятором на Python
+        cls.среда = dict(os.environ, DAN_HOME=ПАПКА)
+
+    def дан(self, программа, *аргументы, папка=None):
+        р = subprocess.run([os.path.abspath(программа), *аргументы], capture_output=True, timeout=900, env=self.среда,
+                           cwd=папка)
+        return р.returncode, р.stdout.decode("utf-8").replace("\r\n", "\n"), р.stderr.decode("utf-8", "replace")
 
     def test_вторая_и_третья_ступени(self):
-        путь = os.path.join(САМ, "перевод.dan")
-        with open(путь, encoding="utf-8") as ф:
-            исходник = ф.read()
-        первая = dan.собрать(путь, исходник)            # ступень 1: собрана компилятором на Python
-        код_0 = dan.перевести(исходник, путь)
+        код_0 = dan.перевести(self.исходник, self.путь)
+        код, код_2, ошибки = self.дан(self.первая, "си", self.путь)
+        self.assertEqual(код, 0, ошибки)
+        self.assertEqual(код_2, код_0, "ступень 1 создала не тот код, что компилятор на Python")
         with tempfile.TemporaryDirectory() as папка:
-            def перевести(программа, выход):
-                р = subprocess.run([os.path.abspath(программа), *параметры_перевода(), путь, выход],
-                                   capture_output=True, timeout=900)
-                self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
-                self.assertEqual(р.stdout, b"")
-                with open(выход, encoding="utf-8", newline="") as ф:
-                    return ф.read()
-            код_2 = перевести(первая, os.path.join(папка, "ступень2.c"))
-            self.assertEqual(код_2, код_0, "ступень 1 создала не тот код, что компилятор на Python")
             вторая = dan.собрать_код(код_2, os.path.join(папка, "ступень2"), САМ)
-            код_3 = перевести(вторая, os.path.join(папка, "ступень3.c"))
+            код, код_3, ошибки = self.дан(вторая, "си", self.путь)
+            self.assertEqual(код, 0, ошибки)
             self.assertEqual(код_3, код_2, "код C второй и третьей ступеней различается")
+
+    def test_проверка_как_у_python(self):
+        for путь in sorted(glob.glob(os.path.join(ПАПКА, "каталог", "ошибки", "*.dan")))[:30]:
+            with self.subTest(файл=os.path.basename(путь)):
+                нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "проверить", путь],
+                                       capture_output=True, timeout=300)
+                код, вывод_, _ = self.дан(self.первая, "проверить", путь)
+                self.assertEqual(код, нужно.returncode)
+                self.assertEqual(вывод_, нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
+
+    def test_запуск(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "привет.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write('для а в аргументы() { вывод("значение: " + а) }\nвывод(2 + 2)\nзавершить(3)\n')
+            код, вывод_, ошибки = self.дан(self.первая, "запустить", путь, "один", "два слова")
+            self.assertEqual(код, 3, ошибки)
+            self.assertEqual(вывод_, "значение: один\nзначение: два слова\n4\n")
+            код, вывод_, ошибки = self.дан(self.первая, "собрать", путь)
+            self.assertEqual(код, 0, ошибки)
+            self.assertTrue(вывод_.startswith("Готово: "), вывод_)
 
 
 if __name__ == "__main__":
