@@ -2983,31 +2983,38 @@ static void dan_mbuf_utf8(dan_mbuf *b, uint32_t c) {
    from them: "{" and "}" - object, "[" and "]" - array, "k" + name - name of
    the next field, "s" + text - string, "i" + digits - integer literal,
    "d" + digits - other number, "t", "f", "n" - true, false, null.
-   Positions in the messages count characters, as the module did before:
-   a byte that does not start a whole UTF-8 character is one character. */
+   The text is scanned byte by byte: every byte below 0x80 is a whole character
+   (UTF-8 never uses such bytes inside a longer character). Positions in the
+   messages count characters: a byte that does not start a whole UTF-8
+   character is one character; they are counted only when there is an error. */
 
 typedef struct {
     const char *s;
-    size_t n;                 /* characters */
-    size_t *at;               /* byte offset of every character (n + 1 values) */
+    size_t n;                 /* bytes */
     dl_Ls *out;
     char *err;
     dan_mbuf tmp;
+    int compact;              /* части_json: kinds in one string, texts separately */
+    dan_mbuf kinds;
 } dan_json;
 
-static const char *dan_jc(dan_json *j, size_t i) { return i < j->n ? j->s + j->at[i] : ""; }
-static size_t dan_jlen(dan_json *j, size_t i) { return i < j->n ? j->at[i + 1] - j->at[i] : 0; }
-static int dan_jis(dan_json *j, size_t i, char c) { return i < j->n && dan_jlen(j, i) == 1 && j->s[j->at[i]] == c; }
-static int dan_jdigit(dan_json *j, size_t i) {
-    return i < j->n && dan_jlen(j, i) == 1 && j->s[j->at[i]] >= '0' && j->s[j->at[i]] <= '9';
+static int dan_jis(dan_json *j, size_t i, char c) { return i < j->n && j->s[i] == c; }
+static int dan_jdigit(dan_json *j, size_t i) { return i < j->n && j->s[i] >= '0' && j->s[i] <= '9'; }
+static size_t dan_jlen(dan_json *j, size_t i) { return i < j->n ? dan_utf8_len_at(j->s + i) : 0; }
+
+/* are there at least m characters starting at byte i */
+static int dan_jchars(dan_json *j, size_t i, size_t m) {
+    while (m > 0 && i < j->n) { i += dan_utf8_len_at(j->s + i); m--; }
+    return m == 0;
 }
 
 static int dan_json_fail(dan_json *j, size_t i, const char *why) {
     if (j->err) return 0;
     size_t line = 1, col = 1;
-    for (size_t k = 0; k < i; k++) {
-        if (k < j->n && dan_jis(j, k, '\n')) { line++; col = 1; } else col++;
+    for (size_t k = 0; k < i && k < j->n; k += dan_utf8_len_at(j->s + k)) {
+        if (j->s[k] == '\n') { line++; col = 1; } else col++;
     }
+    if (i > j->n) col += i - j->n;
     char head[96];
     snprintf(head, sizeof head, "JSON, строка %zu, позиция %zu: ", line, col);
     j->err = dan_str_new(strlen(head) + strlen(why));
@@ -3018,17 +3025,26 @@ static int dan_json_fail(dan_json *j, size_t i, const char *why) {
 
 static int dan_json_fail_ch(dan_json *j, size_t i, const char *before, const char *after) {
     char why[200];
-    size_t n = dan_jlen(j, i);
-    snprintf(why, sizeof why, "%s%.*s%s", before, (int)n, dan_jc(j, i), after);
+    snprintf(why, sizeof why, "%s%.*s%s", before, (int)dan_jlen(j, i), i < j->n ? j->s + i : "", after);
     return dan_json_fail(j, i, why);
 }
 
 static size_t dan_json_space(dan_json *j, size_t i) {
-    while (dan_jis(j, i, ' ') || dan_jis(j, i, '\n') || dan_jis(j, i, '\t') || dan_jis(j, i, '\r')) i++;
+    while (i < j->n && (j->s[i] == ' ' || j->s[i] == '\n' || j->s[i] == '\t' || j->s[i] == '\r')) i++;
     return i;
 }
 
 static void dan_json_emit(dan_json *j, char kind, const char *text, size_t n) {
+    if (j->compact) {
+        dan_mbuf_add(&j->kinds, &kind, 1);
+        if (kind == 'k' || kind == 's' || kind == 'i' || kind == 'd') {
+            char *e = dan_str_new(n);
+            memcpy(e, text, n);
+            e[n] = 0;
+            dl_Ls_push(j->out, e);
+        }
+        return;
+    }
     char *e = dan_str_new(n + 1);
     e[0] = kind;
     memcpy(e + 1, text, n);
@@ -3046,25 +3062,16 @@ static void dan_json_utf8(dan_mbuf *b, uint32_t c) {
     dan_mbuf_add(b, t, n);
 }
 
-/* code of the character i: the decoded code point, or the byte itself for a damaged one */
-static uint32_t dan_json_code(dan_json *j, size_t i) {
-    const unsigned char *p = (const unsigned char *)dan_jc(j, i);
-    size_t n = dan_jlen(j, i);
-    if (n == 2) return (uint32_t)(p[0] & 0x1F) << 6 | (p[1] & 0x3F);
-    if (n == 3) return (uint32_t)(p[0] & 0x0F) << 12 | (uint32_t)(p[1] & 0x3F) << 6 | (p[2] & 0x3F);
-    if (n == 4) return (uint32_t)(p[0] & 0x07) << 18 | (uint32_t)(p[1] & 0x3F) << 12 | (uint32_t)(p[2] & 0x3F) << 6 | (p[3] & 0x3F);
-    return n ? p[0] : 0;
-}
-
-/* four hex digits from character i; -1 if they are not there */
+/* four hex digits from byte i; -1 if they are not there */
 static long dan_json_hex4(dan_json *j, size_t i) {
     long v = 0;
     for (size_t k = i; k < i + 4; k++) {
-        if (k >= j->n || dan_jlen(j, k) != 1) return -1;
-        char c = (char)tolower((unsigned char)j->s[j->at[k]]);
-        const char *d = strchr("0123456789abcdef", c);
-        if (!c || !d) return -1;
-        v = v * 16 + (d - "0123456789abcdef");
+        if (k >= j->n) return -1;
+        unsigned char c = (unsigned char)j->s[k];
+        if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+        else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
+        else return -1;
     }
     return v;
 }
@@ -3075,12 +3082,20 @@ static size_t dan_json_string(dan_json *j, size_t i) {
     if (j->tmp.s) j->tmp.s[0] = 0;
     size_t k = i;
     for (;;) {
+        /* a run of ordinary bytes is copied at once */
+        size_t r = k;
+        while (r < j->n) {
+            unsigned char c = (unsigned char)j->s[r];
+            if (c == '"' || c == '\\' || c < 32) break;
+            r++;
+        }
+        if (r > k) { dan_mbuf_add(&j->tmp, j->s + k, r - k); k = r; }
         if (k >= j->n) return dan_json_fail(j, i - 1, "строка не закрыта кавычкой");
-        if (dan_jis(j, k, '"')) return k + 1;
-        if (dan_jis(j, k, '\\')) {
+        if (j->s[k] == '"') return k + 1;
+        if (j->s[k] == '\\') {
             if (k + 1 >= j->n) return dan_json_fail(j, k, "строка не закрыта кавычкой");
             size_t e = k + 1;
-            char c = dan_jlen(j, e) == 1 ? j->s[j->at[e]] : 0;
+            char c = (unsigned char)j->s[e] < 0x80 ? j->s[e] : 0;
             if (c == '"' || c == '\\' || c == '/') dan_mbuf_add(&j->tmp, &c, 1);
             else if (c == 'n') dan_mbuf_add(&j->tmp, "\n", 1);
             else if (c == 't') dan_mbuf_add(&j->tmp, "\t", 1);
@@ -3092,7 +3107,7 @@ static size_t dan_json_string(dan_json *j, size_t i) {
                 if (code < 0) return dan_json_fail(j, k, "после \\u нужны четыре шестнадцатеричные цифры");
                 k += 4;
                 if (code >= 0xD800 && code <= 0xDBFF) {
-                    if (k + 7 < j->n && dan_jis(j, k + 2, '\\') && dan_jis(j, k + 3, 'u')) {
+                    if (dan_jchars(j, k, 8) && dan_jis(j, k + 2, '\\') && dan_jis(j, k + 3, 'u')) {
                         long low = dan_json_hex4(j, k + 4);
                         if (low < 0) return dan_json_fail(j, k + 2, "после \\u нужны четыре шестнадцатеричные цифры");
                         if (low >= 0xDC00 && low <= 0xDFFF) { code = 0x10000 + (code - 0xD800) * 1024 + (low - 0xDC00); k += 6; }
@@ -3103,15 +3118,12 @@ static size_t dan_json_string(dan_json *j, size_t i) {
                 dan_json_utf8(&j->tmp, (uint32_t)code);
             } else {
                 char why[64];             /* place - the backslash, text - the character after it */
-                snprintf(why, sizeof why, "неизвестное сочетание «\\%.*s»", (int)dan_jlen(j, e), dan_jc(j, e));
+                snprintf(why, sizeof why, "неизвестное сочетание «\\%.*s»", (int)dan_jlen(j, e), j->s + e);
                 return dan_json_fail(j, k, why);
             }
             k += 2;
-        } else if (dan_json_code(j, k) < 32) {
-            return dan_json_fail(j, k, "управляющий символ внутри строки нужно записывать как \\n, \\t или \\u....");
         } else {
-            dan_mbuf_add(&j->tmp, dan_jc(j, k), dan_jlen(j, k));
-            k++;
+            return dan_json_fail(j, k, "управляющий символ внутри строки нужно записывать как \\n, \\t или \\u....");
         }
     }
 }
@@ -3150,7 +3162,7 @@ static size_t dan_json_number(dan_json *j, size_t i) {
         if (!dan_jdigit(j, k)) return dan_json_fail(j, k, "в показателе степени должна быть цифра");
         while (dan_jdigit(j, k)) k++;
     }
-    dan_json_emit(j, integer ? 'i' : 'd', j->s + j->at[i], j->at[k] - j->at[i]);
+    dan_json_emit(j, integer ? 'i' : 'd', j->s + i, k - i);
     return k;
 }
 
@@ -3318,24 +3330,34 @@ static dan_str dan_json_quote(dan_str s) {
     return r;
 }
 
-static dr_Ls dan_json_events(dan_str text, int line) {
-    dan_json j = { text, 0, NULL, dl_Ls_from(0, NULL), NULL, { NULL, 0, 0 } };
-    size_t bytes = strlen(text), cap = bytes + 1;
-    j.at = dan_alloc(sizeof(size_t) * (cap + 1));
-    for (size_t p = 0; p < bytes;) { j.at[j.n++] = p; p += dan_utf8_len_at(text + p); }
-    j.at[j.n] = bytes;
+static dr_Ls dan_json_scan(dan_str text, int compact, int line) {
+    dan_json j = { text, strlen(text), dl_Ls_from(0, NULL), NULL, { NULL, 0, 0 }, compact, { NULL, 0, 0 } };
     size_t k = dan_json_space(&j, 0);
-    if (k < j.n && dan_json_code(&j, k) == 0xFEFF && dan_jlen(&j, k) == 3) k = dan_json_space(&j, k + 1);
+    if (k + 3 <= j.n && !memcmp(j.s + k, "\xEF\xBB\xBF", 3)) k = dan_json_space(&j, k + 3);
     size_t e = dan_json_value(&j, k, 0);
     if (!j.err) {
         size_t end = dan_json_space(&j, e);
         if (end < j.n) dan_json_fail(&j, end, "после значения лишний текст");
     }
-    free(j.at);
     free(j.tmp.s);
-    if (j.err) return dr_Ls_err(j.err, line);
+    if (j.err) { free(j.kinds.s); return dr_Ls_err(j.err, line); }
+    if (compact) {
+        char *k = dan_str_new(j.kinds.len);
+        memcpy(k, j.kinds.s ? j.kinds.s : "", j.kinds.len);
+        k[j.kinds.len] = 0;
+        free(j.kinds.s);
+        dl_Ls_push(j.out, k);                 /* the kinds go first */
+        memmove(j.out->items + 1, j.out->items, sizeof j.out->items[0] * (size_t)(j.out->len - 1));
+        j.out->items[0] = k;
+    }
     return dr_Ls_some(j.out);
 }
+
+static dr_Ls dan_json_events(dan_str text, int line) { return dan_json_scan(text, 0, line); }
+
+/* части_json: [kinds, texts...]: kinds - one character per event (as in события_json),
+   texts - names of fields, strings and numbers in order */
+static dr_Ls dan_json_parts(dan_str text, int line) { return dan_json_scan(text, 1, line); }
 
 
 static int dan_ieq(const char *a, const char *b) {
