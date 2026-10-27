@@ -1146,8 +1146,11 @@ class ТестыСамосборки(unittest.TestCase):
             нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), *аргументы], capture_output=True,
                                    timeout=600, cwd=папки[1], env=self.среда)
             код, вывод_, _ = self.дан(self.первая, *аргументы, папка=папки[0])
-            ожидается = нужно.stdout.decode("utf-8").replace("\r\n", "\n").replace(
-                os.path.realpath(папки[1]), os.path.realpath(папки[0]))
+            ожидается = нужно.stdout.decode("utf-8").replace("\r\n", "\n")
+            # путь к папке может быть записан по-разному (в Windows - короткими именами RUNNER~1,
+            # в macOS - через /private), поэтому заменяются обе записи
+            for вид in (os.path.realpath, os.path.abspath):
+                ожидается = ожидается.replace(вид(папки[1]), вид(папки[0]))
             self.assertEqual((код, вывод_.replace("дан задач", "dan задач")), (нужно.returncode, ожидается))
 
         with tempfile.TemporaryDirectory() as д, tempfile.TemporaryDirectory() as п:
