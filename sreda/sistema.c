@@ -145,18 +145,12 @@ static do_s dan_env_var(dan_str name) {
 #endif
 }
 
-static int64_t dan_run(dan_str command, int line) {
-    fflush(stdout);
-#if defined(__wasi__)
-    (void)command;
-    dan_error(DAN_MSG_RUN_FAILED, line);
-    return -1;
-#elif defined(_WIN32)
-    /* cmd.exe /c as in _wsystem, but with the standard handles passed explicitly:
-       _wsystem passes them in the C library's handle table, and cmd.exe does not
-       give them to the program it starts when they are pipes (the output of the
-       Dan program is read by another program) */
-    fflush(stderr);
+#ifdef _WIN32
+/* Starts «cmd.exe /c command» as _wsystem does, but with the standard handles passed
+   explicitly: _wsystem passes them in the C library's handle table, and cmd.exe does
+   not give them to the program it starts when they are pipes (the output of the Dan
+   program is read by another program). flags - creation flags (CREATE_SUSPENDED). */
+static BOOL dan_win_spawn(dan_str command, DWORD flags, PROCESS_INFORMATION *pi) {
     wchar_t *wc = dan_wide(command);
     const wchar_t *comspec = _wgetenv(L"ComSpec");
     if (!comspec || !*comspec) comspec = L"cmd.exe";
@@ -164,7 +158,6 @@ static int64_t dan_run(dan_str command, int line) {
     wchar_t *cl = dan_alloc(sizeof(wchar_t) * n);
     swprintf(cl, n, L"\"%ls\" /c %ls", comspec, wc);
     STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -179,11 +172,24 @@ static int64_t dan_run(dan_str command, int line) {
     si.hStdInput = dup[0] ? dup[0] : own[0];
     si.hStdOutput = dup[1] ? dup[1] : own[1];
     si.hStdError = dup[2] ? dup[2] : own[2];
-    BOOL ok = CreateProcessW(NULL, cl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    BOOL ok = CreateProcessW(NULL, cl, NULL, NULL, TRUE, flags, NULL, NULL, &si, pi);
     for (int k = 0; k < 3; k++) if (dup[k]) CloseHandle(dup[k]);
     free(cl);
     free(wc);
-    if (!ok) dan_error(DAN_MSG_RUN_FAILED, line);
+    return ok;
+}
+#endif
+
+static int64_t dan_run(dan_str command, int line) {
+    fflush(stdout);
+#if defined(__wasi__)
+    (void)command;
+    dan_error(DAN_MSG_RUN_FAILED, line);
+    return -1;
+#elif defined(_WIN32)
+    fflush(stderr);
+    PROCESS_INFORMATION pi;
+    if (!dan_win_spawn(command, 0, &pi)) dan_error(DAN_MSG_RUN_FAILED, line);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -195,6 +201,76 @@ static int64_t dan_run(dan_str command, int line) {
     if (r == -1) dan_error(DAN_MSG_RUN_FAILED, line);
     if (WIFEXITED(r)) return WEXITSTATUS(r);
     return 128 + (WIFSIGNALED(r) ? WTERMSIG(r) : 0);
+#endif
+}
+
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <signal.h>
+#endif
+
+/* The command, but no longer than «seconds»: a command that has not finished is
+   stopped together with the programs it started, and the result is -1. */
+static int64_t dan_run_limit(dan_str command, double seconds, int line) {
+    if (seconds < 0 || seconds != seconds) dan_error(DAN_MSG_BAD_PAUSE, line);
+    fflush(stdout);
+    fflush(stderr);
+#if defined(__wasi__)
+    (void)command;
+    dan_error(DAN_MSG_RUN_FAILED, line);
+    return -1;
+#elif defined(_WIN32)
+    /* the program and everything it starts are in one job: stopping the job stops them all */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    PROCESS_INFORMATION pi;
+    if (!dan_win_spawn(command, CREATE_SUSPENDED, &pi)) {
+        if (job) CloseHandle(job);
+        dan_error(DAN_MSG_RUN_FAILED, line);
+    }
+    if (job) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    double ms = seconds * 1000.0;
+    DWORD w = WaitForSingleObject(pi.hProcess, ms >= 4294967294.0 ? INFINITE : (DWORD)ms);
+    int64_t result;
+    if (w == WAIT_TIMEOUT) {
+        if (job) TerminateJobObject(job, 1); else TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        result = -1;
+    } else {
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        result = (int64_t)code;
+    }
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (job) CloseHandle(job);
+    return result;
+#else
+    pid_t pid = fork();
+    if (pid < 0) dan_error(DAN_MSG_RUN_FAILED, line);
+    if (pid == 0) {
+        setpgid(0, 0);                  /* own group: stopping it stops the programs the command started */
+        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    struct timespec start, now, step = { 0, 5000000 };
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int st = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) break;
+        if (r < 0 && errno != EINTR) dan_error(DAN_MSG_RUN_FAILED, line);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((double)(now.tv_sec - start.tv_sec) + (double)(now.tv_nsec - start.tv_nsec) / 1e9 > seconds) {
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+            return -1;
+        }
+        nanosleep(&step, NULL);
+    }
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    return 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
 #endif
 }
 

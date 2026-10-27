@@ -152,6 +152,20 @@ class ТестыДат(unittest.TestCase):
 @unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
 class ТестыСистемы(unittest.TestCase):
 
+    def test_команда_с_пределом_времени(self):
+        # и в Windows (cmd), и в других системах: «ping» ждёт, «exit» завершает сразу
+        долгая = "ping -n 30 127.0.0.1 >NUL" if sys.platform == "win32" else "sleep 30"
+        текст = (f'перем т = метка_времени()\nвывод(выполнить_команду("{долгая}", 0.5))\n'
+                 'вывод(метка_времени() - т < 10.0)\nвывод(выполнить_команду("exit 3", 20))\n')
+        with tempfile.TemporaryDirectory() as п:
+            путь = os.path.join(п, "программа.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(текст)
+            исп = dan.собрать(путь, текст)
+            р = subprocess.run([исп], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(р.returncode, 0, р.stderr)
+        self.assertEqual(р.stdout.splitlines(), ["-1", "истина", "3"])
+
     def test_аргументы_окружение_команды(self):
         текст = """
 вывод(аргументы())
