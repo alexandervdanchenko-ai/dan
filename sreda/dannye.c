@@ -912,7 +912,9 @@ static dan_bytes dan_decrypt(dan_bytes data, dan_str password, int line) {
     if (data->len < DAN_ENC_HEADER + 16 || memcmp(in, "DANC", 4) != 0) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
     if (in[4] != 1) dan_error(DAN_MSG_ENC_VERSION, line);
     uint32_t iter = dan_le32(in + 5);
-    if (iter == 0 || iter > DAN_ENC_ITER * 4) dan_error(DAN_MSG_NOT_ENCRYPTED, line);    /* a forged count must not hang the program */
+    /* files of version 1 are written with exactly DAN_ENC_ITER iterations; a larger forged count
+       must not make the program work for seconds before reporting a wrong password */
+    if (iter == 0 || iter > DAN_ENC_ITER) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
     size_t n = (size_t)data->len - DAN_ENC_HEADER - 16;
     uint8_t key[32], tag[16];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), in + 9, 16, iter, key, 32);
