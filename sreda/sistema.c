@@ -152,11 +152,44 @@ static int64_t dan_run(dan_str command, int line) {
     dan_error(DAN_MSG_RUN_FAILED, line);
     return -1;
 #elif defined(_WIN32)
+    /* cmd.exe /c as in _wsystem, but with the standard handles passed explicitly:
+       _wsystem passes them in the C library's handle table, and cmd.exe does not
+       give them to the program it starts when they are pipes (the output of the
+       Dan program is read by another program) */
+    fflush(stderr);
     wchar_t *wc = dan_wide(command);
-    int r = _wsystem(wc);
+    const wchar_t *comspec = _wgetenv(L"ComSpec");
+    if (!comspec || !*comspec) comspec = L"cmd.exe";
+    size_t n = wcslen(comspec) + wcslen(wc) + 8;
+    wchar_t *cl = dan_alloc(sizeof(wchar_t) * n);
+    swprintf(cl, n, L"\"%ls\" /c %ls", comspec, wc);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    HANDLE own[3] = { GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };
+    HANDLE dup[3] = { NULL, NULL, NULL };
+    for (int k = 0; k < 3; k++) {
+        /* the started program gets only handles that can be inherited */
+        if (own[k] && own[k] != INVALID_HANDLE_VALUE
+                && !DuplicateHandle(GetCurrentProcess(), own[k], GetCurrentProcess(), &dup[k], 0, TRUE, DUPLICATE_SAME_ACCESS))
+            dup[k] = NULL;
+    }
+    si.hStdInput = dup[0] ? dup[0] : own[0];
+    si.hStdOutput = dup[1] ? dup[1] : own[1];
+    si.hStdError = dup[2] ? dup[2] : own[2];
+    BOOL ok = CreateProcessW(NULL, cl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    for (int k = 0; k < 3; k++) if (dup[k]) CloseHandle(dup[k]);
+    free(cl);
     free(wc);
-    if (r == -1) dan_error(DAN_MSG_RUN_FAILED, line);
-    return r;
+    if (!ok) dan_error(DAN_MSG_RUN_FAILED, line);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int64_t)code;
 #else
     int r = system(command);
     if (r == -1) dan_error(DAN_MSG_RUN_FAILED, line);
