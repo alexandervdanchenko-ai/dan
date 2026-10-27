@@ -2672,9 +2672,22 @@ static {LV} *{D}_values(const {D} *d) {{
     for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {LV}_push(r, d->vals[e]);
     return r;
 }}
+/* копия для изменения: записи переносятся вместе с готовыми отпечатками (без повторного
+   вычисления), место - с запасом вдвое, чтобы следующая запись не перестраивала таблицу */
 static {D} *{D}_copy(const {D} *d) {{
     {D} *r = {D}_new();
-    for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {D}_put(r, d->keys[e], d->vals[e]);
+    if (d->len == 0) return r;
+    int64_t cap = d->len * 2 < 8 ? 8 : d->len * 2, m = 0;
+    r->keys = dan_alloc(sizeof({K}) * (size_t)cap);
+    r->vals = dan_alloc(sizeof({V}) * (size_t)cap);
+    r->hashes = dan_alloc(sizeof(uint64_t) * (size_t)cap);
+    r->alive = dan_alloc(sizeof(bool) * (size_t)cap);
+    for (int64_t e = 0; e < d->n; e++) {{
+        if (!d->alive[e]) continue;
+        r->keys[m] = {SK}(d->keys[e]); r->vals[m] = {SV}(d->vals[e]); r->hashes[m] = d->hashes[e]; r->alive[m] = true; m++;
+    }}
+    r->n = r->len = m; r->cap = cap;
+    {D}_reindex(r);
     return r;
 }}
 static {D} *{D}_mut({D} **pp) {{
