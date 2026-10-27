@@ -1537,6 +1537,33 @@ static void dan_prof_start(void) {
 }
 """
 
+ПОКРЫТИЕ_C = r"""
+/* ---- test coverage (python dan.py тестировать --покрытие) ----
+   Every statement of the program (not of the tests and not of the standard
+   library) sets its own flag; at exit the flags are written to the file
+   named by the DAN_COVERAGE environment variable: file, line, 0 or 1. */
+
+static void dan_cov_dump(void) {
+#ifdef _WIN32
+    const wchar_t *path = _wgetenv(L"DAN_COVERAGE");
+    if (!path || !*path) return;
+    FILE *out = _wfopen(path, L"wb");
+#else
+    const char *path = getenv("DAN_COVERAGE");
+    if (!path || !*path) return;
+    FILE *out = fopen(path, "wb");
+#endif
+    if (!out) return;
+    for (int i = 0; i < DAN_COV_COUNT; i++) {
+        int line = dan_cov_lines[i];
+        if (line <= 0) continue;
+        const char *file = dan_files[line >= DAN_FILE_STEP && line / DAN_FILE_STEP < DAN_FILE_COUNT ? line / DAN_FILE_STEP : 0];
+        fprintf(out, "%s\t%d\t%d\n", file, line % DAN_FILE_STEP, dan_cov[i] ? 1 : 0);
+    }
+    fclose(out);
+}
+"""
+
 ОТЛАДКА_C = r"""
 /* ---- debugger (python dan.py отладка программа.dan) ----
    Every statement calls dan_dbg_line; functions and variables register
@@ -2770,6 +2797,10 @@ class Генератор:
         self.отладка = False       # сборка для отладчика (python dan.py отладка)
         self.профиль = False       # сборка с замером времени функций (python dan.py профиль)
         self.профиль_функции = []  # (имя, строка) для каждой функции, номер - индекс
+        self.покрытие = False      # сборка тестов с учётом выполненных строк (тестировать --покрытие)
+        self.покрытие_строки = []  # номер строки (с номером файла) для каждой отмечаемой инструкции
+        self.в_тесте = False       # порождается тело теста: его строки не учитываются
+        self.файлы_библиотеки = set()   # номера файлов стандартной библиотеки
         self.отладочные_записи = {}
         self.нужна_система = False # программа пользуется системной библиотекой
         self.нужна_сеть = False    # программа выполняет запросы HTTP
@@ -3156,6 +3187,8 @@ class Генератор:
                 if потребляемые:
                     self.потребляемые[ф.имя] = потребляемые
         прочие = [и for и in программа.инструкции if not isinstance(и, у.Функция)]
+        self.файлы_библиотеки = {н for н, ф in enumerate(getattr(программа, "файлы", None) or [])
+                                 if ф.startswith("библиотека/")}
 
         внешние = self._внешние_функции(программа)
         # Сначала генерируется тело программы: при этом выясняется,
@@ -3279,6 +3312,8 @@ class Генератор:
         self.пиши("int main(int argc, char **argv) {")
         self.отступ += 1
         self.пиши("dan_argc = argc; dan_argv = argv; dan_start();" + (" dan_tasks_init();" if self.нужны_задачи else ""))
+        if self.покрытие:
+            self.пиши("atexit(dan_cov_dump);")
         self.пиши("int dan_failed = 0;")
         self.пиши("#ifndef __wasi__")
         self.пиши("jmp_buf dan_here;")
@@ -3342,6 +3377,11 @@ class Генератор:
                       + ", ".join(строка_c(и) for и, _ in self.профиль_функции or [("", 0)]) + "};",
                       "static const int dan_prof_lines[] = {"
                       + ", ".join(str(с) for _, с in self.профиль_функции or [("", 0)]) + "};"]
+        if self.покрытие:
+            шапка += [f"#define DAN_COV_COUNT {max(1, len(self.покрытие_строки))}",
+                      f"static unsigned char dan_cov[DAN_COV_COUNT];",
+                      "static const int dan_cov_lines[] = {"
+                      + ", ".join(str(с) for с in self.покрытие_строки or [0]) + "};"]
         if self.отладка:
             шапка += ["#define DAN_DEBUG 1", "static void dan_dbg_error(const char *text, int line);"]
             шапка += [f"#define {имя} {строка_c(текст)}" for имя, текст in СООБЩЕНИЯ_ОТЛАДЧИКА.items()]
@@ -3360,6 +3400,8 @@ class Генератор:
         части = ["\n".join(шапка), СРЕДА]
         if self.профиль:
             части.append(ПРОФИЛЬ_C)
+        if self.покрытие:
+            части.append(ПОКРЫТИЕ_C)
         if self.нужны_задачи:
             части.append(ЗАДАЧИ_C)
         if self.нужны_длинные:
@@ -4125,6 +4167,7 @@ class Генератор:
             self._начать_замер(имя, ф.строка)
         if ф.имя in self.рекурсивные:
             self.пиши(f"DAN_STACK_CHECK({ф.строка});")
+        self.в_тесте = bool(getattr(ф, "тест", None))
         self.текущий_результат = ф.тип_результата
         self.метка_функции, self.области, self.метки_циклов = "dan_fmark", [[]], []
         if self._куча_в(ф.тело, глубоко=True) or self._куча_тип(ф.тип_результата or ПУСТО):
@@ -4271,6 +4314,11 @@ class Генератор:
         if self.отладка and getattr(и, "строка", 0) > 0 and not isinstance(и, self.ОБЪЯВЛЕНИЯ_БЕЗ_КОДА) \
                 and type(и).__name__ not in ("ВнешнийБлок", "Подключение"):
             self.пиши(f"dan_dbg_line({и.строка});")
+        if self.покрытие and not self.в_тесте and getattr(и, "строка", 0) > 0 \
+                and not isinstance(и, self.ОБЪЯВЛЕНИЯ_БЕЗ_КОДА) and type(и).__name__ not in ("ВнешнийБлок", "Подключение") \
+                and и.строка // у.ШАГ_ФАЙЛА not in self.файлы_библиотеки:
+            self.пиши(f"dan_cov[{len(self.покрытие_строки)}] = 1;")
+            self.покрытие_строки.append(и.строка)
         метка = None
         if self._куча_в(self._выражения(и)):
             метка = self.служебное_имя("m")
@@ -5277,12 +5325,14 @@ class Генератор:
         return f"dan_str_to_float({значение}, {строка})"
 
 
-def сгенерировать(программа, отладка=False, тесты=False, профиль=False):
+def сгенерировать(программа, отладка=False, тесты=False, профиль=False, покрытие=False):
     """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика;
     «тесты» - сборка, которая выполняет тесты программы вместо неё самой; «профиль» - сборка,
-    которая замеряет время каждой функции (python dan.py профиль)."""
+    которая замеряет время каждой функции (python dan.py профиль); «покрытие» - сборка тестов,
+    которая отмечает выполненные строки программы (python dan.py тестировать --покрытие)."""
     генератор = Генератор()
     генератор.отладка = отладка
     генератор.тесты = тесты
     генератор.профиль = профиль
+    генератор.покрытие = покрытие and тесты
     return генератор.программа(программа)
