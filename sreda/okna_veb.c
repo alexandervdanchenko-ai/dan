@@ -33,7 +33,7 @@ static const char *const dan_web_kinds[] = { "окно", "кнопка", "над
 typedef struct {
     int kind, window, alive;
     char *text;                 /* text; for lists - items through \n */
-    int checked, selected, value, enabled, visible, font;
+    int checked, selected, value, enabled, visible, font, mono;
     int64_t x, y, w, h;
     dan_buf ops;                /* drawing of a canvas in the form of the page (JSON items) */
     int64_t timer_ms;
@@ -161,7 +161,7 @@ static const char dan_web_page[] =
 "b.className='b';W.append(t,b);document.body.append(W);wins[w.id]=W;}"
 "W.firstChild.firstChild.textContent=w.title;document.title=s.windows[0].title;const B=W.lastChild;B.style.width=w.w+'px';B.style.height=w.h+'px';"
 "for(const e of w.elements){let d=els[e.id];if(!d){d=make(e);els[e.id]=d;B.append(d);}"
-"d.style.left=e.x+'px';d.style.top=e.y+'px';d.style.width=e.w+'px';d.style.height=e.h+'px';d.style.fontSize=e.font+'px';"
+"d.style.left=e.x+'px';d.style.top=e.y+'px';d.style.width=e.w+'px';d.style.height=e.h+'px';d.style.fontSize=e.font+'px';d.style.fontFamily=e.mono?'Consolas,ui-monospace,monospace':'';"
 "d.style.display=e.visible?'':'none';const inp=d.tagName=='LABEL'?d.firstChild:d;inp.disabled=!e.enabled;"
 "if(e.kind=='кнопка'||e.kind=='надпись')d.textContent=e.text;"
 "else if(e.kind=='флажок'){d.lastChild.textContent=e.text;d.firstChild.checked=!!e.checked;}"
@@ -216,8 +216,9 @@ static dan_buf dan_web_state(void) {
             dan_buf_add(&b, t);
             dan_json_str(&b, dan_web_kinds[e->kind]);
             snprintf(t, sizeof t, ",\"x\":%lld,\"y\":%lld,\"w\":%lld,\"h\":%lld,\"checked\":%d,\"selected\":%d,\"value\":%d,"
-                     "\"enabled\":%d,\"visible\":%d,\"font\":%d,\"text\":", (long long)e->x, (long long)e->y,
-                     (long long)e->w, (long long)e->h, e->checked, e->selected, e->value, e->enabled, e->visible, e->font);
+                     "\"enabled\":%d,\"visible\":%d,\"font\":%d,\"mono\":%d,\"text\":", (long long)e->x, (long long)e->y,
+                     (long long)e->w, (long long)e->h, e->checked, e->selected, e->value, e->enabled, e->visible, e->font,
+                     e->mono);
             dan_buf_add(&b, t);
             dan_json_str(&b, e->text);
             dan_buf_add(&b, ",\"ops\":[");
@@ -510,7 +511,8 @@ static void dan_window_set(int64_t el, dan_str what, dan_str value, int line) {
     else if (!strcmp(what, "значение")) e->value = (int)strtol(value, NULL, 10);
     else if (!strcmp(what, "доступен")) e->enabled = !strcmp(value, "1");
     else if (!strcmp(what, "виден")) e->visible = !strcmp(value, "1");
-    else if (!strcmp(what, "шрифт")) e->font = (int)strtol(value, NULL, 10);
+    else if (!strcmp(what, "шрифт")) { e->font = (int)strtol(value, NULL, 10); e->mono = 0; }
+    else if (!strcmp(what, "шрифт_кода")) { e->font = (int)strtol(value, NULL, 10); e->mono = 1; }
     else if (!strcmp(what, "таймер")) {
         e->timer_ms = strtoll(value, NULL, 10);
         e->timer_next = dan_web_now() + e->timer_ms / 1000.0;

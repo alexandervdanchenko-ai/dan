@@ -297,6 +297,12 @@ static HFONT dan_gui_font(int size) {
                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 }
 
+/* font for program text: every character has the same width */
+static HFONT dan_gui_code_font(int size) {
+    return CreateFontW(-dan_px(size), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+}
+
 static dr_i dan_window_create(dan_str title, int64_t width, int64_t height, int line) {
     if (width < 50 || height < 30 || width > 20000 || height > 20000) dan_error(DAN_MSG_GUI_SIZE, line);
     if (!dan_gui_start()) return dr_i_err(dan_strdup(DAN_TXT_GUI_START), line);
@@ -402,8 +408,9 @@ static void dan_window_set(int64_t el, dan_str what, dan_str value, int line) {
         EnableWindow(e->h, strcmp(value, "1") == 0);
     } else if (strcmp(what, "виден") == 0) {
         ShowWindow(e->h, strcmp(value, "1") == 0 ? SW_SHOW : SW_HIDE);
-    } else if (strcmp(what, "шрифт") == 0) {
-        HFONT f = dan_gui_font((int)strtol(value, NULL, 10));
+    } else if (strcmp(what, "шрифт") == 0 || strcmp(what, "шрифт_кода") == 0) {
+        int size = (int)strtol(value, NULL, 10);
+        HFONT f = strcmp(what, "шрифт") == 0 ? dan_gui_font(size) : dan_gui_code_font(size);
         SendMessageW(e->h, WM_SETFONT, (WPARAM)f, TRUE);
         if (e->font && e->kind != DAN_W_WINDOW) DeleteObject(e->font);
         e->font = f;
