@@ -459,7 +459,7 @@ def команда(аргументы):
         with open(путь, encoding="utf-8") as ф:
             исходник = ф.read()
     except (OSError, UnicodeDecodeError) as о:
-        print(f"Не удалось открыть файл «{путь}»: {о}")
+        print(f"Не удалось открыть файл «{путь}»: {у.причина(о)}")
         return 2
     from lexer import ОшибкаЛексера
     from parser import ОшибкаРазбора

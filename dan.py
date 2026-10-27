@@ -623,7 +623,7 @@ def тестировать(цели):
             with open(путь, encoding="utf-8") as ф:
                 исходник = ф.read()
         except (OSError, UnicodeDecodeError) as о:
-            print(f"Не удалось открыть файл «{путь}»: {о}")
+            print(f"Не удалось открыть файл «{путь}»: {uzly.причина(о)}")
             провалено += 1
             continue
         if not есть_тесты(исходник):
@@ -732,7 +732,7 @@ def замерить(цели):
             with open(путь, encoding="utf-8") as ф:
                 исходник = ф.read()
         except (OSError, UnicodeDecodeError) as о:
-            print(f"Не удалось открыть файл «{путь}»: {о}")
+            print(f"Не удалось открыть файл «{путь}»: {uzly.причина(о)}")
             сбоев += 1
             continue
         if not есть_замеры(исходник):
@@ -862,7 +862,7 @@ def профиль(аргументы):
         with open(путь, encoding="utf-8") as ф:
             исходник = ф.read()
     except (OSError, UnicodeDecodeError) as о:
-        print(f"Не удалось открыть файл «{путь}»: {о}")
+        print(f"Не удалось открыть файл «{путь}»: {uzly.причина(о)}")
         return 2
     try:
         исполняемый = собрать(путь, исходник, профиль=True)
@@ -962,7 +962,7 @@ def main(аргументы):
         with open(путь, encoding="utf-8") as ф:
             исходник = ф.read()
     except OSError as о:
-        print(f"Не удалось открыть файл «{путь}»: {о.strerror}")
+        print(f"Не удалось открыть файл «{путь}»: {uzly.причина(о)}")
         return 2
     except UnicodeDecodeError:
         print(f"Файл «{путь}» должен быть в кодировке UTF-8")

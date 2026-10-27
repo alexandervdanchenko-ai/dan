@@ -844,6 +844,110 @@ class ТестыФорматаНаДане(unittest.TestCase):
         self.сверить(неряшливые(тексты))
 
 
+def описания_с_разметкой(количество, семя=11):
+    """Файлы с описаниями «///», в которых случайно сочетаются все виды разметки: `код`, **жирный**,
+    _курсив_, ссылки, ссылки на объявления, списки, заголовки, блоки кода, знаки HTML."""
+    import random
+    сл = random.Random(семя)
+    куски = ["**жирный**", "*", "**", "_курсив_", "_", "a_b_c", "`код`", "``", "`", "[текст](https://пример.рф)",
+             "[т](стр.html)", "[т](плохо)", "[т](a b)", "[ф0]", "[Т1.х]", "[нет_такого]", "[1abc]", "[ф0](x)",
+             "<тег>", "&", '"кавычки"', "'апостроф'", "слово", "x²", "**a _b_ c**", "_a **b** c_", "[[ф0]]",
+             "[a [b](#c)", "мод.ф", "ё", "\\", "#", "# не заголовок"]
+
+    def строка():
+        return " ".join(сл.choice(куски) for _ in range(сл.randint(1, 6)))
+
+    def описание():
+        строки = []
+        for _ in range(сл.randint(1, 8)):
+            вид = сл.random()
+            if вид < 0.1:
+                строки.append("")
+            elif вид < 0.2:
+                строки.append(сл.choice(["# ", "## ", "#### ", "##### "]) + строка())
+            elif вид < 0.35:
+                строки.append(сл.choice(["* ", "- ", "  * ", " - "]) + строка())
+            elif вид < 0.42:
+                строки.append("  " + строка())
+            elif вид < 0.5:
+                строки += ["```" + сл.choice(["", "dan", "text"]), "    пусть х = 1 < 2", 'вывод("&")', "```"]
+            elif вид < 0.56:
+                строки.append("    код с отступом <b>")
+            else:
+                строки.append(строка())
+        return строки
+
+    итог = []
+    for _ in range(количество):
+        текст = []
+        if сл.random() < 0.5:
+            текст += ["/// " + с if с else "///" for с in описание()] + [""]
+        for к in range(сл.randint(1, 4)):
+            текст += ["///" + (" " if сл.random() < 0.8 else "") + с for с in описание()]
+            выбор = сл.random()
+            if выбор < 0.4:
+                текст.append(f'{"общий " if сл.random() < 0.5 else ""}функ ф{к}(а: цел, б: стр) -> цел {{ вернуть а }}')
+            elif выбор < 0.6:
+                текст += [f"общий тип Т{к} {{", "    /// поле " + строка(), "    х: цел", "    у: [стр]", "}"]
+            elif выбор < 0.75:
+                текст += [f"тип В{к} {{", "    /// вариант " + строка(), "    Круг(р: дроб)", "    Точка", "}"]
+            elif выбор < 0.85:
+                текст += [f"интерфейс И{к} {{", "    /// метод " + строка(), "    функ площадь() -> дроб", "}"]
+            else:
+                текст.append(f"пусть п{к}: цел = 5")
+            текст.append("")
+        итог.append("\n".join(текст))
+    return итог
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыДокументацииНаДане(unittest.TestCase):
+    """Документация на Дане (сам/документация.dan) создаёт те же страницы и выводит те же сообщения,
+    что dokumentaciya.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        путь = os.path.join(САМ, "документы.dan")
+        with open(путь, encoding="utf-8") as ф:
+            cls.программа = dan.собрать(путь, ф.read())
+
+    def сверить(self, цели):
+        import contextlib
+        import io
+        import dokumentaciya
+        with tempfile.TemporaryDirectory() as папка:
+            нужно, есть = os.path.join(папка, "py"), os.path.join(папка, "dan")
+            вывод_ = io.StringIO()
+            with contextlib.redirect_stdout(вывод_):
+                код = dokumentaciya.команда(цели + ["--в=" + нужно])
+            р = subprocess.run([os.path.abspath(self.программа), *цели, "--в=" + есть], capture_output=True,
+                               timeout=600)
+            self.assertEqual(р.returncode, код)
+            self.assertEqual(р.stdout.decode("utf-8").replace("\r\n", "\n").replace(есть, нужно), вывод_.getvalue())
+            if os.path.isdir(нужно):
+                self.assertEqual(sorted(os.listdir(есть)), sorted(os.listdir(нужно)))
+                for имя in os.listdir(нужно):
+                    with open(os.path.join(нужно, имя), encoding="utf-8") as ф:
+                        ожидается = ф.read()
+                    with open(os.path.join(есть, имя), encoding="utf-8") as ф:
+                        self.assertEqual(ф.read(), ожидается, имя)
+
+    def test_библиотека_примеры_и_сам(self):
+        for цели in (["библиотека"], ["примеры"], ["сам"], ["примеры/модули"], ["библиотека", "примеры/все_конструкции.dan"],
+                     ["нет_такого.dan"]):
+            with self.subTest(цели=цели):
+                self.сверить([os.path.join(ПАПКА, ц) for ц in цели])
+
+    def test_разметка(self):
+        with tempfile.TemporaryDirectory() as папка:
+            for номер, текст in enumerate(описания_с_разметкой(120)):
+                путь = os.path.join(папка, f"д{номер}.dan")
+                with open(путь, "w", encoding="utf-8") as ф:
+                    ф.write(текст)
+                with self.subTest(файл=номер):
+                    self.сверить([путь])
+
+
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыСамосборки(unittest.TestCase):
     """Компилятор на Дане (сам/дан.dan) собирает сам себя: код C второй и третьей ступеней совпадает,
@@ -895,6 +999,27 @@ class ТестыСамосборки(unittest.TestCase):
                 self.assertEqual(ф.read(), "функ ф(а, б) -> цел {\n    вернуть а + б\n}\n")
             код, вывод_, _ = self.дан(self.первая, "формат", путь, "--проверить")
             self.assertEqual((код, вывод_), (0, путь + ": уже в едином виде\n"))
+
+    def test_документация_проверка_примеров(self):
+        with tempfile.TemporaryDirectory() as папка:
+            файлы = {
+                "п1.dan": "/// Удваивает число.\n///\n/// ```\n/// утвердить_равно(удвоить(2), 4)\n/// ```\n///\n"
+                          "/// ```dan\n/// утвердить_равно(удвоить(2), 5)\n/// вывод(\"видно\")\n/// ```\n"
+                          "общий функ удвоить(х: цел) -> цел { вернуть х * 2 }\n\nобщий функ без() -> цел { вернуть 0 }\n",
+                "п2.dan": "/// Ошибка проверки.\n///\n/// ```\n/// пусть с: стр = ф()\n/// ```\nобщий функ ф() -> цел { вернуть 1 }\n",
+                "п3.dan": "/// Без примеров.\nобщий функ г() -> цел { вернуть 1 }\n",
+            }
+            for имя, текст in файлы.items():
+                with open(os.path.join(папка, имя), "w", encoding="utf-8") as ф:
+                    ф.write(текст)
+            for цель in [*файлы, "."]:
+                with self.subTest(цель=цель):
+                    нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "документация", "--проверить",
+                                            цель], capture_output=True, timeout=300, cwd=папка, env=self.среда)
+                    код, вывод_, ошибки = self.дан(self.первая, "документация", "--проверить", цель, папка=папка)
+                    self.assertEqual(код, нужно.returncode, вывод_ + ошибки)
+                    self.assertEqual(вывод_, нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
+            self.assertEqual(sorted(os.listdir(папка)), sorted(файлы))      # временные файлы удалены
 
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
