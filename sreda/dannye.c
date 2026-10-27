@@ -183,8 +183,10 @@ static dl_Ls *dan_list_dir(dan_str path, int line) {
 /* The current folder of the program (an absolute path); "." if the system cannot tell it. */
 static dan_str dan_current_dir(void) {
 #ifdef _WIN32
-    wchar_t *w = _wgetcwd(NULL, 0);
-    if (!w) return dan_strdup(".");
+    DWORD n = GetCurrentDirectoryW(0, NULL);
+    if (n == 0) return dan_strdup(".");
+    wchar_t *w = dan_alloc(sizeof(wchar_t) * (n + 1));
+    if (GetCurrentDirectoryW(n + 1, w) == 0) { free(w); return dan_strdup("."); }
     dan_str r = dan_narrow(w);
     free(w);
     return r;
