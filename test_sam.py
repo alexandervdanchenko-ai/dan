@@ -1130,6 +1130,21 @@ class ТестыСамосборки(unittest.TestCase):
             self.assertIn("Профиль: программа работала", р.stderr.decode("utf-8"))
             self.assertRegex(р.stderr.decode("utf-8"), r"\s+1  ф \(з.dan:1\)")
 
+    def test_отладка(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "отл.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("функ удвоить(х: цел) -> цел {\n    вернуть х * 2\n}\nперем с = 1\nс = удвоить(с)\nвывод(с)\n")
+            команды = "ш\nш\nш\nпк\nст\nп\n".encode("utf-8")
+            нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "отладка", путь], input=команды,
+                                   capture_output=True, timeout=600, env=self.среда)
+            есть = subprocess.run([os.path.abspath(self.первая), "отладка", путь], input=команды, capture_output=True,
+                                  timeout=600, env=self.среда)
+            self.assertEqual(есть.returncode, нужно.returncode)
+            self.assertEqual(есть.stdout.decode("utf-8").replace("\r\n", "\n"),
+                             нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
+            self.assertIn("удвоить", есть.stdout.decode("utf-8"))
+
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "привет.dan")
