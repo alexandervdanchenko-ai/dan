@@ -373,5 +373,307 @@ class ТестыМодулейНаДане(unittest.TestCase):
             self.сверить(основные)
 
 
+
+# ---------- проверка смысла на Дане ----------
+
+def случайный_тип(сл, глубина=0):
+    простые = ["цел", "дроб", "рац", "стр", "лог", "мн", "длинное", "компл", "Т", "А", "Б", "Точка", "м.Счёт"]
+    вид = сл.randrange(9) if глубина < 3 else 0
+    if вид <= 2:
+        return сл.choice(простые)
+    if вид == 3:
+        return "[" + случайный_тип(сл, глубина + 1) + "]"
+    if вид == 4:
+        return "{" + сл.choice(["цел", "стр"]) + ": " + случайный_тип(сл, глубина + 1) + "}"
+    if вид == 5:
+        return случайный_тип(сл, глубина + 1).rstrip("?!") + "?"
+    if вид == 6:
+        return случайный_тип(сл, глубина + 1).rstrip("?!") + "!"
+    if вид == 7:
+        результат = сл.choice(["", " -> " + случайный_тип(сл, глубина + 1)])
+        return "функ(" + ", ".join(случайный_тип(сл, глубина + 1) for _ in range(сл.randrange(3))) + ")" + результат
+    return сл.choice(["Пара", "Ответ", "м.Д"]) + "<" + ", ".join(
+        случайный_тип(сл, глубина + 1) for _ in range(сл.randint(1, 2))) + ">"
+
+
+def задания_типов(количество, семя=1):
+    """Задания программе сам/проба_типов.dan и ответы компилятора на Python."""
+    import difflib
+    import random
+    import obobshchenie as об
+    import proverka as п
+    сл = random.Random(семя)
+    особые = ["[]", "{}", "ничего", "ошибка", "<неизвестный>", "Пара<>"]
+
+    def любой():
+        return сл.choice(особые) if сл.random() < 0.3 else случайный_тип(сл)
+
+    слова = ["переменная", "перемена", "счётчик", "счетчик", "сумма", "суммы", "итог", "итого", "вывод", "длина",
+             "длинна", "добавить", "удалить", "а", "аб", "ба", "abc", "abd", "x", "xy", "имя", "имена", "ааа", "аааб"]
+
+    def слово():
+        с = сл.choice(слова)
+        if сл.random() < 0.5:
+            с = list(с)
+            с[сл.randrange(len(с))] = сл.choice("абвгдеёжз")
+            с = "".join(с)
+        return с
+
+    def объединить(старое, новое):
+        if старое == новое or п.совместим(новое, старое):
+            return старое
+        if п.совместим(старое, новое):
+            return новое
+        return None
+
+    def связи_текстом(связи):
+        return ";".join(к + "=" + связи[к] for к in sorted(связи))
+
+    задания, ответы = [], []
+    for _ in range(количество):
+        вид = сл.randrange(7)
+        if вид == 0:
+            имя, кандидаты = слово(), [слово() for _ in range(сл.randint(0, 8))]
+            задания.append(f"похожее\t{имя}\t{'|'.join(кандидаты)}")
+            найдено = difflib.get_close_matches(имя, sorted(set(кандидаты)), n=1, cutoff=0.7)
+            ответы.append(найдено[0] if найдено else "")
+        elif вид == 1:
+            а, б = любой(), любой()
+            задания.append(f"совместим\t{а}\t{б}")
+            ответы.append("истина" if п.совместим(а, б) else "ложь")
+        elif вид == 2:
+            т = случайный_тип(сл)
+            задания.append(f"разобрать\t{т}")
+            ответы.append(об.собрать(об.разобрать(т)))
+        elif вид == 3:
+            т = случайный_тип(сл)
+            связи = {к: случайный_тип(сл) for к in сл.sample(["Т", "А", "Б"], сл.randint(0, 2))}
+            задания.append(f"подставить\t{т}\t{';'.join(к + '=' + з for к, з in связи.items())}")
+            ответы.append(об.подставить(т, связи))
+        elif вид == 4:
+            т = случайный_тип(сл)
+            задания.append(f"имена\t{т}")
+            ответы.append(",".join(sorted(об.имена_в_типе(т))))
+        elif вид == 5:
+            шаблон, т = случайный_тип(сл), любой()
+            связи = {"Т": случайный_тип(сл)} if сл.random() < 0.3 else {}
+            задания.append(f"сопоставить\t{шаблон}\t{т}\tТ,А\t{связи_текстом(связи)}")
+            успех = об.сопоставить(шаблон, т, ["Т", "А"], связи, объединить)
+            ответы.append(("истина" if успех else "ложь") + " " + связи_текстом(связи))
+        else:
+            т = ("функ(" + ", ".join(случайный_тип(сл) for _ in range(сл.randrange(3))) + ")"
+                 + сл.choice(["", " -> " + случайный_тип(сл)]))
+            задания.append(f"функция\t{т}")
+            параметры, результат = п.разобрать_тип_функции(т)
+            ответы.append("|".join(параметры) + " -> " + результат)
+    return задания, ответы
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыТиповНаДане(unittest.TestCase):
+    """Записи типов, совместимость, подстановка и подсказки (сам/типы.dan, сам/похожее.dan)."""
+
+    def test_случайные_задания(self):
+        путь = os.path.join(САМ, "проба_типов.dan")
+        with open(путь, encoding="utf-8") as ф:
+            программа = dan.собрать(путь, ф.read())
+        задания, ответы = задания_типов(3000)
+        with tempfile.TemporaryDirectory() as папка:
+            файл = os.path.join(папка, "задания.txt")
+            with open(файл, "w", encoding="utf-8", newline="\n") as ф:
+                ф.write("\n".join(задания) + "\n")
+            р = subprocess.run([os.path.abspath(программа), файл], capture_output=True, timeout=600)
+        self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+        вывод = р.stdout.decode("utf-8").replace("\r\n", "\n").split("\n")
+        for задание, ответ, получено in zip(задания, ответы, вывод):
+            self.assertEqual(получено, ответ, задание)
+        self.assertGreaterEqual(len(вывод), len(задания))
+
+
+class ТестыТаблицВстроенных(unittest.TestCase):
+
+    def test_таблицы_совпадают_с_компилятором(self):
+        # сам/встроенные.dan создаётся сценарием сам/создать_встроенные.py из таблиц компилятора на Python
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("создать_встроенные", os.path.join(САМ, "создать_встроенные.py"))
+        модуль = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(модуль)
+        with open(os.path.join(САМ, "встроенные.dan"), encoding="utf-8") as ф:
+            self.assertEqual(ф.read(), модуль.текст(),
+                             "таблицы устарели: запустите python сам/создать_встроенные.py")
+
+
+def тексты_из_тестов():
+    """Программы из тестов проверки и порождения кода (первые аргументы-строки вызовов)."""
+    import ast
+    тексты = []
+    for имя in ("test_proverka.py", "test_obobshchenie.py", "test_zadachi.py", "test_kodogen.py", "test_chisla.py",
+                "test_dannye.py", "test_sistema.py", "test_vysshaya.py"):
+        with open(os.path.join(ПАПКА, имя), encoding="utf-8") as ф:
+            дерево = ast.parse(ф.read())
+        for узел in ast.walk(дерево):
+            if not isinstance(узел, ast.Call) or not узел.args:
+                continue
+            try:
+                текст = ast.literal_eval(узел.args[0])
+            except (ValueError, SyntaxError, TypeError):
+                continue
+            if isinstance(текст, str) and ("\n" in текст or "пусть" in текст or "функ" in текст or "вывод" in текст) \
+                    and текст not in тексты:
+                тексты.append(текст)
+    return тексты
+
+
+def мутанты(исходники, количество, семя=1):
+    """Программы с внесёнными ошибками: заменённые имена, значения и знаки, удалённые и переставленные строки."""
+    import random
+    from lexer import разобрать as токены
+    сл = random.Random(семя)
+    значения = ["1", "0", "-1", "1.5", '"а"', "истина", "ничего", "[]", "{}", "[1]", '["а"]', '{"а": 1}', "рац(1, 2)",
+                "длинное(1)", "компл(1, 2)", "дата(2020, 1, 1)", "мн([1, 2])", "байты([1])", 'ошибка("х")',
+                "функ(х) = х", "функ(х: цел) = х + 1", "1..3", "[[]]", "[ничего]", "канал()"]
+    знаки = ["+", "-", "*", "/", "%", "^", "==", "!=", "<", ">=", "и", "или"]
+
+    def изменить(текст):
+        try:
+            тт = [т for т in токены(текст) if т.вид not in (Т.КОНЕЦ_СТРОКИ, Т.КОНЕЦ_ФАЙЛА) and т.строка > 0]
+        except ОшибкаЛексера:
+            return None
+        строки = текст.split("\n")
+        вид = сл.randrange(6)
+        if вид == 0 and len(строки) > 2:
+            del строки[сл.randrange(len(строки))]
+            return "\n".join(строки)
+        if вид == 1 and len(строки) > 2:
+            а, б = сл.randrange(len(строки)), сл.randrange(len(строки))
+            строки[а], строки[б] = строки[б], строки[а]
+            return "\n".join(строки)
+        if not тт:
+            return None
+        т = сл.choice(тт)
+        имена = sorted({х.написание or х.значение for х in тт if х.вид == Т.ИМЯ})
+        if вид == 2 and т.вид == Т.ИМЯ:
+            замена = сл.choice(имена + ["длина", "добавить", "содержит", "сам", "Т", "цел", "стр", "вывод", "корень"])
+        elif вид == 3:
+            замена = сл.choice(значения)
+        elif вид == 4:
+            замена = сл.choice(знаки)
+        else:
+            замена = сл.choice(значения + имена + знаки)
+        строка = строки[т.строка - 1]
+        запись = т.написание or (str(т.значение) if т.значение is not None else None)
+        начало = т.столбец - 1
+        if запись and строка[начало:начало + len(запись)] == запись:
+            конец = начало + len(запись)
+        else:
+            конец = начало + 1
+            while конец < len(строка) and not строка[конец].isspace() and строка[конец] not in "(),[]{}.:":
+                конец += 1
+        строки[т.строка - 1] = строка[:начало] + замена + строка[конец:]
+        return "\n".join(строки)
+
+    итог = []
+    for _ in range(количество * 10):
+        if len(итог) >= количество:
+            break
+        текст = сл.choice(исходники)
+        for _ in range(сл.randint(1, 3)):
+            if текст is not None:
+                текст = изменить(текст)
+        if текст is None:
+            continue
+        try:
+            разобрать_программу(текст)
+        except (ОшибкаЛексера, ОшибкаРазбора):
+            continue
+        итог.append(текст)
+    return итог
+
+
+def ожидаемые_ошибки(путь):
+    """Сообщения проверки смысла компилятора на Python в записи программы сам/проверка_ошибки.dan."""
+    import proverka
+    try:
+        программа = загрузить(прочитать(путь), путь)
+    except (ОшибкаЛексера, ОшибкаРазбора, ОшибкаМодуля) as о:
+        return ["ОШИБКА РАЗБОРА " + str(о).replace("\n", "\\n")]
+    try:
+        proverka.проверить(программа)
+        ошибки = []
+    except proverka.ОшибкаПроверки as о:
+        ошибки = о.ошибки
+    return (["ОШИБКА " + str(о).replace("\n", "\\n") for о in ошибки]
+            + ["ПРЕДУПРЕЖДЕНИЕ " + str(п).replace("\n", "\\n") for п in программа.предупреждения])
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыПроверкиНаДане(unittest.TestCase):
+    """Проверка смысла на Дане (сам/проверка.dan) находит те же ошибки с теми же текстами."""
+
+    @classmethod
+    def setUpClass(cls):
+        путь = os.path.join(САМ, "проверка_ошибки.dan")
+        with open(путь, encoding="utf-8") as ф:
+            cls.программа = dan.собрать(путь, ф.read())
+
+    def сверить(self, файлы):
+        итог = {}
+        параметры = [f"--версия={versiya.ВЕРСИЯ}", "--редакции=" + ",".join(versiya.РЕДАКЦИИ),
+                     f"--библиотека={БИБЛИОТЕКА}", f"--разделитель={os.sep}"]
+        for начало in range(0, len(файлы), 100):
+            р = subprocess.run([os.path.abspath(self.программа), *параметры, *файлы[начало:начало + 100]],
+                               capture_output=True, timeout=600)
+            self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+            путь = None
+            for строка in р.stdout.decode("utf-8").replace("\r\n", "\n").split("\n"):
+                if строка.startswith("== "):
+                    путь = строка[3:]
+                    итог[путь] = []
+                elif путь is not None and строка:
+                    итог[путь].append(строка)
+        for путь in файлы:
+            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь):
+                self.assertEqual(итог.get(путь, []), ожидаемые_ошибки(путь))
+
+    def сверить_тексты(self, тексты):
+        with tempfile.TemporaryDirectory() as папка:
+            файлы = []
+            for номер, текст in enumerate(тексты):
+                путь = os.path.join(папка, f"т{номер}.dan")
+                with open(путь, "w", encoding="utf-8", newline="") as ф:
+                    ф.write(текст)
+                файлы.append(путь)
+            self.сверить(файлы)
+
+    def test_программы_репозитория(self):
+        self.сверить([os.path.abspath(п) for п in файлы_репозитория()])
+
+    def test_программы_из_тестов(self):
+        тексты = тексты_из_тестов()
+        self.assertGreater(len(тексты), 300)
+        self.сверить_тексты(тексты)
+
+    def test_программы_с_ошибками(self):
+        исходники = [т for т in тексты_из_тестов() if "подключить" not in т]
+        for путь in glob.glob(os.path.join(ПАПКА, "каталог", "программы", "*.dan")):
+            текст = прочитать(путь)
+            if "подключить" not in текст and текст.count("\n") < 250:
+                исходники.append(текст)
+        self.сверить_тексты(мутанты(исходники, 400))
+
+    def test_наборы_модулей(self):
+        with tempfile.TemporaryDirectory() as корень:
+            основные = []
+            for номер, набор in enumerate(НАБОРЫ_МОДУЛЕЙ.values()):
+                папка = os.path.join(корень, f"н{номер}")
+                for имя, текст in набор.items():
+                    путь = os.path.join(папка, *имя.split("/"))
+                    os.makedirs(os.path.dirname(путь), exist_ok=True)
+                    with open(путь, "w", encoding="utf-8", newline="") as ф:
+                        ф.write(текст)
+                основные.append(os.path.join(папка, *next(iter(набор)).split("/")))
+            self.сверить(основные)
+
+
 if __name__ == "__main__":
     unittest.main()
