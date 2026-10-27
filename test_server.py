@@ -150,6 +150,11 @@ class ТестыСервера(unittest.TestCase):
         описание = self.клиент.запрос("textDocument/hover", {"textDocument": {"uri": self.uri},
                                                               "position": {"line": 12, "character": 31}})
         self.assertIn("функ пени(сумма: цел) -> цел", описание["contents"]["value"])
+        # ключевое слово в начале строки: подсказка объясняет и всю строку
+        описание = self.клиент.запрос("textDocument/hover", {"textDocument": {"uri": self.uri},
+                                                              "position": {"line": 7, "character": 5}})
+        self.assertIn("**Эта строка.** Цикл «для»: переменная «д» по очереди принимает элементы «дела»",
+                      описание["contents"]["value"])
         место = self.клиент.запрос("textDocument/definition", {"textDocument": {"uri": self.uri},
                                                                 "position": {"line": 12, "character": 31}})
         self.assertTrue(место["uri"].endswith(uri_из_пути(os.path.join(self.папка.name, "расчёты.dan"))[-30:]))
