@@ -770,6 +770,80 @@ class ТестыПорожденияНаДане(unittest.TestCase):
             self.сверить_тексты(тексты[::3] + [т for т in особые if т not in тексты[::3]], режим)
 
 
+def неряшливые(исходники, семя=7):
+    """Программы с испорченными пробелами: случайные отступы (и табуляции), лишние и пропущенные
+    пробелы вокруг знаков, пробелы в конце строк, лишние пустые строки."""
+    import random
+    сл = random.Random(семя)
+    итог = []
+    for текст in исходники:
+        строки = []
+        for с in текст.split("\n"):
+            без_отступа = с.lstrip()
+            отступ = сл.choice(["", " ", "  ", "\t", "      ", "\t  ", с[:len(с) - len(без_отступа)]])
+            вывод_, в_строке, н = [], False, 0
+            while н < len(без_отступа):
+                ч = без_отступа[н]
+                if ч == '"' and (н == 0 or без_отступа[н - 1] != "\\"):
+                    в_строке = not в_строке
+                if без_отступа.startswith("//", н) and not в_строке:
+                    вывод_.append(без_отступа[н:])
+                    break
+                if not в_строке and ч == " " and сл.random() < 0.3:
+                    н += 1
+                    continue
+                вывод_.append(ч)
+                if not в_строке and ч in "+-*/=(),[]{}<>:" and сл.random() < 0.2:
+                    вывод_.append(" ")
+                н += 1
+            строки.append(отступ + "".join(вывод_) + сл.choice(["", "", " ", "\t"]))
+            if сл.random() < 0.05:
+                строки.append("")
+        итог.append("\n".join(строки))
+    return итог
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыФорматаНаДане(unittest.TestCase):
+    """Форматирование на Дане (сам/формат.dan) даёт тот же текст и те же ошибки, что formatirovanie.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        путь = os.path.join(САМ, "форматы.dan")
+        with open(путь, encoding="utf-8") as ф:
+            cls.программа = dan.собрать(путь, ф.read())
+
+    def сверить(self, тексты):
+        from formatirovanie import отформатировать, ОшибкаФорматирования
+        with tempfile.TemporaryDirectory() as папка:
+            пары = []
+            for номер, текст in enumerate(тексты):
+                путь = os.path.join(папка, f"{номер}.dan")
+                with open(путь, "w", encoding="utf-8", newline="") as ф:
+                    ф.write(текст)
+                пары += [путь, os.path.join(папка, f"{номер}.txt")]
+            for начало in range(0, len(пары), 200):
+                р = subprocess.run([os.path.abspath(self.программа), *пары[начало:начало + 200]],
+                                   capture_output=True, timeout=900)
+                self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
+            for номер, текст in enumerate(тексты):
+                try:
+                    нужно = отформатировать(текст)
+                except ОшибкаФорматирования as о:
+                    нужно = "ОШИБКА " + str(о)
+                with open(os.path.join(папка, f"{номер}.txt"), encoding="utf-8", newline="") as ф:
+                    есть = ф.read()
+                with self.subTest(номер=номер, начало=текст[:60]):
+                    self.assertEqual(есть, нужно)
+
+    def test_программы_репозитория(self):
+        self.сверить([прочитать(п) for п in файлы_репозитория()])
+
+    def test_неряшливые_программы(self):
+        тексты = [прочитать(п) for п in файлы_репозитория()[::3]]
+        self.сверить(неряшливые(тексты))
+
+
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыСамосборки(unittest.TestCase):
     """Компилятор на Дане (сам/дан.dan) собирает сам себя: код C второй и третьей ступеней совпадает,
@@ -807,6 +881,20 @@ class ТестыСамосборки(unittest.TestCase):
                 код, вывод_, _ = self.дан(self.первая, "проверить", путь)
                 self.assertEqual(код, нужно.returncode)
                 self.assertEqual(вывод_, нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
+
+    def test_формат(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "ф.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("функ  ф(а,б)->цел{\nвернуть а+б\n}\n")
+            код, вывод_, ошибки = self.дан(self.первая, "формат", путь, "--проверить")
+            self.assertEqual(код, 1, вывод_ + ошибки)
+            код, вывод_, ошибки = self.дан(self.первая, "формат", путь)
+            self.assertEqual((код, вывод_), (0, путь + ": отформатирован\n"), ошибки)
+            with open(путь, encoding="utf-8") as ф:
+                self.assertEqual(ф.read(), "функ ф(а, б) -> цел {\n    вернуть а + б\n}\n")
+            код, вывод_, _ = self.дан(self.первая, "формат", путь, "--проверить")
+            self.assertEqual((код, вывод_), (0, путь + ": уже в едином виде\n"))
 
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
