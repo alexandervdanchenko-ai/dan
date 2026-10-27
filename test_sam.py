@@ -1021,6 +1021,18 @@ class ТестыСамосборки(unittest.TestCase):
                     self.assertEqual(вывод_, нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
             self.assertEqual(sorted(os.listdir(папка)), sorted(файлы))      # временные файлы удалены
 
+    def test_папка_с_именем_программы(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "прог.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("вывод(1)\n")
+            os.mkdir(os.path.join(папка, "прог.exe" if os.name == "nt" else "прог"))
+            нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "собрать", путь], capture_output=True,
+                                   timeout=300, env=self.среда)
+            код, вывод_, _ = self.дан(self.первая, "собрать", путь)
+            self.assertEqual((код, вывод_), (1, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
+            self.assertIn("так называется папка", вывод_)
+
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "привет.dan")
