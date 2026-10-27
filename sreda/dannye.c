@@ -201,6 +201,122 @@ static dan_str dan_current_dir(void) {
 #endif
 }
 
+/* Is the path a folder (a link to a folder counts, as in stat). */
+static bool dan_is_dir(dan_str path) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(dan_wide(path));
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+/* Is the path a symbolic link (on Windows: any reparse point, also a junction). */
+static bool dan_is_link(dan_str path) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(dan_wide(path));
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+#endif
+}
+
+/* Removes one path: a file, a link (the link itself, not what it points to) or a folder with
+   everything inside. Links inside the folder are removed, not followed. Read-only files
+   (git makes them on Windows) are removed too. A missing path is not an error. */
+static void dan_remove_tree(dan_str path, int line) {
+#ifdef _WIN32
+    const wchar_t *w = dan_wide(path);
+    DWORD a = GetFileAttributesW(w);
+    if (a == INVALID_FILE_ATTRIBUTES) return;
+    if ((a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        dan_buf pat = { NULL, 0, 0 };
+        dan_buf_add(&pat, path);
+        dan_buf_add(&pat, "\\*");
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(dan_wide(pat.s), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                dan_str name = dan_narrow(fd.cFileName);
+                if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+                dan_remove_tree(dan_concat(dan_concat(path, "\\"), name), line);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    w = dan_wide(path);
+    if (a & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(w, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+    BOOL ok = (a & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryW(w) : DeleteFileW(w);
+    if (!ok) { errno = EACCES; dan_path_error(DAN_MSG_RMDIR, path, line); }
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0) return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d) dan_path_error(DAN_MSG_RMDIR, path, line);
+        struct dirent *e;
+        dl_Ls *names = dl_Ls_from(0, NULL);
+        while ((e = readdir(d)) != NULL) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            dl_Ls_push(names, dan_concat(dan_concat(path, "/"), e->d_name));
+        }
+        closedir(d);
+        for (int64_t i = 0; i < names->len; i++) dan_remove_tree(names->items[i], line);
+        if (rmdir(path) != 0) dan_path_error(DAN_MSG_RMDIR, path, line);
+    } else if (unlink(path) != 0) {
+        dan_path_error(DAN_MSG_RMDIR, path, line);
+    }
+#endif
+}
+
+/* Renames (moves) a file or folder; an existing file with the new name is replaced. */
+static void dan_rename(dan_str from, dan_str to, int line) {
+#ifdef _WIN32
+    if (!MoveFileExW(dan_wide(from), dan_wide(to), MOVEFILE_REPLACE_EXISTING)) {
+        errno = GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ? ENOENT : EACCES;
+        dan_path_error(DAN_MSG_RENAME, from, line);
+    }
+#else
+    if (rename(from, to) != 0) dan_path_error(DAN_MSG_RENAME, from, line);
+#endif
+}
+
+/* Creates a new empty folder with a unique name in the folder for temporary files. */
+static dan_str dan_make_temp_dir(int line) {
+    dan_str base;
+#ifdef _WIN32
+    wchar_t wb[MAX_PATH + 2];
+    DWORD n = GetTempPathW(MAX_PATH + 1, wb);
+    base = n ? dan_narrow(wb) : dan_strdup(".\\");
+    if (n && base[strlen(base) - 1] != '\\') base = dan_concat(base, "\\");
+#else
+    const char *e = getenv("TMPDIR");
+    base = dan_concat(e && *e ? e : "/tmp", "/");
+#endif
+    static uint64_t counter = 0;
+    uint64_t seed = (uint64_t)time(NULL) ^ ((uint64_t)(uintptr_t)&counter << 7);
+    for (int attempt = 0; attempt < 1000; attempt++) {
+        counter++;
+        uint64_t x = (seed + counter * 0x9E3779B97F4A7C15ULL) * 0xBF58476D1CE4E5B9ULL;
+        x ^= x >> 31;
+        char name[32];
+        snprintf(name, sizeof name, "dan_%012llx", (unsigned long long)(x & 0xFFFFFFFFFFFFULL));
+        dan_str path = dan_concat(base, name);
+#ifdef _WIN32
+        if (CreateDirectoryW(dan_wide(path), NULL)) return path;
+        if (GetLastError() != ERROR_ALREADY_EXISTS) { errno = EACCES; dan_path_error(DAN_MSG_MKDIR, path, line); }
+#else
+        if (mkdir(path, 0700) == 0) return path;
+        if (errno != EEXIST) dan_path_error(DAN_MSG_MKDIR, path, line);
+#endif
+    }
+    errno = EEXIST;
+    dan_path_error(DAN_MSG_MKDIR, base, line);
+    return NULL;
+}
+
 /* ---- bytes ---- */
 
 static dan_bytes dan_bytes_from_list(const dl_Li *l, int line) {
