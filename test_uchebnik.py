@@ -30,7 +30,7 @@ class ТестыУчебника(unittest.TestCase):
             with self.subTest(листинг=имя):
                 код, вывод, ошибки = uchebnik.выполнить(имя)
                 self.assertEqual(код, 0, ошибки)
-                if uchebnik.вид(имя) == "выполнить":
+                if uchebnik.вид(имя) in ("выполнить", "ошибка"):
                     self.assertTrue(os.path.exists(uchebnik.путь(имя, ".вывод")),
                                     "нет образца вывода: python uchebnik.py вывод")
                     self.assertEqual(вывод.splitlines(), прочитать(uchebnik.путь(имя, ".вывод")).splitlines())
