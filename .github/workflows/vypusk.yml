@@ -32,7 +32,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          import glob, os, shutil, subprocess, tempfile
+          import glob, os, shutil, subprocess, sys, tempfile
+          sys.path.insert(0, os.getcwd())   # сценарий выполняется из временной папки, versiya.py - в корне проекта
           import versiya
           версия = versiya.ВЕРСИЯ
           метка = "v" + версия
