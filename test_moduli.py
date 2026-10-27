@@ -137,6 +137,12 @@ class ТестыЗагрузки(unittest.TestCase):
         т = ошибка_загрузки({"м.dan": 'общий функ ф() -> цел {\n    вернуть (\n}\n'}, 'подключить "м.dan"')
         self.assertTrue(т.startswith("м.dan: ошибка в записи программы"), т)
 
+    def test_ошибка_модуля_показывает_строку(self):
+        т = ошибка_загрузки({"м.dan": 'общий функ ф() -> цел { вернуть 1 }\nвывод(1)\n'}, 'подключить "м.dan"')
+        self.assertIn("\n    2 | вывод(1)\n      | ^^^^^", т)
+        т = ошибка_загрузки({"м.dan": 'общий функ ф() -> цел {\n    вернуть (\n}\n'}, 'подключить "м.dan"')
+        self.assertIn("\n    3 | }\n      | ^", т)
+
     def test_имена_не_путаются(self):
         т = ошибка_загрузки({"м.dan": 'функ ф() -> цел { вернуть 1 }\nобщий функ г(ф: цел) -> цел { вернуть ф }\n'},
                             'подключить "м.dan"')
@@ -190,6 +196,39 @@ class ТестыВыполнения(unittest.TestCase):
                                        'подключить "деление.dan"\nвывод(деление.ф(0))')
         self.assertEqual(код, 1)
         self.assertIn("в файле деление.dan, строка 2: деление на ноль", ошибки)
+
+
+class ТестыФрагмента(unittest.TestCase):
+    """Строка программы с указателем «^» под местом ошибки."""
+
+    def test_имя_число_строка_знак(self):
+        import uzly
+        текст = 'функ ф() {\n    пусть х = 12 + "а\\"б" == 3\n}'
+        self.assertEqual(uzly.фрагмент(текст, 2, 11), "    2 |     пусть х = 12 + \"а\\\"б\" == 3\n      |           ^")
+        self.assertTrue(uzly.фрагмент(текст, 2, 15).endswith("|               ^^"))
+        self.assertTrue(uzly.фрагмент(текст, 2, 20).endswith("|                    ^^^^^^"))
+        self.assertTrue(uzly.фрагмент(текст, 2, 27).endswith("|                           ^^"))
+        self.assertTrue(uzly.фрагмент(текст, 2, 5).endswith("|     ^^^^^"))
+
+    def test_вызов_табуляция_края(self):
+        import uzly
+        self.assertEqual(uzly.фрагмент("\tпечать(1)", 1, 8), "    1 | \tпечать(1)\n      | \t^^^^^^")
+        self.assertEqual(uzly.фрагмент("а = (", 1, 99), "    1 | а = (\n      |      ^")
+        self.assertEqual(uzly.фрагмент("\ufeffа", 1, 1), "    1 | а\n      | ^")
+        self.assertEqual(uzly.фрагмент("а\n\nб", 2, 1), "")
+        self.assertEqual(uzly.фрагмент("а", 5, 1), "")
+        self.assertEqual(uzly.фрагмент("а", 0, 1), "")
+        self.assertEqual(uzly.фрагмент("\n" * 9 + "б", 10, 1), "    10 | б\n       | ^")
+
+    def test_вывод_компилятора(self):
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "п.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("функ главная() {\n    пусть у: стр = 1\n}\n")
+            р = subprocess.run([dan.sys.executable, dan.__file__, "проверить", путь], capture_output=True,
+                               text=True, encoding="utf-8")
+            self.assertIn("  Строка 2, позиция 20: переменная «у» имеет тип стр, а значение имеет тип цел\n"
+                          "    2 |     пусть у: стр = 1\n      |                    ^\n", р.stdout)
 
 
 if __name__ == "__main__":
