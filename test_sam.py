@@ -509,7 +509,7 @@ def тексты_из_тестов():
     import ast
     тексты = []
     for имя in ("test_proverka.py", "test_obobshchenie.py", "test_zadachi.py", "test_kodogen.py", "test_chisla.py",
-                "test_dannye.py", "test_sistema.py", "test_vysshaya.py"):
+                "test_dannye.py", "test_sistema.py", "test_vysshaya.py", "test_testy.py", "test_zamery.py"):
         with open(os.path.join(ПАПКА, имя), encoding="utf-8") as ф:
             дерево = ast.parse(ф.read())
         for узел in ast.walk(дерево):
@@ -701,7 +701,7 @@ def код_python(путь, режим=""):
     except Exception:
         return None
     return kodogen.сгенерировать(программа, отладка=режим == "отладка", тесты=режим in ("тесты", "покрытие"),
-                                 профиль=режим == "профиль", покрытие=режим == "покрытие")
+                                 профиль=режим == "профиль", покрытие=режим == "покрытие", замеры=режим == "замеры")
 
 
 def параметры_перевода():
@@ -764,9 +764,10 @@ class ТестыПорожденияНаДане(unittest.TestCase):
     def test_отладка_тесты_профиль(self):
         файлы = sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan")))
         тексты = тексты_из_тестов()
-        for режим in ("отладка", "тесты", "профиль", "покрытие"):
+        особые = [т for т in тексты if 'тест "' in т or 'замер "' in т]
+        for режим in ("отладка", "тесты", "профиль", "покрытие", "замеры"):
             self.сверить(файлы, режим)
-            self.сверить_тексты(тексты[::3], режим)
+            self.сверить_тексты(тексты[::3] + [т for т in особые if т not in тексты[::3]], режим)
 
 
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")

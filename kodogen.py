@@ -1564,6 +1564,91 @@ static void dan_cov_dump(void) {
 }
 """
 
+ЗАМЕРЫ_C = r"""
+/* ---- benchmarks (python dan.py замерить программа.dan) ----
+   A benchmark runs in batches: the batch grows until it takes at least 20 ms,
+   then 10 batches are timed. The temporaries of every run are freed after it.
+   For each benchmark one line goes to the file named by the DAN_BENCH
+   environment variable (or to the standard output): name, mean time of one
+   run, standard deviation and minimum in nanoseconds, number of runs; after a
+   runtime error - name, "!", message, file and line. */
+
+static FILE *dan_bench_out;
+
+static uint64_t dan_bench_now(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)(c.QuadPart / freq.QuadPart) * 1000000000u
+         + (uint64_t)(c.QuadPart % freq.QuadPart) * 1000000000u / (uint64_t)freq.QuadPart;
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+#endif
+}
+
+static void dan_bench_open(void) {
+#ifdef _WIN32
+    const wchar_t *path = _wgetenv(L"DAN_BENCH");
+    dan_bench_out = path && *path ? _wfopen(path, L"wb") : NULL;
+#else
+    const char *path = getenv("DAN_BENCH");
+    dan_bench_out = path && *path ? fopen(path, "wb") : NULL;
+#endif
+    if (!dan_bench_out) dan_bench_out = stdout;
+}
+
+static double dan_bench_batch(void (*f)(void), uint64_t n) {
+    uint64_t start = dan_bench_now();
+    for (uint64_t i = 0; i < n; i++) {
+        const size_t m = dan_mark();
+        f();
+        dan_sweep(m);
+    }
+    return (double)(dan_bench_now() - start);
+}
+
+static void dan_bench(const char *name, void (*f)(void)) {
+#ifndef __wasi__
+    jmp_buf here;
+    if (setjmp(here)) {
+        dan_catch = NULL;
+        int l = dan_caught_line;
+        int file = l >= DAN_FILE_STEP && l / DAN_FILE_STEP < DAN_FILE_COUNT ? l / DAN_FILE_STEP : 0;
+        fprintf(dan_bench_out, "%s\t!\t%s\t%s\t%d\n", name, dan_caught, dan_files[file], l % DAN_FILE_STEP);
+        fflush(dan_bench_out);
+        return;
+    }
+    dan_catch = &here;
+#endif
+    uint64_t n = 1;
+    dan_bench_batch(f, 1);                       /* warm-up */
+    for (;;) {
+        double t = dan_bench_batch(f, n);
+        if (t >= 20e6 || n >= ((uint64_t)1 << 40)) break;
+        uint64_t next = t > 0 ? (uint64_t)((double)n * 25e6 / t) + 1 : n * 10;
+        n = next > n * 2 ? next : n * 2;
+        if (n > ((uint64_t)1 << 40)) n = (uint64_t)1 << 40;
+    }
+    double s[10], sum = 0, sq = 0, low = 0;
+    for (int k = 0; k < 10; k++) {
+        s[k] = dan_bench_batch(f, n) / (double)n;
+        sum += s[k];
+        if (k == 0 || s[k] < low) low = s[k];
+    }
+    double mean = sum / 10;
+    for (int k = 0; k < 10; k++) sq += (s[k] - mean) * (s[k] - mean);
+#ifndef __wasi__
+    dan_catch = NULL;
+#endif
+    fprintf(dan_bench_out, "%s\t%.6g\t%.6g\t%.6g\t%" PRIu64 "\n", name, mean, sqrt(sq / 9), low, n * 10);
+    fflush(dan_bench_out);
+}
+"""
+
 ОТЛАДКА_C = r"""
 /* ---- debugger (python dan.py отладка программа.dan) ----
    Every statement calls dan_dbg_line; functions and variables register
@@ -2800,6 +2885,7 @@ class Генератор:
         self.покрытие = False      # сборка тестов с учётом выполненных строк (тестировать --покрытие)
         self.покрытие_строки = []  # номер строки (с номером файла) для каждой отмечаемой инструкции
         self.в_тесте = False       # порождается тело теста: его строки не учитываются
+        self.замеры = False        # сборка, которая замеряет время блоков «замер» (dan замерить)
         self.файлы_библиотеки = set()   # номера файлов стандартной библиотеки
         self.отладочные_записи = {}
         self.нужна_система = False # программа пользуется системной библиотекой
@@ -3208,6 +3294,9 @@ class Генератор:
         if getattr(self, "тесты", False):
             self._главная_тестов([ф for ф in функции if getattr(ф, "тест", None)])
             return self._собрать_текст(программа, место_лямбд)
+        if self.замеры:
+            self._главная_замеров([ф for ф in функции if getattr(ф, "замер", None)])
+            return self._собрать_текст(программа, место_лямбд)
         self.пиши("int main(int argc, char **argv) {")
         self.отступ += 1
         self.пиши("dan_argc = argc; dan_argv = argv; dan_start();")
@@ -3342,6 +3431,20 @@ class Генератор:
         self.отступ -= 1
         self.пиши("}")
 
+    def _главная_замеров(self, замеры):
+        """main сборки для «dan замерить»: замеры по очереди; ошибка замера не останавливает остальные."""
+        self.пиши("int main(int argc, char **argv) {")
+        self.отступ += 1
+        self.пиши("dan_argc = argc; dan_argv = argv; dan_start();" + (" dan_tasks_init();" if self.нужны_задачи else ""))
+        self.пиши("dan_bench_open();")
+        for ф in замеры:
+            self.пиши(f"{{ const size_t dan_m = dan_mark(); dan_bench({строка_c(ф.замер)}, {self.имя(ф.имя)}); "
+                      "dan_sweep(dan_m); }")
+        self.пиши("if (dan_bench_out != stdout) fclose(dan_bench_out);")
+        self.пиши("return 0;")
+        self.отступ -= 1
+        self.пиши("}")
+
     def _собрать_текст(self, программа, место_лямбд):
         if self.лямбды_код:
             self.строки[место_лямбд:место_лямбд] = ["/* ---- anonymous functions ---- */"] + self.лямбды_код
@@ -3350,7 +3453,7 @@ class Генератор:
             "/* Создано компилятором языка Дан. Редактировать не нужно. */",
             "#if defined(__wasi__) && !defined(_DEFAULT_SOURCE)", "#define _DEFAULT_SOURCE", "#endif",
             *(["#if !defined(_WIN32) && !defined(__APPLE__)", "#define _DEFAULT_SOURCE", "#endif"]
-              if self.нужна_система or self.профиль else []),
+              if self.нужна_система or self.профиль or self.замеры else []),
             # каждое действие с дробными числами округляется отдельно, без слияния в FMA
             # (то же задаёт параметр -ffp-contract=off; прагма - для других компиляторов C)
             "#if defined(__clang__)", "#pragma STDC FP_CONTRACT OFF", "#endif",
@@ -3402,6 +3505,8 @@ class Генератор:
             части.append(ПРОФИЛЬ_C)
         if self.покрытие:
             части.append(ПОКРЫТИЕ_C)
+        if self.замеры:
+            части.append(ЗАМЕРЫ_C)
         if self.нужны_задачи:
             части.append(ЗАДАЧИ_C)
         if self.нужны_длинные:
@@ -4167,7 +4272,7 @@ class Генератор:
             self._начать_замер(имя, ф.строка)
         if ф.имя in self.рекурсивные:
             self.пиши(f"DAN_STACK_CHECK({ф.строка});")
-        self.в_тесте = bool(getattr(ф, "тест", None))
+        self.в_тесте = bool(getattr(ф, "тест", None) or getattr(ф, "замер", None))
         self.текущий_результат = ф.тип_результата
         self.метка_функции, self.области, self.метки_циклов = "dan_fmark", [[]], []
         if self._куча_в(ф.тело, глубоко=True) or self._куча_тип(ф.тип_результата or ПУСТО):
@@ -5325,14 +5430,16 @@ class Генератор:
         return f"dan_str_to_float({значение}, {строка})"
 
 
-def сгенерировать(программа, отладка=False, тесты=False, профиль=False, покрытие=False):
+def сгенерировать(программа, отладка=False, тесты=False, профиль=False, покрытие=False, замеры=False):
     """Возвращает текст программы на C для проверенного дерева; «отладка» - сборка для отладчика;
     «тесты» - сборка, которая выполняет тесты программы вместо неё самой; «профиль» - сборка,
     которая замеряет время каждой функции (python dan.py профиль); «покрытие» - сборка тестов,
-    которая отмечает выполненные строки программы (python dan.py тестировать --покрытие)."""
+    которая отмечает выполненные строки программы (python dan.py тестировать --покрытие); «замеры» -
+    сборка, которая замеряет время блоков «замер» вместо программы (python dan.py замерить)."""
     генератор = Генератор()
     генератор.отладка = отладка
     генератор.тесты = тесты
     генератор.профиль = профиль
     генератор.покрытие = покрытие and тесты
+    генератор.замеры = замеры and not тесты
     return генератор.программа(программа)
