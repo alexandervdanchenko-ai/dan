@@ -8,6 +8,7 @@
 
 import glob
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1139,6 +1140,51 @@ class ТестыСамосборки(unittest.TestCase):
                                            capture_output=True, timeout=300, env=self.среда)
                     код, вывод_, _ = self.дан(self.первая, команда, путь)
                     self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
+
+    def test_задачник(self):
+        def сравнить(папки, *аргументы):
+            нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), *аргументы], capture_output=True,
+                                   timeout=600, cwd=папки[1], env=self.среда)
+            код, вывод_, _ = self.дан(self.первая, *аргументы, папка=папки[0])
+            ожидается = нужно.stdout.decode("utf-8").replace("\r\n", "\n").replace(
+                os.path.realpath(папки[1]), os.path.realpath(папки[0]))
+            self.assertEqual((код, вывод_.replace("дан задач", "dan задач")), (нужно.returncode, ожидается))
+
+        with tempfile.TemporaryDirectory() as д, tempfile.TemporaryDirectory() as п:
+            сравнить((д, п), "задача", "1")
+            сравнить((д, п), "задачи")
+            for папка in (д, п):
+                задачи = os.path.join(папка, "задачи")
+                shutil.copy(os.path.join(ПАПКА, "учебник", "задачи", "решения", "02_сумма_двух.dan"), задачи)
+                with open(os.path.join(задачи, "01_приветствие.dan"), "w", encoding="utf-8") as ф:
+                    ф.write('пусть имя = ввод()\nесли имя == "Борис" { пока истина { } }\nвывод("Привет, " + имя + "!")\n')
+                with open(os.path.join(задачи, "03_чётное.dan"), "w", encoding="utf-8") as ф:
+                    ф.write("пусть н = 0\nвывод(1 / н)\n")
+                with open(os.path.join(задачи, "05_факториал.dan"), "w", encoding="utf-8") as ф:
+                    ф.write("пусть = 3\n")
+            for номер in ("1", "2", "3", "4", "5", "99", "три"):
+                with self.subTest(задача=номер):
+                    сравнить((д, п), "задача", номер)
+            self.assertEqual([и for и in os.listdir(os.path.join(д, "задачи")) if и.startswith(".")], [])
+
+    def test_редакция(self):
+        with tempfile.TemporaryDirectory() as папка:
+            файлы = {"а.dan": "вывод(1)\n", "б.dan": "// к\n\nредакция 2026\nвывод(1)\n", "в.dan": "редакция 2030\n",
+                     "г.dan": "редакция abc\n"}
+            for аргументы in (["а.dan"], ["б.dan"], ["в.dan"], ["г.dan"], ["нет.dan"], ["а.dan", "2026"],
+                              ["б.dan", "2026"], ["а.dan", "2030"], ["в.dan", "2026"]):
+                итоги = []
+                for команда in ([sys.executable, os.path.join(ПАПКА, "dan.py")], [os.path.abspath(self.первая)]):
+                    for имя, текст in файлы.items():
+                        with open(os.path.join(папка, имя), "w", encoding="utf-8") as ф:
+                            ф.write(текст)
+                    р = subprocess.run([*команда, "редакция", *аргументы], capture_output=True, timeout=300, cwd=папка,
+                                       env=self.среда)
+                    with open(os.path.join(папка, "а.dan"), encoding="utf-8") as ф:
+                        итоги.append((р.returncode, р.stdout.decode("utf-8").replace("\r\n", "\n")
+                                      .replace("python dan.py редакция", "дан редакция"), ф.read()))
+                with self.subTest(аргументы=аргументы):
+                    self.assertEqual(итоги[1], итоги[0])
 
     def test_отладка(self):
         with tempfile.TemporaryDirectory() as папка:

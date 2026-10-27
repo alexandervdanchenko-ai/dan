@@ -180,6 +180,25 @@ static dl_Ls *dan_list_dir(dan_str path, int line) {
     return r;
 }
 
+/* The current folder of the program (an absolute path); "." if the system cannot tell it. */
+static dan_str dan_current_dir(void) {
+#ifdef _WIN32
+    wchar_t *w = _wgetcwd(NULL, 0);
+    if (!w) return dan_strdup(".");
+    dan_str r = dan_narrow(w);
+    free(w);
+    return r;
+#elif defined(__wasi__)
+    return dan_strdup(".");
+#else
+    char *p = getcwd(NULL, 0);
+    if (!p) return dan_strdup(".");
+    dan_str r = dan_strdup(p);
+    free(p);
+    return r;
+#endif
+}
+
 /* ---- bytes ---- */
 
 static dan_bytes dan_bytes_from_list(const dl_Li *l, int line) {
