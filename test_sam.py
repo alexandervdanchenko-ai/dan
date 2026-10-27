@@ -1130,6 +1130,16 @@ class ТестыСамосборки(unittest.TestCase):
             self.assertIn("Профиль: программа работала", р.stderr.decode("utf-8"))
             self.assertRegex(р.stderr.decode("utf-8"), r"\s+1  ф \(з.dan:1\)")
 
+    def test_токены_и_дерево(self):
+        for путь in [*sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan")))[:8],
+                     *sorted(glob.glob(os.path.join(ПАПКА, "каталог", "ошибки", "*.dan")))[:12]]:
+            for команда in ("токены", "дерево"):
+                with self.subTest(файл=os.path.basename(путь), команда=команда):
+                    нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), команда, путь],
+                                           capture_output=True, timeout=300, env=self.среда)
+                    код, вывод_, _ = self.дан(self.первая, команда, путь)
+                    self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")))
+
     def test_отладка(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "отл.dan")
