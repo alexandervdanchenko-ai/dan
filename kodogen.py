@@ -197,6 +197,10 @@ def рекурсивные_функции(функции):
     return рекурсивные
 
 
+ТАБЛИЦА_ASCII = "\n".join("    { DAN_HDR_INIT, { " + str(и) + ", 0 } }," for и in range(128))
+ТАБЛИЦА_КИРИЛЛИЦЫ = "\n".join('    { DAN_HDR_INIT, "' + "".join("\\%03o" % б for б in chr(0x400 + и).encode("utf-8")) + '" },'
+                              for и in range(256))
+
 СРЕДА = r"""
 typedef const char *dan_str;
 
@@ -586,10 +590,29 @@ static dan_str dan_str_sub(const char *a, const char *b) {
     return r;
 }
 
+/* one-character strings of the first 128 characters (ASCII) and of the Cyrillic
+   block (U+0400 - U+04FF) are shared and never freed: splitting a text into
+   characters and taking a character by its number allocate memory only for
+   other letters */
+static const struct { dan_hdr h; char s[2]; } dan_ascii_s[128] = {
+""" + ТАБЛИЦА_ASCII + r"""
+};
+static const struct { dan_hdr h; char s[3]; } dan_cyr_s[256] = {
+""" + ТАБЛИЦА_КИРИЛЛИЦЫ + r"""
+};
+
+/* the character of k bytes at p as a string */
+static dan_str dan_char_str(const char *p, size_t k) {
+    unsigned char c = (unsigned char)p[0];
+    if (c < 0x80) return dan_ascii_s[c].s;
+    if (k == 2 && c >= 0xD0 && c <= 0xD3) return dan_cyr_s[((c & 0x03) << 6) | ((unsigned char)p[1] & 0x3F)].s;
+    return dan_str_sub(p, p + k);
+}
+
 static dan_str dan_str_char_at(dan_str s, int64_t i, int line) {
     const char *p = i >= 0 ? dan_utf8_at(s, i) : NULL;
     if (!p || !*p) dan_index_error(i, dan_str_len(s), line);
-    return dan_str_sub(p, p + dan_utf8_len_at(p));
+    return dan_char_str(p, dan_utf8_len_at(p));
 }
 
 /* characters a..b inclusive; b == a - 1 gives an empty string */
@@ -2753,18 +2776,11 @@ static bool {S}_eq(const {S} *x, const {S} *y) {{
 
 # Функции строк, которые возвращают списки строк: идут после определения dl_Ls.
 КОД_СТРОК_СО_СПИСКАМИ = r"""
-/* one-character strings of the first 128 characters (ASCII) are shared and
-   never freed: splitting a text into characters allocates memory only for
-   other letters */
-static const struct { dan_hdr h; char s[2]; } dan_ascii_s[128] = {
-""" + "\n".join("    { DAN_HDR_INIT, { " + str(и) + ", 0 } }," for и in range(128)) + r"""
-};
-
 static dl_Ls *dan_str_chars(dan_str s) {
     dl_Ls *r = dl_Ls_from(0, NULL);
     for (const char *p = s; *p;) {
         size_t k = dan_utf8_len_at(p);
-        dl_Ls_push(r, (unsigned char)*p < 0x80 ? dan_ascii_s[(unsigned char)*p].s : dan_str_sub(p, p + k));
+        dl_Ls_push(r, dan_char_str(p, k));
         p += k;
     }
     return r;
