@@ -3422,8 +3422,26 @@ static dan_str dan_csv_guess(dan_str text) {
     return dan_strdup(",");
 }
 
-/* string in JSON: in quotes, with \" \\ \n \t and \u00XX for other control characters */
+/* The names of fields are written again for every object: the result for the same string (the
+   same place in memory) is kept. The cache holds both strings, so the place cannot be taken by
+   another string while it is there. */
+static DAN_TLS dan_str dan_jq_src[64], dan_jq_out[64];
+
+static dan_str dan_json_quote_new(dan_str s);
 static dan_str dan_json_quote(dan_str s) {
+    size_t slot = ((uintptr_t)s >> 4) & 63;
+    if (dan_jq_src[slot] == s) return dan_jq_out[slot];
+    dan_str r = dan_json_quote_new(s);
+    if (strlen(r) < 64) {
+        if (dan_jq_src[slot]) { dan_str_release(dan_jq_src[slot]); dan_str_release(dan_jq_out[slot]); }
+        dan_jq_src[slot] = dan_str_share(s);
+        dan_jq_out[slot] = dan_str_share(r);
+    }
+    return r;
+}
+
+/* string in JSON: in quotes, with \" \\ \n \t and \u00XX for other control characters */
+static dan_str dan_json_quote_new(dan_str s) {
     size_t n = 2;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++)
         n += *p == '"' || *p == '\\' || *p == '\n' || *p == '\t' ? 2 : *p < 32 ? 6 : 1;
