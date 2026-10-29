@@ -50,7 +50,7 @@ static void dan_netbuf_add(dan_netbuf *b, const void *p, size_t n) {
 static dan_bytes dan_netbuf_bytes(dan_netbuf *b) {
     dan_bytes_s *r = dan_bytes_alloc((int64_t)b->len);
     if (b->len) memcpy(r->data, b->data, b->len);
-    free(b->data);
+    dan_free(b->data);
     b->data = NULL;
     b->len = b->cap = 0;
     return r;
@@ -86,7 +86,7 @@ static dr_Ly dan_net_result(int64_t status, dan_netbuf *headers, dan_netbuf *bod
     dan_netbuf all = { NULL, 0, 0 };
     dan_netbuf_add(&all, code, strlen(code));
     if (headers->len) dan_netbuf_add(&all, headers->data, headers->len);
-    free(headers->data);
+    dan_free(headers->data);
     dl_Ly *r = dl_Ly_from(0, NULL);
     dl_Ly_push(r, dan_netbuf_bytes(&all));
     dl_Ly_push(r, dan_netbuf_bytes(body));
@@ -255,8 +255,8 @@ static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes bod
     dan_curl.easy_cleanup(c);
     if (list) dan_curl.slist_free_all(list);
     if (code != 0) {
-        free(h.data);
-        free(b.data);
+        dan_free(h.data);
+        dan_free(b.data);
         const char *why = dan_curl_why(code);
         char m[400];
         if (why) snprintf(m, sizeof m, "%s", why);
@@ -350,19 +350,19 @@ static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes bod
     u.lpszHostName = host; u.dwHostNameLength = 512;
     u.lpszUrlPath = path; u.dwUrlPathLength = 8192;
     u.lpszExtraInfo = extra; u.dwExtraInfoLength = 8192;
-    if (!dan_winhttp.CrackUrl(wurl, 0, 0, &u)) { free(wurl); free(wmethod); return dan_winhttp_error(url, NULL, NULL, NULL, line); }
+    if (!dan_winhttp.CrackUrl(wurl, 0, 0, &u)) { dan_free(wurl); dan_free(wmethod); return dan_winhttp_error(url, NULL, NULL, NULL, line); }
     wcscat(path, extra);     /* the path and the query «?а=1»; each part is shorter than 8192 */
     HINTERNET s = dan_winhttp.Open(L"Dan/0.19", 4 /* WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY */, NULL, NULL, 0);
     if (!s) s = dan_winhttp.Open(L"Dan/0.19", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!s) { free(wurl); free(wmethod); return dan_winhttp_error(url, NULL, NULL, NULL, line); }
+    if (!s) { dan_free(wurl); dan_free(wmethod); return dan_winhttp_error(url, NULL, NULL, NULL, line); }
     int ms = seconds > 0 && seconds < 2000000 ? (int)seconds * 1000 : 0;
     dan_winhttp.SetTimeouts(s, 0, 30000, ms ? ms : 30000, ms ? ms : 0);
     HINTERNET c = dan_winhttp.Connect(s, host, u.nPort, 0);
-    if (!c) { free(wurl); free(wmethod); return dan_winhttp_error(url, s, NULL, NULL, line); }
+    if (!c) { dan_free(wurl); dan_free(wmethod); return dan_winhttp_error(url, s, NULL, NULL, line); }
     HINTERNET r = dan_winhttp.OpenRequest(c, wmethod, path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                           u.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
-    free(wurl);
-    free(wmethod);
+    dan_free(wurl);
+    dan_free(wmethod);
     if (!r) return dan_winhttp_error(url, s, c, NULL, line);
     dan_winhttp.SetTimeouts(r, 0, 30000, ms ? ms : 30000, ms ? ms : 0);
     DWORD decompress = 3;   /* WINHTTP_DECOMPRESSION_FLAG_ALL (Windows 8.1 and newer) */
@@ -370,7 +370,7 @@ static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes bod
     for (int64_t i = 0; i < headers->len; i++) {
         wchar_t *wh = dan_wide(headers->items[i]);
         dan_winhttp.AddRequestHeaders(r, wh, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-        free(wh);
+        dan_free(wh);
     }
     DWORD n = dan_net_has_body(method, body) ? (DWORD)body->len : 0;
     if (!dan_winhttp.SendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, n ? (LPVOID)body->data : WINHTTP_NO_REQUEST_DATA, n, n, 0)
@@ -395,17 +395,17 @@ static dr_Ly dan_http(dan_str method, dan_str url, dl_Ls *headers, dan_bytes bod
                 p = e;
             }
         }
-        free(raw);
+        dan_free(raw);
     }
     for (;;) {
         DWORD avail = 0;
-        if (!dan_winhttp.QueryDataAvailable(r, &avail)) { free(h.data); free(b.data); return dan_winhttp_error(url, s, c, r, line); }
+        if (!dan_winhttp.QueryDataAvailable(r, &avail)) { dan_free(h.data); dan_free(b.data); return dan_winhttp_error(url, s, c, r, line); }
         if (avail == 0) break;
         uint8_t *chunk = dan_alloc(avail);
         DWORD got = 0;
-        if (!dan_winhttp.ReadData(r, chunk, avail, &got)) { free(chunk); free(h.data); free(b.data); return dan_winhttp_error(url, s, c, r, line); }
+        if (!dan_winhttp.ReadData(r, chunk, avail, &got)) { dan_free(chunk); dan_free(h.data); dan_free(b.data); return dan_winhttp_error(url, s, c, r, line); }
         dan_netbuf_add(&b, chunk, got);
-        free(chunk);
+        dan_free(chunk);
         if (got == 0) break;
     }
     dan_winhttp.CloseHandle(r);
@@ -516,7 +516,7 @@ static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, 
     dan_curl.easy_cleanup(c);
     if (list) dan_curl.slist_free_all(list);
     if (code != 0) {
-        free(b.data);
+        dan_free(b.data);
         /* libcurl reports a missing IMAP folder as a refused login */
         const char *why = (code == 67 && strstr(err, "Select")) ? DAN_TXT_MAIL_NOTFOUND : dan_mail_why(code);
         char m[400];
@@ -590,7 +590,7 @@ static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, 
         ok = dan_mail_write(wdata, data->data, (size_t)data->len);
     } else if (command[0]) dan_mail_cfg(&cfg, "request", command);
     ok = ok && dan_mail_write(wcfg, cfg.data, cfg.len);
-    free(cfg.data);
+    dan_free(cfg.data);
     dr_y result;
     if (!ok) result = dan_mail_fail(DAN_TXT_MAIL_TEMP, line);
     else {
@@ -629,10 +629,10 @@ static dr_y dan_mail(dan_str url, dan_str user, dan_str password, dan_str from, 
                 result = dan_mail_fail(m, line);
             }
         } else result = dan_mail_fail(DAN_TXT_MAIL_NOCURLEXE, line);
-        free(cmd);
+        dan_free(cmd);
     }
     DeleteFileW(wcfg); DeleteFileW(wdata); DeleteFileW(wout); DeleteFileW(werr);
-    free(wcfg); free(wdata); free(wout); free(werr);
+    dan_free(wcfg); dan_free(wdata); dan_free(wout); dan_free(werr);
     return result;
 }
 

@@ -135,7 +135,7 @@ static do_s dan_env_var(dan_str name) {
 #ifdef _WIN32
     wchar_t *wn = dan_wide(name);
     const wchar_t *v = _wgetenv(wn);
-    free(wn);
+    dan_free(wn);
     if (!v) return do_s_none();
     return do_s_some(dan_narrow(v));
 #else
@@ -174,8 +174,8 @@ static BOOL dan_win_spawn(dan_str command, DWORD flags, PROCESS_INFORMATION *pi)
     si.hStdError = dup[2] ? dup[2] : own[2];
     BOOL ok = CreateProcessW(NULL, cl, NULL, NULL, TRUE, flags, NULL, NULL, &si, pi);
     for (int k = 0; k < 3; k++) if (dup[k]) CloseHandle(dup[k]);
-    free(cl);
-    free(wc);
+    dan_free(cl);
+    dan_free(wc);
     return ok;
 }
 #endif
@@ -284,7 +284,7 @@ static dr_s dan_run_output(dan_str command, int line) {
 #ifdef _WIN32
     wchar_t *wc = dan_wide(command);
     FILE *p = _wpopen(wc, L"rb");
-    free(wc);
+    dan_free(wc);
 #else
     FILE *p = popen(command, "r");
 #endif
@@ -628,7 +628,7 @@ static void dan_rx_gen(dan_rxp *P, dan_rxn *n) {
                 if (n->greedy) rx->code[s].x = body; else rx->code[s].y = body;
             }
             for (int i = 0; i < k; i++) { if (n->greedy) rx->code[ends[i]].y = rx->n; else rx->code[ends[i]].x = rx->n; }
-            free(ends);
+            dan_free(ends);
         }
         break;
     }
@@ -636,10 +636,10 @@ static void dan_rx_gen(dan_rxp *P, dan_rxn *n) {
 }
 
 static void dan_rx_free(dan_rx *rx) {
-    for (int i = 0; i < rx->ncls; i++) free(rx->cls[i].r);
-    free(rx->cls);
-    free(rx->code);
-    free(rx);
+    for (int i = 0; i < rx->ncls; i++) dan_free(rx->cls[i].r);
+    dan_free(rx->cls);
+    dan_free(rx->code);
+    dan_free(rx);
 }
 
 /* compiled patterns are kept: a pattern in a loop is compiled once */
@@ -661,8 +661,8 @@ static dan_rx *dan_rx_compile(dan_str pattern, int line) {
     dan_rx_gen(&P, tree);
     dan_rx_emit(&P, RX_SAVE, 1, 0, 0);
     dan_rx_emit(&P, RX_MATCH, 0, 0, 0);
-    for (int i = 0; i < P.nall; i++) free(P.all[i]);
-    free(P.all);
+    for (int i = 0; i < P.nall; i++) dan_free(P.all[i]);
+    dan_free(P.all);
     if (rx->icase)
         for (int i = 0; i < rx->ncls; i++) {        /* classes also match the other case */
             dan_rx_class *k = &rx->cls[i];
@@ -679,7 +679,7 @@ static dan_rx *dan_rx_compile(dan_str pattern, int line) {
         }
     int slot = dan_rx_next;
     dan_rx_next = (dan_rx_next + 1) % DAN_RX_CACHE;
-    if (dan_rx_cache[slot].pattern) { free(dan_rx_cache[slot].pattern); dan_rx_free(dan_rx_cache[slot].rx); }
+    if (dan_rx_cache[slot].pattern) { dan_free(dan_rx_cache[slot].pattern); dan_rx_free(dan_rx_cache[slot].rx); }
     size_t len = strlen(pattern);
     dan_rx_cache[slot].pattern = dan_alloc(len + 1);
     memcpy(dan_rx_cache[slot].pattern, pattern, len + 1);
@@ -802,7 +802,7 @@ static int dan_rx_exec(const dan_rx *rx, const char *text, size_t from, int anch
         dan_rx_list t = cl; cl = nl; nl = t;
         if (cl.n == 0 && (found || anchored)) break;
     }
-    free(a); free(b); free(stack); free(mark);
+    dan_free(a); dan_free(b); dan_free(stack); dan_free(mark);
     return found;
 }
 

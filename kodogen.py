@@ -290,13 +290,120 @@ static inline void dan_wasm_leave(int *unused) { (void)unused; dan_wasm_depth--;
     if (DAN_UNLIKELY(DAN_FRAME() < dan_stack_base - dan_stack_limit)) dan_stack_error(line); } while (0)
 #endif
 
+/* ---- memory: small blocks ----
+   Blocks up to 256 bytes (strings, cells of variants, records, dictionaries, short lists)
+   are the most frequent: they are taken from per-thread lists by size class and returned
+   there, without malloc and free. Blocks of one class are cut from regions of 64 KiB; a
+   two-level table by address tells whether a block belongs to such a region and to which
+   class, so dan_free and dan_realloc accept any pointer (also from malloc). Regions are not
+   returned to the system: their memory is reused. A block freed by another task goes to
+   the list of that task. Under the address sanitizer the lists are off, so that it still
+   finds use after free. */
+#if defined(__SANITIZE_ADDRESS__)
+#define DAN_NO_POOL 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DAN_NO_POOL 1
+#endif
+#endif
+#ifndef DAN_NO_POOL
+#define DAN_SB_SHIFT 16                     /* regions of 64 KiB */
+#define DAN_SB_CLASSES 16                   /* blocks of 16, 32, ..., 256 bytes */
+typedef struct dan_sblock { struct dan_sblock *next; } dan_sblock;
+static DAN_TLS dan_sblock *dan_sb_free[DAN_SB_CLASSES + 1];
+static DAN_TLS char *dan_sb_cur[DAN_SB_CLASSES + 1];
+static DAN_TLS size_t dan_sb_left[DAN_SB_CLASSES + 1];
+static DAN_TLS char *dan_sb_spare;          /* regions not yet given to a class */
+static DAN_TLS int dan_sb_spare_n;
+static unsigned char *dan_sb_map[1 << 16];  /* region number: high 16 bits -> classes by low 16 bits */
+
+static inline int dan_sb_class(const void *p) {
+    uint64_t r = (uint64_t)(uintptr_t)p >> DAN_SB_SHIFT;
+    if (r >> 32) return 0;
+    unsigned char *m = __atomic_load_n(&dan_sb_map[r >> 16], __ATOMIC_ACQUIRE);
+    return m ? m[r & 0xFFFF] : 0;
+}
+
+/* a new region for class c; NULL if the address does not fit the table */
+static char *dan_sb_region(int c) {
+    if (!dan_sb_spare_n) {
+        char *slab = malloc((size_t)17 << DAN_SB_SHIFT);
+        if (!slab) return NULL;
+        dan_sb_spare = (char *)(((uintptr_t)slab + ((uintptr_t)1 << DAN_SB_SHIFT) - 1) & ~(((uintptr_t)1 << DAN_SB_SHIFT) - 1));
+        dan_sb_spare_n = 16;
+    }
+    char *g = dan_sb_spare;
+    uint64_t r = (uint64_t)(uintptr_t)g >> DAN_SB_SHIFT;
+    if (r >> 32) return NULL;
+    unsigned char *m = __atomic_load_n(&dan_sb_map[r >> 16], __ATOMIC_ACQUIRE);
+    if (!m) {
+        unsigned char *n = calloc((size_t)1 << 16, 1), *expected = NULL;
+        if (!n) return NULL;
+        if (__atomic_compare_exchange_n(&dan_sb_map[r >> 16], &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) m = n;
+        else { free(n); m = expected; }
+    }
+    __atomic_store_n(&m[r & 0xFFFF], (unsigned char)c, __ATOMIC_RELEASE);
+    dan_sb_spare += (size_t)1 << DAN_SB_SHIFT;
+    dan_sb_spare_n--;
+    return g;
+}
+
+static inline void *dan_sb_alloc(size_t n) {
+    int c = n ? (int)((n + 15) >> 4) : 1;
+    dan_sblock *b = dan_sb_free[c];
+    if (b) { dan_sb_free[c] = b->next; return b; }
+    size_t size = (size_t)c * 16;
+    if (dan_sb_left[c] < size) {
+        char *g = dan_sb_region(c);
+        if (!g) return NULL;
+        dan_sb_cur[c] = g;
+        dan_sb_left[c] = (size_t)1 << DAN_SB_SHIFT;
+    }
+    void *p = dan_sb_cur[c];
+    dan_sb_cur[c] += size;
+    dan_sb_left[c] -= size;
+    return p;
+}
+#endif
+
 static void *dan_alloc(size_t n) {
+#ifndef DAN_NO_POOL
+    if (n <= DAN_SB_CLASSES * 16) {
+        void *b = dan_sb_alloc(n);
+        if (b) return b;
+    }
+#endif
     void *p = malloc(n ? n : 1);
     if (!p) dan_error(DAN_MSG_NO_MEMORY, 0);
     return p;
 }
 
+static void dan_free(void *p) {
+#ifndef DAN_NO_POOL
+    int c = dan_sb_class(p);
+    if (c) {
+        dan_sblock *b = p;
+        b->next = dan_sb_free[c];
+        dan_sb_free[c] = b;
+        return;
+    }
+#endif
+    free(p);
+}
+
 static void *dan_realloc(void *p, size_t n) {
+#ifndef DAN_NO_POOL
+    int c = dan_sb_class(p);
+    if (c) {
+        size_t size = (size_t)c * 16;
+        if (n <= size) return p;
+        void *r = dan_alloc(n);
+        memcpy(r, p, size);
+        dan_free(p);
+        return r;
+    }
+    if (!p) return dan_alloc(n);
+#endif
     p = realloc(p, n ? n : 1);
     if (!p) dan_error(DAN_MSG_NO_MEMORY, 0);
     return p;
@@ -398,60 +505,12 @@ static inline void *dan_env_clone(void *e) { return e ? ((dan_envb *)e)->c(e) : 
 
 /* Strings: the header is right before the characters. Text that did not
    come from dan_str_new (a C literal) has no header and is never freed. */
-/* Short strings (up to 55 characters with the header in 64 bytes) are the most
-   frequent objects: their blocks are kept in per-thread lists by size and
-   reused without malloc and free. A block of a pooled string is marked
-   DAN_POOLED; its class is found from the length of the text, which never
-   grows after creation (a shorter text gives a smaller class: the block is
-   only bigger than needed). Under the address sanitizer the lists are off,
-   so that it still finds use after free. */
-#define DAN_POOLED 4u
-#if defined(__SANITIZE_ADDRESS__)
-#define DAN_NO_POOL 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define DAN_NO_POOL 1
-#endif
-#endif
-#ifndef DAN_NO_POOL
-#define DAN_POOL_CLASSES 4                  /* blocks of 16, 32, 48 and 64 bytes */
-#define DAN_POOL_KEEP 4096                  /* free blocks kept per class */
-typedef struct dan_pblock { struct dan_pblock *next; } dan_pblock;
-static DAN_TLS dan_pblock *dan_pool[DAN_POOL_CLASSES + 1];
-static DAN_TLS int dan_pool_n[DAN_POOL_CLASSES + 1];
-static inline int dan_pool_class(size_t bytes) { return (int)((bytes + 15) / 16); }
-#endif
-static void dan_str_destroy(dan_hdr *h) {
-#ifndef DAN_NO_POOL
-    if (h->flags & DAN_POOLED) {
-        int c = dan_pool_class(sizeof *h + strlen((const char *)(h + 1)) + 1);
-        if (dan_pool_n[c] < DAN_POOL_KEEP) {
-            dan_pblock *b = (dan_pblock *)(void *)h;
-            b->next = dan_pool[c];
-            dan_pool[c] = b;
-            dan_pool_n[c]++;
-            return;
-        }
-    }
-#endif
-    free(h);
-}
+/* Short strings are the most frequent values: their blocks come from the lists of small
+   blocks (dan_alloc), without malloc and free. */
+static void dan_str_destroy(dan_hdr *h) { dan_free(h); }
 static char *dan_str_new(size_t n) {
-    dan_hdr *h;
-#ifndef DAN_NO_POOL
-    size_t bytes = sizeof *h + n + 1;
-    int c = dan_pool_class(bytes);
-    if (c <= DAN_POOL_CLASSES) {
-        if (dan_pool[c]) { h = (dan_hdr *)(void *)dan_pool[c]; dan_pool[c] = dan_pool[c]->next; dan_pool_n[c]--; }
-        else h = dan_alloc((size_t)c * 16);
-        dan_hdr_new(h, dan_str_destroy);
-        h->flags |= DAN_POOLED;
-    } else
-#endif
-    {
-        h = dan_alloc(sizeof *h + n + 1);
-        dan_hdr_new(h, dan_str_destroy);
-    }
+    dan_hdr *h = dan_alloc(sizeof *h + n + 1);
+    dan_hdr_new(h, dan_str_destroy);
     char *s = (char *)(h + 1);
     s[n] = 0;
     return s;
@@ -723,7 +782,7 @@ static dan_str dan_buf_str(dan_buf *b) {
     return b->s;
 }
 
-static void dan_buf_free(dan_buf *b) { if (b->s) free((dan_hdr *)(void *)b->s - 1); b->s = NULL; }
+static void dan_buf_free(dan_buf *b) { if (b->s) dan_free((dan_hdr *)(void *)b->s - 1); b->s = NULL; }
 
 /* the program's command line arguments (for аргументы()) */
 static int dan_argc;
@@ -761,7 +820,7 @@ static dan_str dan_str_replace(dan_str s, dan_str a, dan_str b, int line) {
         memcpy(part, p, n);
         part[n] = 0;
         dan_buf_add(&r, part);
-        free(part);
+        dan_free(part);
         dan_buf_add(&r, b);
         p = f + la;
     }
@@ -877,7 +936,7 @@ static double dan_str_to_float(dan_str s, int line) {
     bool bad = end == p;
     while (*end == ' ' || *end == '\t') end++;
     if (*end) bad = true;
-    free(copy);
+    dan_free(copy);
     if (bad) dan_conv_error(DAN_MSG_NOT_FLOAT, s, line);
     return v;
 }
@@ -912,7 +971,7 @@ static dan_str dan_input(dan_str prompt) {
         char *r = dan_str_new((size_t)n);
         WideCharToMultiByte(CP_UTF8, 0, w, (int)len, r, n, NULL, NULL);
         r[n] = 0;
-        free(w);
+        dan_free(w);
         return r;
     }
 #endif
@@ -926,7 +985,7 @@ static dan_str dan_input(dan_str prompt) {
     if (len && r[len - 1] == '\r') len--;
     r[len] = 0;
     dan_str s = dan_strdup(r);
-    free(r);
+    dan_free(r);
     return s;
 }
 
@@ -1099,7 +1158,7 @@ static dan_rat dan_rat_from_float(double v, int line) {
 typedef struct { dan_hdr h; int64_t len; uint8_t *data; } dan_bytes_s;
 typedef const dan_bytes_s *dan_bytes;
 
-static void dan_bytes_destroy(dan_hdr *h) { dan_bytes_s *b = (dan_bytes_s *)(void *)h; free(b->data); free(b); }
+static void dan_bytes_destroy(dan_hdr *h) { dan_bytes_s *b = (dan_bytes_s *)(void *)h; dan_free(b->data); dan_free(b); }
 static inline dan_bytes dan_bytes_share(dan_bytes b) { if (b) dan_hdr_share((dan_hdr *)&b->h); return b; }
 static inline void dan_bytes_release(dan_bytes b) { if (b) dan_hdr_release((dan_hdr *)&b->h, dan_bytes_destroy); }
 static inline void dan_bytes_give(dan_bytes b) { if (b) dan_hdr_give((dan_hdr *)&b->h, dan_bytes_destroy); }
@@ -1209,7 +1268,7 @@ static void dan_start(void) {
 typedef struct { dan_hdr h; int32_t sign, n; uint32_t d[]; } dan_big_s;
 typedef const dan_big_s *dan_big;
 
-static void dan_big_destroy(dan_hdr *h) { free(h); }
+static void dan_big_destroy(dan_hdr *h) { dan_free(h); }
 static dan_big_s *dan_big_alloc(int64_t n) {
     if (n > 100000000) dan_error(DAN_MSG_BIG_HUGE, 0);
     dan_big_s *b = dan_alloc(sizeof *b + sizeof(uint32_t) * (size_t)(n ? n : 1));
@@ -1362,8 +1421,8 @@ static void dan_mag_divmod(const uint32_t *u, int32_t m, const uint32_t *v, int3
     }
     for (int32_t i = 0; i < n - 1; i++) r[i] = (uint32_t)(((uint64_t)un[i] >> s) | ((uint64_t)un[i + 1] << (32 - s)));
     r[n - 1] = un[n - 1] >> s;
-    free(vn);
-    free(un);
+    dan_free(vn);
+    dan_free(un);
 }
 
 /* School division with remainder: a = b * q + r, 0 <= r < |b| (as for цел). */
@@ -1462,8 +1521,8 @@ static dan_str dan_big_to_str(dan_big a) {
     if (a->sign < 0) buf[len++] = '-';
     char *s = dan_str_new(len);
     for (size_t i = 0; i < len; i++) s[i] = buf[len - 1 - i];
-    free(t);
-    free(buf);
+    dan_free(t);
+    dan_free(buf);
     return s;
 }
 static void dan_write_big(dan_big a) { fputs(dan_big_to_str(a), stdout); }
@@ -2287,7 +2346,7 @@ static void dan_task_begin(dan_task *t) {
 }
 
 static void dan_task_end(dan_task *t) {
-    free(dan_zct); free(dan_dead);
+    dan_free(dan_zct); dan_free(dan_dead);
     dan_zct = dan_dead = NULL;
     dan_zct_n = dan_zct_cap = dan_dead_n = dan_dead_cap = 0;
     dan_lock(&dan_sched);
@@ -2324,7 +2383,7 @@ static void dan_tgroup_join(dan_tgroup *g, int line) {
         dan_task *t = g->head;
         g->head = t->next;
         dan_task_join(t, line);
-        free(t);
+        dan_free(t);
     }
 }
 
@@ -2345,8 +2404,8 @@ typedef struct dan_chan {
 static void dan_chan_destroy(dan_hdr *h) {
     dan_chan *c = (dan_chan *)(void *)h;
     for (int64_t i = 0; i < c->count; i++) c->drop(c->buf + (size_t)((c->head + i) % c->slots) * c->esize);
-    free(c->buf);
-    free(c);
+    dan_free(c->buf);
+    dan_free(c);
 }
 /* the table of temporaries reached a channel: decide under the lock */
 static void dan_chan_zct_done(dan_hdr *h) {
@@ -2444,8 +2503,8 @@ struct {S} {{ dan_hdr h; int64_t len, cap; {T} *items; }};
 static void {S}_destroy(dan_hdr *h) {{
     {S} *l = ({S} *)(void *)h;
     for (int64_t i = 0; i < l->len; i++) {RL}(l->items[i]);
-    free(l->items);
-    free(l);
+    dan_free(l->items);
+    dan_free(l);
 }}
 
 static {S} *{S}_from(int64_t n, {T} const *src) {{
@@ -2599,8 +2658,8 @@ struct {D} {{ dan_hdr h; int64_t len, n, cap, slots; {K} *keys; {V} *vals; uint6
 static void {D}_destroy(dan_hdr *h) {{
     {D} *d = ({D} *)(void *)h;
     for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {{ {RK}(d->keys[e]); {RV}(d->vals[e]); }}
-    free(d->hashes);
-    free(d);
+    dan_free(d->hashes);
+    dan_free(d);
 }}
 static {D} *{D}_new(void) {{
     {D} *d = dan_alloc(sizeof *d);
@@ -2662,7 +2721,7 @@ static void {D}_grow({D} *d) {{   /* убирает удалённые запи�
         if (!alive[e]) continue;
         d->keys[m] = keys[e]; d->vals[m] = vals[e]; d->hashes[m] = hashes[e]; d->alive[m] = true; m++;
     }}
-    free(hashes);
+    dan_free(hashes);
     d->n = m;
     {D}_reindex(d);
 }}
@@ -3872,7 +3931,7 @@ class Генератор:
                     строки.append(f"    case {номер}: {освободить} break;")
             строки.append("    default: break;")
             строки.append("    }")
-            строки.append("    free(c);")
+            строки.append("    dan_free(c);")
             строки.append("}")
             строки.append(f"static dan_str {имя}_str({имя} v) {{")
             строки.append("    DAN_STACK_CHECK(0);")
@@ -3982,7 +4041,7 @@ class Генератор:
                 т_c = self.тип_c(т)
                 освободить = f"{self.отпустить(т)}(c->v);" if self.отпустить(т) else ""
                 строки += [
-                    f"static void {имя}_destroy(dan_hdr *h) {{ {имя}_cell *c = ({имя}_cell *)(void *)h; {освободить} free(c); }}",
+                    f"static void {имя}_destroy(dan_hdr *h) {{ {имя}_cell *c = ({имя}_cell *)(void *)h; {освободить} dan_free(c); }}",
                     f"static {имя} {имя}_some({т_c} v) {{ {имя}_cell *c = dan_alloc(sizeof *c); "
                     f"dan_hdr_new(&c->h, {имя}_destroy); c->v = {self._учесть(т, 'v')}; return &c->v; }}",
                     f"static {имя} {имя}_share({имя} v) {{ if (v) dan_hdr_share({имя}_hdr(v)); return v; }}",
@@ -4220,7 +4279,7 @@ class Генератор:
             if self.отпустить(т):
                 self.пиши(f"{self.отпустить(т)}(a->a{и});")
         self.пиши("dan_task *t = a->task;")
-        self.пиши("free(a);")
+        self.пиши("dan_free(a);")
         self.пиши("dan_task_end(t);")
         self.пиши("return DAN_THREAD_RETURN;")
         for з in значения:
@@ -5079,7 +5138,7 @@ class Генератор:
             код.append(f"typedef struct {{ dan_hdr h; dan_destroy_fn d; void *(*c)(const void *); {поля} }} dan_env_{номер};")
             освободить = " ".join(f"{self.отпустить(т)}(e->{self.имя(имя)});" for имя, т in захваты if self.отпустить(т))
             код.append(f"static void dan_env_{номер}_destroy(dan_hdr *h) {{ dan_env_{номер} *e = (dan_env_{номер} *)(void *)h; "
-                       f"{освободить} free(e); }}")
+                       f"{освободить} dan_free(e); }}")
             копии = " ".join(f"r->{self.имя(имя)} = {self._скопировать(т, 'e->' + self.имя(имя))};" for имя, т in захваты)
             код.append(f"static void *dan_env_{номер}_clone(const void *p) {{ const dan_env_{номер} *e = p; "
                        f"dan_env_{номер} *r = dan_alloc(sizeof *r); *r = *e; dan_hdr_detached(&r->h); {копии} return r; }}")
@@ -5517,7 +5576,7 @@ class Генератор:
                        f"            for (int64_t i = lo; i < hi; i++) ix[i] = tmp[i];\n"
                        f"        }}\n"
                        f"    for (int64_t i = 0; i < n; i++) r->items[i] = l->items[ix[i]];\n"
-                       f"    free(k); free(ix); free(tmp);\n"
+                       f"    dan_free(k); dan_free(ix); dan_free(tmp);\n"
                        f"    return r;\n}}")
             self.помощники[ключ] = код
         имя = self.помощники[ключ].split("(", 1)[0].split()[-1].lstrip("*")

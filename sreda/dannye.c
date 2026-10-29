@@ -140,7 +140,7 @@ static void dan_make_dirs(dan_str path, int line) {
             p[i] = keep;
         }
     }
-    free(p);
+    dan_free(p);
 }
 
 static int dan_qcmp_str(const void *a, const void *b) { return strcmp(*(dan_str const *)a, *(dan_str const *)b); }
@@ -186,9 +186,9 @@ static dan_str dan_current_dir(void) {
     DWORD n = GetCurrentDirectoryW(0, NULL);
     if (n == 0) return dan_strdup(".");
     wchar_t *w = dan_alloc(sizeof(wchar_t) * (n + 1));
-    if (GetCurrentDirectoryW(n + 1, w) == 0) { free(w); return dan_strdup("."); }
+    if (GetCurrentDirectoryW(n + 1, w) == 0) { dan_free(w); return dan_strdup("."); }
     dan_str r = dan_narrow(w);
-    free(w);
+    dan_free(w);
     return r;
 #elif defined(__wasi__)
     return dan_strdup(".");
@@ -196,7 +196,7 @@ static dan_str dan_current_dir(void) {
     char *p = getcwd(NULL, 0);
     if (!p) return dan_strdup(".");
     dan_str r = dan_strdup(p);
-    free(p);
+    dan_free(p);
     return r;
 #endif
 }
@@ -594,7 +594,7 @@ static void dan_pbkdf2_sha256(const uint8_t *pw, size_t pwlen, const uint8_t *sa
         memcpy(out, t, k);
         out += k; outlen -= k;
     }
-    free(s);
+    dan_free(s);
 }
 
 static void dan_pbkdf2_sha1(const uint8_t *pw, size_t pwlen, const uint8_t *salt, size_t slen,
@@ -617,7 +617,7 @@ static void dan_pbkdf2_sha1(const uint8_t *pw, size_t pwlen, const uint8_t *salt
         memcpy(out, t, k);
         out += k; outlen -= k;
     }
-    free(s);
+    dan_free(s);
 }
 
 static dan_str dan_sha256_hex(const uint8_t *p, size_t n) {
@@ -1101,8 +1101,8 @@ static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count) {
             i++;
         }
     }
-    free(z.head);
-    free(z.prev);
+    dan_free(z.head);
+    dan_free(z.prev);
     *count = k;
     return out;
 }
@@ -1269,7 +1269,7 @@ static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
         pos += raw;
     }
     dan_bitw_align(&w);
-    free(s);
+    dan_free(s);
     *outlen = w.len;
     return w.d;
 }
@@ -1429,7 +1429,7 @@ static dan_bytes dan_gzip_raw(const uint8_t *d, size_t n) {
     memcpy(out + 10, c, clen);
     dan_put_le32(out + 10 + clen, dan_crc32_update(0, d, n));
     dan_put_le32(out + 14 + clen, (uint32_t)n);
-    free(c);
+    dan_free(c);
     return dan_bytes_wrap(out, (int64_t)(clen + 18));
 }
 
@@ -1512,7 +1512,7 @@ static void dan_zip_add(dan_bbuf *out, dan_bbuf *cd, const char *name, const uin
         dan_bbuf_add(&payload, keys + 64, 2);
         dan_bbuf_add(&payload, ct, clen);
         dan_bbuf_add(&payload, mac, 10);
-        free(ct);
+        dan_free(ct);
         dan_bbuf_u16(&extra, 0x9901); dan_bbuf_u16(&extra, 7); dan_bbuf_u16(&extra, 2);
         dan_bbuf_add(&extra, "AE", 2);
         uint8_t strength = 3;
@@ -1523,7 +1523,7 @@ static void dan_zip_add(dan_bbuf *out, dan_bbuf *cd, const char *name, const uin
         stored_method = 99;
         crc = 0;
     } else dan_bbuf_add(&payload, body, clen);
-    free(comp);
+    dan_free(comp);
     if (out->len + payload.len + 1024 > 0xFFFFFFFFu) dan_error(DAN_MSG_ZIP_BIG, line);
     uint32_t offset = (uint32_t)out->len;
     size_t nlen = strlen(name);
@@ -1543,8 +1543,8 @@ static void dan_zip_add(dan_bbuf *out, dan_bbuf *cd, const char *name, const uin
     dan_bbuf_u16(cd, 0); dan_bbuf_u16(cd, 0); dan_bbuf_u32(cd, 0x20); dan_bbuf_u32(cd, offset);
     dan_bbuf_add(cd, name, nlen);
     if (extra.len) dan_bbuf_add(cd, extra.d, extra.len);
-    free(payload.d);
-    free(extra.d);
+    dan_free(payload.d);
+    dan_free(extra.d);
 }
 
 /* Central directory and its end record; cd is freed. */
@@ -1554,7 +1554,7 @@ static void dan_zip_finish(dan_bbuf *out, dan_bbuf *cd, int64_t count) {
     dan_bbuf_u32(out, 0x06054b50); dan_bbuf_u16(out, 0); dan_bbuf_u16(out, 0);
     dan_bbuf_u16(out, (uint32_t)count); dan_bbuf_u16(out, (uint32_t)count);
     dan_bbuf_u32(out, (uint32_t)cd->len); dan_bbuf_u32(out, cd_offset); dan_bbuf_u16(out, 0);
-    free(cd->d);
+    dan_free(cd->d);
 }
 
 static void dan_create_zip(dan_str zip_path, const dl_Ls *files, dan_str password, int line) {
@@ -1568,7 +1568,7 @@ static void dan_create_zip(dan_str zip_path, const dl_Ls *files, dan_str passwor
     }
     dan_zip_finish(&out, &cd, files->len);
     dan_write_raw(zip_path, "wb", out.d, out.len, line);
-    free(out.d);
+    dan_free(out.d);
 }
 
 /* Archive in memory from pairs [name, data, name, data, ...] (names are text in bytes). */
@@ -1650,7 +1650,7 @@ static dl_Ls *dan_zip_list(dan_str zip_path, int line) {
     dan_zip_entry *e = dan_zip_entries(dan_read_bytes(zip_path, line), &k, line);
     dl_Ls *r = dl_Ls_from(0, NULL);
     for (int64_t i = 0; i < k; i++) dl_Ls_push(r, e[i].name);
-    free(e);
+    dan_free(e);
     return r;
 }
 
@@ -1709,8 +1709,8 @@ static uint8_t *dan_zip_entry_data(const uint8_t *p, size_t n, const dan_zip_ent
         /* when the error is caught, damaged data must not leave the output of inflate behind */
         dan_inf s = { data, dlen, 0, 0, 0, NULL, 0, 0, line, dan_catch != NULL, 0 };
         dan_inflate_into(&s);
-        free(data);
-        if (s.bad) { free(s.out); dan_zip_tmp[1] = NULL; dan_error(DAN_MSG_CORRUPT, line); }
+        dan_free(data);
+        if (s.bad) { dan_free(s.out); dan_zip_tmp[1] = NULL; dan_error(DAN_MSG_CORRUPT, line); }
         plain = s.out ? s.out : dan_alloc(1);
         *plen = s.outlen;
         dan_zip_tmp[1] = plain;
@@ -1745,10 +1745,10 @@ static dl_Ls *dan_extract_zip(dan_str zip_path, dan_str folder, dan_str password
         size_t plen;
         uint8_t *plain = dan_zip_entry_data(z->data, (size_t)z->len, x, password, &plen, line);
         dan_write_raw(target, "wb", plain, plen, line);
-        free(plain);
+        dan_free(plain);
         dl_Ls_push(done, x->name);
     }
-    free(e);
+    dan_free(e);
     return done;
 }
 
@@ -1766,7 +1766,7 @@ static dl_Ly *dan_zip_unpack(dan_bytes z, int line) {
         dl_Ly_push(r, dan_bytes_wrap(plain, (int64_t)plen));
     }
     dan_zip_tmp[0] = NULL;
-    free(e);
+    dan_free(e);
     return r;
 }
 
@@ -1779,7 +1779,7 @@ static dr_Ly dan_zip_unpack_try(dan_bytes z, int line) {
     dan_zip_tmp[0] = dan_zip_tmp[1] = NULL;
     if (setjmp(here)) {
         dan_catch = outer;
-        free(dan_zip_tmp[0]); free(dan_zip_tmp[1]);
+        dan_free(dan_zip_tmp[0]); dan_free(dan_zip_tmp[1]);
         dan_zip_tmp[0] = dan_zip_tmp[1] = NULL;
         return dr_Ly_err(dan_strdup(dan_caught), line);
     }
@@ -2225,7 +2225,7 @@ static void dan_lzma_encode_chunk(dan_lzm *m, dan_mf *f, int32_t *head3, dan_nod
             else dan_lze_match(m, e, at, nd->len, nd->dist);
             at += nd->len;
         }
-        free(path);
+        dan_free(path);
         p += (size_t)horizon;
     }
 }
@@ -2306,12 +2306,12 @@ static dan_bytes dan_xz_raw(const uint8_t *d, size_t n) {
             need_reset = 0;
             need_props = 0;
         }
-        free(e.d);
+        dan_free(e.d);
         first = 0;
     }
     uint8_t zero = 0;
     dan_bbuf_add(&lz2, &zero, 1);
-    free(f.head); free(f.prev); free(m); free(snap); free(head3); free(nodes);
+    dan_free(f.head); dan_free(f.prev); dan_free(m); dan_free(snap); dan_free(head3); dan_free(nodes);
 
     dan_bbuf x = { NULL, 0, 0 };
     static const uint8_t magic[6] = { 0xFD, '7', 'z', 'X', 'Z', 0 };
@@ -2355,8 +2355,8 @@ static dan_bytes dan_xz_raw(const uint8_t *d, size_t n) {
     dan_bbuf_u32(&x, dan_crc32_update(0, foot, 6));
     dan_bbuf_add(&x, foot, 6);
     dan_bbuf_add(&x, "YZ", 2);
-    free(lz2.d);
-    free(bh.d);
+    dan_free(lz2.d);
+    dan_free(bh.d);
     return dan_bytes_wrap(x.d, (int64_t)x.len);
 }
 
@@ -2533,7 +2533,7 @@ static size_t dan_lzma2_decode(const uint8_t *p, size_t pos, size_t end, dan_bbu
         dan_lzma_decode_chunk(m, &rc, out, dict_start, un, line);
         pos += pk;
     }
-    free(m);
+    dan_free(m);
     return pos;
 }
 
@@ -2848,8 +2848,8 @@ static dr_Ls dan_xml_parse(dan_str text, int line) {
         dan_xml_fail(&x, x.p, why);
     }
     if (!x.err && !root_done) dan_xml_fail(&x, x.p, DAN_TXT_XML_EMPTY);
-    free(stack);
-    free(x.tmp);
+    dan_free(stack);
+    dan_free(x.tmp);
     if (x.err) return dr_Ls_err(x.err, line);
     return dr_Ls_some(x.out);
 }
@@ -2900,9 +2900,9 @@ static uint8_t *dan_b64_decode_raw(const char *s, size_t n, size_t *outlen, int 
         else if (c == '/' || c == '_') v = 63;
         else if (c == '=') { pad++; continue; }
         else if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
-        else if (strict) { free(o); return NULL; }
+        else if (strict) { dan_free(o); return NULL; }
         else continue;
-        if (pad && strict) { free(o); return NULL; }
+        if (pad && strict) { dan_free(o); return NULL; }
         acc = acc << 6 | (uint32_t)v;
         bits += 6;
         if (bits >= 8) { bits -= 8; o[k++] = (uint8_t)(acc >> bits); }
@@ -3285,12 +3285,12 @@ static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
             }
             char why[160];
             if (!closed) {
-                free(f.s);
+                dan_free(f.s);
                 snprintf(why, sizeof why, "CSV, строка %ld: кавычка не закрыта", start);
                 return dr_LLs_err(dan_strdup(why), line);
             }
             if (*p && strncmp(p, sep, sl) != 0 && *p != '\n' && *p != '\r') {
-                free(f.s);
+                dan_free(f.s);
                 snprintf(why, sizeof why, "CSV, строка %ld: после закрывающей кавычки должен идти разделитель", lineno);
                 return dr_LLs_err(dan_strdup(why), line);
             }
@@ -3318,7 +3318,7 @@ static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
         dl_LLs_push(rows, row);
     }
     #undef DAN_CSV_TAKE
-    free(f.s);
+    dan_free(f.s);
     return dr_LLs_some(rows);
 }
 
@@ -3369,14 +3369,14 @@ static dr_Ls dan_json_scan(dan_str text, int compact, int line) {
         size_t end = dan_json_space(&j, e);
         if (end < j.n) dan_json_fail(&j, end, "после значения лишний текст");
     }
-    free(j.tmp.s);
+    dan_free(j.tmp.s);
     for (int c = 0; c < 64; c++) if (j.keys[c]) dan_str_release(j.keys[c]);
-    if (j.err) { free(j.kinds.s); return dr_Ls_err(j.err, line); }
+    if (j.err) { dan_free(j.kinds.s); return dr_Ls_err(j.err, line); }
     if (compact) {
         char *k = dan_str_new(j.kinds.len);
         memcpy(k, j.kinds.s ? j.kinds.s : "", j.kinds.len);
         k[j.kinds.len] = 0;
-        free(j.kinds.s);
+        dan_free(j.kinds.s);
         dl_Ls_push(j.out, k);                 /* the kinds go first */
         memmove(j.out->items + 1, j.out->items, sizeof j.out->items[0] * (size_t)(j.out->len - 1));
         j.out->items[0] = k;
@@ -3466,10 +3466,10 @@ static dan_str dan_mime_header(const char *v, size_t n) {
                         size_t dl;
                         uint8_t *d = dan_b64_decode_raw(text, (size_t)(end - text), &dl, 0);
                         dan_mbuf_add(&raw, d, dl);
-                        free(d);
+                        dan_free(d);
                     } else dan_qp_decode(&raw, text, (size_t)(end - text), 1);
                     dan_charset_to_utf8(&b, (const uint8_t *)(raw.s ? raw.s : ""), raw.len, charset);
-                    free(raw.s);
+                    dan_free(raw.s);
                     i = (size_t)(end - v) + 2;
                     last_encoded = 1;
                     pending_ws = 0;
@@ -3491,7 +3491,7 @@ static dan_str dan_mime_header(const char *v, size_t n) {
     char *s = dan_str_new(b.len);
     memcpy(s, b.s, b.len);
     s[b.len] = 0;
-    free(b.s);
+    dan_free(b.s);
     return s;
 }
 
@@ -3557,18 +3557,18 @@ static dan_str dan_mime_param(const char *h, size_t n, const char *name) {
             dan_mbuf u = { NULL, 0, 0 };
             for (size_t m = vs; m < ve; m++) { if (h[m] == '\\' && m + 1 < ve) m++; dan_mbuf_add(&u, h + m, 1); }
             plain = dan_mime_header(u.s ? u.s : "", u.len);
-            free(u.s);
+            dan_free(u.s);
         }
     }
     if (ext.len) {
         dan_mbuf b = { NULL, 0, 0 };
         dan_charset_to_utf8(&b, (const uint8_t *)ext.s, ext.len, cs[0] ? cs : "utf-8");
-        free(ext.s);
+        dan_free(ext.s);
         dan_str r = dan_mime_header(b.s, b.len);
-        free(b.s);
+        dan_free(b.s);
         return r;
     }
-    free(ext.s);                        /* an empty extended value still has a buffer */
+    dan_free(ext.s);                        /* an empty extended value still has a buffer */
     return plain ? plain : dan_strdup("");
 }
 
@@ -3651,7 +3651,7 @@ static void dan_mime_part(dl_Ly *out, const char *s, size_t n, int depth, const 
             }
             if (part && part < body + bl) dan_mime_part(out, part, bl - (size_t)(part - body), depth + 1, sub_default);
         }
-        free(ct);
+        dan_free(ct);
         return;
     }
     /* a leaf part */
@@ -3671,7 +3671,7 @@ static void dan_mime_part(dl_Ly *out, const char *s, size_t n, int depth, const 
         size_t ol;
         uint8_t *d = dan_b64_decode_raw(body, bl, &ol, 0);
         dan_mbuf_add(&data, d, ol);
-        free(d);
+        dan_free(d);
     } else if (enc && dan_ieq(enc, "quoted-printable")) dan_qp_decode(&data, body, bl, 0);
     else dan_mbuf_add(&data, body, bl);
     dan_bytes content;
@@ -3681,14 +3681,14 @@ static void dan_mime_part(dl_Ly *out, const char *s, size_t n, int depth, const 
         dan_mbuf_add(&u, "", 0);
         dan_charset_to_utf8(&u, (const uint8_t *)(data.s ? data.s : ""), data.len, cs[0] ? cs : "us-ascii");
         content = dan_bytes_wrap((uint8_t *)u.s, (int64_t)u.len);
-        free(data.s);
+        dan_free(data.s);
     } else content = dan_bytes_wrap(data.s ? (uint8_t *)data.s : dan_alloc(1), (int64_t)data.len);
     dl_Ly_push(out, dan_mime_cstr("ч"));
     dl_Ly_push(out, dan_mime_cstr(type));
     dl_Ly_push(out, dan_bytes_from_str(file));
     dl_Ly_push(out, dan_mime_cstr(dtype));
     dl_Ly_push(out, content);
-    free(ct); free(enc); free(disp);
+    dan_free(ct); dan_free(enc); dan_free(disp);
 }
 
 static dl_Ly *dan_mail_parse(dan_bytes msg) {
@@ -3713,7 +3713,7 @@ static dl_Ly *dan_mail_parse(dan_bytes msg) {
                 dl_Ly_push(out, dan_mime_cstr("з"));
                 dl_Ly_push(out, dan_mime_cstr(name));
                 dl_Ly_push(out, dan_bytes_from_str(dan_mime_header(v, vl)));
-                free(v);
+                dan_free(v);
             }
         }
         i = e + 1;

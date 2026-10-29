@@ -51,7 +51,7 @@ static void dan_gui_push(const char *kind, int64_t el, int x, int y, const char 
         int cap = dan_gui_qcap ? dan_gui_qcap * 2 : 64;
         dan_gui_ev *q = dan_alloc(sizeof *q * (size_t)cap);
         for (int i = 0; i < dan_gui_qlen; i++) q[i] = dan_gui_q[(dan_gui_qhead + i) % dan_gui_qcap];
-        free(dan_gui_q);
+        dan_free(dan_gui_q);
         dan_gui_q = q;
         dan_gui_qcap = cap;
         dan_gui_qhead = 0;
@@ -94,7 +94,7 @@ static int64_t dan_gui_new(int kind, int window, HWND h) {
 }
 
 static void dan_gui_free_ops(dan_gui_el *e) {
-    for (int i = 0; i < e->nops; i++) free(e->ops[i].text);
+    for (int i = 0; i < e->nops; i++) dan_free(e->ops[i].text);
     e->nops = 0;
 }
 
@@ -311,7 +311,7 @@ static dr_i dan_window_create(dan_str title, int64_t width, int64_t height, int 
     wchar_t *t = dan_wide(title);
     HWND h = CreateWindowExW(0, L"DanWindow", t, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                              r.right - r.left, r.bottom - r.top, NULL, NULL, GetModuleHandleW(NULL), NULL);
-    free(t);
+    dan_free(t);
     if (!h) return dr_i_err(dan_strdup(DAN_TXT_GUI_START), line);
     int64_t n = dan_gui_new(DAN_W_WINDOW, 0, h);
     dan_gui[n - 1].font = dan_gui_font(15);
@@ -347,7 +347,7 @@ static int64_t dan_window_add(int64_t window, dan_str kind, dan_str text, int64_
     HWND h = CreateWindowExW(kinds[k].ex, kinds[k].cls, t, WS_CHILD | WS_VISIBLE | kinds[k].style, dan_px(x), dan_px(y),
                              dan_px(w), real_h, win->h, (HMENU)(INT_PTR)n, GetModuleHandleW(NULL), NULL);
     dan_gui_quiet--;
-    free(t);
+    dan_free(t);
     if (!h) dan_error(DAN_MSG_GUI_CREATE, line);
     dan_gui_new(kinds[k].kind, (int)window, h);
     SendMessageW(h, WM_SETFONT, (WPARAM)win->font, TRUE);
@@ -368,8 +368,8 @@ static void dan_gui_set_items(dan_gui_el *e, dan_str items) {
         one[n] = 0;
         wchar_t *w = dan_wide(one);
         SendMessageW(e->h, list ? LB_ADDSTRING : CB_ADDSTRING, 0, (LPARAM)w);
-        free(w);
-        free(one);
+        dan_free(w);
+        dan_free(one);
         p += n;
         if (*p == '\n') p++;
     }
@@ -393,7 +393,7 @@ static void dan_window_set(int64_t el, dan_str what, dan_str value, int line) {
         dan_gui_quiet++;
         SetWindowTextW(e->h, w);
         dan_gui_quiet--;
-        free(w);
+        dan_free(w);
     } else if (strcmp(what, "отмечен") == 0) {
         dan_gui_quiet++;
         SendMessageW(e->h, BM_SETCHECK, strcmp(value, "1") == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -435,7 +435,7 @@ static void dan_window_set(int64_t el, dan_str what, dan_str value, int line) {
         /* as if the person typed the text into the field: the event Изменение follows */
         wchar_t *w = dan_wide(value);
         SetWindowTextW(e->h, w);
-        free(w);
+        dan_free(w);
     } else if (strcmp(what, "щёлкнуть") == 0) {
         long x = 0, y = 0;
         char *p;
@@ -451,7 +451,7 @@ static void dan_window_set(int64_t el, dan_str what, dan_str value, int line) {
         else if (strcmp(value, DAN_TXT_KEY_RIGHT) == 0) PostMessageW(e->h, WM_KEYDOWN, VK_RIGHT, 0);
         else if (strcmp(value, DAN_TXT_KEY_UP) == 0) PostMessageW(e->h, WM_KEYDOWN, VK_UP, 0);
         else if (strcmp(value, DAN_TXT_KEY_DOWN) == 0) PostMessageW(e->h, WM_KEYDOWN, VK_DOWN, 0);
-        free(w);
+        dan_free(w);
     } else if (strcmp(what, "закрыть") == 0) {
         if (e->kind == DAN_W_WINDOW) DestroyWindow(e->h);
     } else if (strcmp(what, "фокус") == 0) {
@@ -471,7 +471,7 @@ static dan_str dan_window_get(int64_t el, dan_str what, int line) {
             wchar_t *w = dan_alloc(sizeof(wchar_t) * (size_t)(n + 1));
             SendMessageW(e->h, e->kind == DAN_W_LIST ? LB_GETTEXT : CB_GETLBTEXT, (WPARAM)i, (LPARAM)w);
             dan_str s = dan_narrow(w);
-            free(w);
+            dan_free(w);
             return s;
         }
         int n = GetWindowTextLengthW(e->h);
@@ -481,7 +481,7 @@ static dan_str dan_window_get(int64_t el, dan_str what, int line) {
         for (wchar_t *p = w; *p; p++) if (*p != L'\r') *o++ = *p;    /* \r\n -> \n */
         *o = 0;
         dan_str s = dan_narrow(w);
-        free(w);
+        dan_free(w);
         return s;
     }
     if (strcmp(what, "отмечен") == 0) return SendMessageW(e->h, BM_GETCHECK, 0, 0) == BST_CHECKED ? dan_true_s.s : dan_false_s.s;
@@ -540,7 +540,7 @@ static dl_Ls *dan_gui_event_list(dan_gui_ev *e) {
     snprintf(num, sizeof num, "%d", e->x); dl_Ls_push(r, dan_strdup(num));
     snprintf(num, sizeof num, "%d", e->y); dl_Ls_push(r, dan_strdup(num));
     dl_Ls_push(r, dan_strdup(e->text ? e->text : ""));
-    free(e->text);
+    dan_free(e->text);
     return r;
 }
 
@@ -588,8 +588,8 @@ static int64_t dan_window_message(dan_str title, dan_str text, dan_str kind) {
                : strcmp(kind, "предупреждение") == 0 ? MB_OK | MB_ICONWARNING : MB_OK | MB_ICONINFORMATION;
     HWND owner = GetActiveWindow();
     int r = MessageBoxW(owner, x, t, flags);
-    free(t);
-    free(x);
+    dan_free(t);
+    dan_free(x);
     return r == IDYES || r == IDOK;
 }
 
@@ -612,9 +612,9 @@ static do_s dan_window_file(dan_str kind, dan_str title, dan_str filter) {
     int save = strcmp(kind, "сохранить") == 0;
     o.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST);
     BOOL ok = save ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o);
-    free(t);
-    free(f);
-    free(ff);
+    dan_free(t);
+    dan_free(f);
+    dan_free(ff);
     if (!ok) return do_s_none();
     return do_s_some(dan_narrow(file));
 }

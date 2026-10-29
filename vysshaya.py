@@ -762,8 +762,8 @@ static dl_LLf *dan_mat_from_f(const double *a, int64_t r, int64_t c) {
     return m;
 }
 /* то же, рабочий массив после этого освобождается */
-static dl_LLr *dan_mat_from_r_free(dan_rat *a, int64_t r, int64_t c) { dl_LLr *m = dan_mat_from_r(a, r, c); free(a); return m; }
-static dl_LLf *dan_mat_from_f_free(double *a, int64_t r, int64_t c) { dl_LLf *m = dan_mat_from_f(a, r, c); free(a); return m; }
+static dl_LLr *dan_mat_from_r_free(dan_rat *a, int64_t r, int64_t c) { dl_LLr *m = dan_mat_from_r(a, r, c); dan_free(a); return m; }
+static dl_LLf *dan_mat_from_f_free(double *a, int64_t r, int64_t c) { dl_LLf *m = dan_mat_from_f(a, r, c); dan_free(a); return m; }
 /* Приведение к ступенчатому виду; возвращает ранг, в *det - определитель (для квадратной). */
 static int64_t dan_gauss_r(dan_rat *a, int64_t r, int64_t c, dan_rat *det, dan_rat *aug, int64_t ac, int line) {
     int64_t rank = 0;
@@ -798,14 +798,14 @@ static dan_rat dan_det_rat(const dl_LLr *m, int line) {
     if (c != m->len) dan_error(DAN_MSG_MATRIX_SQUARE, line);
     dan_rat d, *a = dan_mat_flat_r(m, c);
     dan_gauss_r(a, c, c, &d, NULL, 0, line);
-    free(a);
+    dan_free(a);
     return d;
 }
 static int64_t dan_rank_rat(const dl_LLr *m, int line) {
     int64_t c = dan_mat_cols_r(m, line);
     dan_rat *a = dan_mat_flat_r(m, c);
     int64_t r = dan_gauss_r(a, m->len, c, NULL, NULL, 0, line);
-    free(a);
+    dan_free(a);
     return r;
 }
 static dl_LLr *dan_identity(int64_t n, int line) {
@@ -821,8 +821,8 @@ static dl_LLr *dan_inverse_rat(const dl_LLr *m, int line) {
     for (int64_t i = 0; i < c * c; i++) { e[i].n = (i / c == i % c); e[i].d = 1; }
     if (dan_gauss_r(a, c, c, NULL, e, c, line) < c) dan_error(DAN_MSG_MATRIX_SINGULAR, line);
     dl_LLr *r = dan_mat_from_r(e, c, c);
-    free(a);
-    free(e);
+    dan_free(a);
+    dan_free(e);
     return r;
 }
 static double dan_gauss_f(double *a, int64_t n, double *aug, int line) {   /* квадратная, частичный выбор главного */
@@ -855,7 +855,7 @@ static double dan_det_float(const dl_LLf *m, int line) {
     if (c != m->len) dan_error(DAN_MSG_MATRIX_SQUARE, line);
     double *a = dan_mat_flat_f(m, c);
     double d = dan_gauss_f(a, c, NULL, line);
-    free(a);
+    dan_free(a);
     return d;
 }
 static dl_LLf *dan_inverse_float(const dl_LLf *m, int line) {
@@ -865,8 +865,8 @@ static dl_LLf *dan_inverse_float(const dl_LLf *m, int line) {
     for (int64_t i = 0; i < c * c; i++) e[i] = (i / c == i % c);
     if (dan_gauss_f(a, c, e, line) == 0) dan_error(DAN_MSG_MATRIX_SINGULAR, line);
     dl_LLf *r = dan_mat_from_f(e, c, c);
-    free(a);
-    free(e);
+    dan_free(a);
+    dan_free(e);
     return r;
 }
 static dl_LLr *dan_transpose_rat(const dl_LLr *m, int line) {
@@ -1385,7 +1385,7 @@ static dr_f dan_parse_float_res(dan_str s, int line) {
     bool bad = end == p;
     while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
     if (*end) bad = true;
-    free(t);
+    dan_free(t);
     if (bad) return dr_f_err(dan_not_number_msg(s, DAN_TXT_NOT_FLOAT), line);
     return dr_f_some(v);
 }
@@ -1428,7 +1428,7 @@ static do_Lr dan_lp(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, bool minimi
                 row = i; best = ratio;
             }
         }
-        if (row < 0) { free(t); free(basis); return do_Lr_none(); }   /* целевая функция не ограничена */
+        if (row < 0) { dan_free(t); dan_free(basis); return do_Lr_none(); }   /* целевая функция не ограничена */
         dan_rat pv = t[row * w + col];
         for (int64_t j = 0; j < w; j++) t[row * w + j] = dan_rat_div(t[row * w + j], pv, line);
         for (int64_t i = 0; i <= m; i++) {
@@ -1441,8 +1441,8 @@ static do_Lr dan_lp(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, bool minimi
     dl_Lr *x = dl_Lr_from(0, NULL);
     for (int64_t j = 0; j < n; j++) dl_Lr_push(x, zero);
     for (int64_t i = 0; i < m; i++) if (basis[i] < n) x->items[basis[i]] = t[i * w + w - 1];
-    free(t);
-    free(basis);
+    dan_free(t);
+    dan_free(basis);
     return do_Lr_some(x);
 }
 static do_Lr dan_lp_max(const dl_Lr *c, const dl_LLr *a, const dl_Lr *b, int line) { return dan_lp(c, a, b, false, line); }

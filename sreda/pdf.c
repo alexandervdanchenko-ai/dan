@@ -50,8 +50,8 @@ static void *dan_pa(dan_pdf *p, size_t n) {
 }
 
 static void dan_pdf_free(dan_pdf *p) {
-    while (p->arena) { dan_pblk *b = p->arena; p->arena = b->next; free(b); }
-    free(p->off); free(p->stm); free(p->idx); free(p->cache); free(p->busy);
+    while (p->arena) { dan_pblk *b = p->arena; p->arena = b->next; dan_free(b); }
+    dan_free(p->off); dan_free(p->stm); dan_free(p->idx); dan_free(p->cache); dan_free(p->busy);
 }
 
 static dan_po dan_po_null = { PO_NULL };
@@ -158,7 +158,7 @@ static dan_po *dan_pparse_string(dan_pdf *p, dan_plex *l) {
     o->s = dan_pa(p, n + 1);
     memcpy(o->s, b, n);
     o->n = n;
-    free(b);
+    dan_free(b);
     return o;
 }
 
@@ -229,7 +229,7 @@ static dan_po *dan_pparse(dan_pdf *p, dan_plex *l, int depth) {
         o->v = dan_pa(p, sizeof(dan_po *) * (o->cnt + 1));
         memcpy(o->k, k, sizeof(char *) * o->cnt);
         memcpy(o->v, v, sizeof(dan_po *) * o->cnt);
-        free(k); free(v);
+        dan_free(k); dan_free(v);
         return o;
     }
     if (c == '<') return dan_pparse_hex(p, l);
@@ -249,7 +249,7 @@ static dan_po *dan_pparse(dan_pdf *p, dan_plex *l, int depth) {
         }
         o->v = dan_pa(p, sizeof(dan_po *) * (o->cnt + 1));
         memcpy(o->v, v, sizeof(dan_po *) * o->cnt);
-        free(v);
+        dan_free(v);
         return o;
     }
     if (c == ')' || c == '>' || c == ']' || c == '{' || c == '}') {      /* stray delimiter */
@@ -419,8 +419,8 @@ static uint8_t *dan_ppredict(uint8_t *d, size_t *len, int64_t pred, int64_t colo
         }
         memcpy(prev, cur, row);
     }
-    free(prev);
-    free(d);
+    dan_free(prev);
+    dan_free(d);
     *len = rows * row;
     return out;
 }
@@ -430,7 +430,7 @@ static uint8_t *dan_pfilter(dan_pdf *p, const char *name, dan_po *parms, uint8_t
         size_t skip = (*len >= 2 && (d[0] & 15) == 8 && ((d[0] << 8) | d[1]) % 31 == 0) ? 2 : 0;
         dan_inf s = { d + skip, *len - skip, 0, 0, 0, NULL, 0, 0, 0, 1, 0 };
         dan_inflate_into(&s);
-        free(d);
+        dan_free(d);
         *len = s.outlen;
         d = s.out ? s.out : dan_alloc(1);
         if (parms->t == PO_DICT)
@@ -448,7 +448,7 @@ static uint8_t *dan_pfilter(dan_pdf *p, const char *name, dan_po *parms, uint8_t
             if (hi < 0) hi = v; else { o[n++] = (uint8_t)(hi * 16 + v); hi = -1; }
         }
         if (hi >= 0) o[n++] = (uint8_t)(hi * 16);
-        free(d);
+        dan_free(d);
         *len = n;
         return o;
     }
@@ -469,12 +469,12 @@ static uint8_t *dan_pfilter(dan_pdf *p, const char *name, dan_po *parms, uint8_t
             for (int j = k; j < 5; j++) acc = acc * 85 + 84;
             for (int j = 0; j < k - 1; j++) o[n++] = (uint8_t)(acc >> (24 - 8 * j));
         }
-        free(d);
+        dan_free(d);
         *len = n;
         return o;
     }
     /* LZW, images and others: no text in them */
-    free(d);
+    dan_free(d);
     *len = 0;
     return dan_alloc(1);
 }
@@ -496,7 +496,7 @@ static uint8_t *dan_pstream(dan_pdf *p, dan_po *s, size_t *outlen) {
         }
     uint8_t *r = dan_pa(p, len + 1);
     memcpy(r, d, len);
-    free(d);
+    dan_free(d);
     *outlen = len;
     return r;
 }
@@ -674,7 +674,7 @@ static const char *dan_popen(dan_pdf *p, const uint8_t *d, size_t n) {
             uint8_t *seen = dan_alloc(bits);
             memset(seen, 0, bits);
             ok = dan_pread_xref(p, (size_t)o->num, seen, 0);
-            free(seen);
+            dan_free(seen);
         }
     }
     if (!ok || !p->trailer || dan_pkey(p, p->trailer, "Root")->t != PO_DICT) dan_preconstruct(p);
@@ -1135,7 +1135,7 @@ static dr_Ls dan_pdf_text(dan_bytes data, int line) {
                     dan_ptext_add(&all, " ", 1);
                 }
                 if (all.s) dan_pcontent(&c, res, (const uint8_t *)all.s, all.len, 0);
-                free(all.s);
+                dan_free(all.s);
             }
             /* trailing spaces of lines are not needed */
             size_t w = 0;
@@ -1147,7 +1147,7 @@ static dr_Ls dan_pdf_text(dan_bytes data, int line) {
             char *s = dan_str_new(w);
             memcpy(s, t.s, w);
             s[w] = 0;
-            free(t.s);
+            dan_free(t.s);
             dl_Ls_push(pages, s);
             top--;
             continue;
@@ -1163,8 +1163,8 @@ static dr_Ls dan_pdf_text(dan_bytes data, int line) {
         stack[++top] = kid;
         pos[top] = 0;
     }
-    for (int i = 0; i < c.nfonts; i++) { free(c.fonts[i].f.m); free(c.fonts[i].f.cw); }
-    free(c.fonts);
+    for (int i = 0; i < c.nfonts; i++) { dan_free(c.fonts[i].f.m); dan_free(c.fonts[i].f.cw); }
+    dan_free(c.fonts);
     dan_pdf_free(&p);
     return dr_Ls_some(pages);
 }
@@ -1248,7 +1248,7 @@ static int dan_ttf_advance(const dan_ttf *f, uint16_t gid) {
     return dan_be16(hm + 4 * i);
 }
 
-static void dan_ttf_free(dan_ttf *f) { free(f->d); free(f->path); free(f->used); free(f->uni); free(f); }
+static void dan_ttf_free(dan_ttf *f) { dan_free(f->d); dan_free(f->path); dan_free(f->used); dan_free(f->uni); dan_free(f); }
 
 /* Font from a file; result: number of the font, or an error */
 static dr_i dan_pdf_font(dan_str path, int line) {
@@ -1473,7 +1473,7 @@ static uint8_t *dan_ttf_subset(dan_ttf *f, size_t *outlen) {
         dan_bbuf_add(&out, data[i], lens[i]);
         while (out.len % 4) dan_bbuf_add(&out, "", 1);
     }
-    free(ng.d); free(nl.d); free(head_copy);
+    dan_free(ng.d); dan_free(nl.d); dan_free(head_copy);
     *outlen = out.len;
     return out.d;
 }
@@ -1517,12 +1517,12 @@ static void dan_pw_stream(dan_pw *w, const char *dict_extra, const uint8_t *d, s
         uint32_t ad = b << 16 | a;
         c[raw + 2] = (uint8_t)(ad >> 24); c[raw + 3] = (uint8_t)(ad >> 16); c[raw + 4] = (uint8_t)(ad >> 8); c[raw + 5] = (uint8_t)ad;
         clen = raw + 6;
-        free(def);
+        dan_free(def);
     }
     dan_pw_f(w, "<< /Length %zu%s%s >>\nstream\n", clen, c ? " /Filter /FlateDecode" : "", dict_extra);
     dan_bbuf_add(&w->b, c ? c : d, clen);
     dan_pw_s(w, "\nendstream\nendobj\n");
-    free(c);
+    dan_free(c);
 }
 
 static void dan_pw_num(char *t, double v) {
@@ -1604,7 +1604,7 @@ static dan_bytes dan_pdf_build(const dl_Ls *pages, double pw, double ph, int lin
                         snprintf(hx, sizeof hx, "%04X", gid);
                         dan_bbuf_add(&content, hx, 4);
                     }
-                    free(txt);
+                    dan_free(txt);
                     const char *tail = bold ? "> Tj 0 Tr ET\n" : "> Tj ET\n";
                     dan_bbuf_add(&content, tail, strlen(tail));
                 }
@@ -1630,7 +1630,7 @@ static dan_bytes dan_pdf_build(const dl_Ls *pages, double pw, double ph, int lin
         dan_pw_begin(&w);
         dan_pw_stream(&w, "", content.d ? content.d : (const uint8_t *)"", content.len, 1);
     }
-    free(content.d);
+    dan_free(content.d);
     /* fonts (all loaded fonts get objects, so numbers are known in advance) */
     for (int i = 0; i < dan_nttf; i++) {
         dan_ttf *f = dan_ttfs[i];
@@ -1662,7 +1662,7 @@ static dan_bytes dan_pdf_build(const dl_Ls *pages, double pw, double ph, int lin
         char extra[48];
         snprintf(extra, sizeof extra, " /Length1 %zu", sl);
         dan_pw_stream(&w, extra, sub, sl, 1);
-        free(sub);
+        dan_free(sub);
         dan_pw_begin(&w);                  /* ToUnicode */
         dan_bbuf cm = { NULL, 0, 0 };
         const char *cmh = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
@@ -1692,7 +1692,7 @@ static dan_bytes dan_pdf_build(const dl_Ls *pages, double pw, double ph, int lin
         const char *cmt = "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
         dan_bbuf_add(&cm, cmt, strlen(cmt));
         dan_pw_stream(&w, "", cm.d, cm.len, 1);
-        free(cm.d);
+        dan_free(cm.d);
     }
     /* catalog and page tree */
     w.off[1] = w.b.len;
@@ -1710,8 +1710,8 @@ static dan_bytes dan_pdf_build(const dl_Ls *pages, double pw, double ph, int lin
         dan_bbuf_add(&w.b, e, 20);
     }
     dan_pw_f(&w, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%zu\n%%%%EOF\n", total + 1, xref);
-    free(w.off);
-    free(page_obj);
+    dan_free(w.off);
+    dan_free(page_obj);
     (void)line;
     return dan_bytes_wrap(w.b.d, (int64_t)w.b.len);
 }

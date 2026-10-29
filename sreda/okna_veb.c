@@ -69,7 +69,7 @@ static void dan_web_push(const char *kind, int64_t el, int64_t x, int64_t y, con
         int cap = dan_web_qcap ? dan_web_qcap * 2 : 64;
         dan_web_ev *q = dan_alloc(sizeof *q * (size_t)cap);
         for (int i = 0; i < dan_web_qlen; i++) q[i] = dan_web_q[(dan_web_qhead + i) % dan_web_qcap];
-        free(dan_web_q);
+        dan_free(dan_web_q);
         dan_web_q = q;
         dan_web_qcap = cap;
         dan_web_qhead = 0;
@@ -86,7 +86,7 @@ static dan_web_el *dan_web_get(int64_t n, int line) {
 }
 
 static void dan_web_settext(dan_web_el *e, const char *t) {
-    free(e->text);
+    dan_free(e->text);
     size_t n = strlen(t);
     e->text = dan_alloc(n + 1);
     memcpy(e->text, t, n + 1);
@@ -356,14 +356,14 @@ static void dan_web_request(int fd) {
     }
     buf[n] = 0;
     char method[8] = "", path[2048] = "";
-    if (!head || sscanf(buf, "%7s %2047s", method, path) != 2) { close(fd); free(buf); return; }
+    if (!head || sscanf(buf, "%7s %2047s", method, path) != 2) { close(fd); dan_free(buf); return; }
     /* the key: k=... in the address */
     char *k = strstr(path, "k=");
     int ok = k && !strncmp(k + 2, dan_web_key, strlen(dan_web_key)) && !isalnum((unsigned char)k[2 + strlen(dan_web_key)]);
     if (!ok) {
         const char *m = "403";
         dan_web_send(fd, "403 Forbidden", "text/plain", m, strlen(m));
-        free(buf);
+        dan_free(buf);
         return;
     }
     dan_web_seen = dan_web_now();
@@ -388,7 +388,7 @@ static void dan_web_request(int fd) {
     } else {
         dan_web_send(fd, "404 Not Found", "text/plain", "404", 3);
     }
-    free(buf);
+    dan_free(buf);
 }
 
 /* serves the page for at most «seconds» (0 - only what is ready) */
@@ -605,7 +605,7 @@ static dl_Ls *dan_web_event_list(dan_web_ev *e) {
     snprintf(num, sizeof num, "%lld", (long long)e->x); dl_Ls_push(r, dan_strdup(num));
     snprintf(num, sizeof num, "%lld", (long long)e->y); dl_Ls_push(r, dan_strdup(num));
     dl_Ls_push(r, dan_strdup(e->text ? e->text : ""));
-    free(e->text);
+    dan_free(e->text);
     return r;
 }
 
@@ -670,7 +670,7 @@ static dan_str dan_web_ask(const char *kind, dan_str title, dan_str text) {
     dan_web_dialog.id = 0;
     dan_web_changed();
     dan_str r = dan_strdup(a ? a : "");
-    free(a);
+    dan_free(a);
     return r;
 }
 
