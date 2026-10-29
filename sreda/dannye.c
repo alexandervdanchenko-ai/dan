@@ -377,7 +377,9 @@ static dan_bytes dan_unhex(dan_str s, int line) {
 
 /* ---- CRC-32 (as in zip and gzip) ---- */
 
-static uint32_t dan_crc_table[256];
+/* eight tables: eight bytes are taken at a time (slicing-by-8), about five times faster than
+   one byte at a time; the bytes are read one by one, so the order of bytes in memory does not matter */
+static uint32_t dan_crc_table[8][256];
 static int dan_crc_ready = 0;
 
 static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
@@ -385,12 +387,24 @@ static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
             for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            dan_crc_table[i] = c;
+            dan_crc_table[0][i] = c;
         }
+        for (uint32_t i = 0; i < 256; i++)
+            for (int k = 1; k < 8; k++)
+                dan_crc_table[k][i] = (dan_crc_table[k - 1][i] >> 8) ^ dan_crc_table[0][dan_crc_table[k - 1][i] & 0xFF];
         __atomic_store_n(&dan_crc_ready, 1, __ATOMIC_RELEASE);
     }
+    const uint32_t (*t)[256] = dan_crc_table;
     crc = ~crc;
-    while (n--) crc = dan_crc_table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+    while (n >= 8) {
+        uint32_t a = crc ^ ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+        uint32_t b = (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24;
+        crc = t[7][a & 0xFF] ^ t[6][(a >> 8) & 0xFF] ^ t[5][(a >> 16) & 0xFF] ^ t[4][a >> 24]
+            ^ t[3][b & 0xFF] ^ t[2][(b >> 8) & 0xFF] ^ t[1][(b >> 16) & 0xFF] ^ t[0][b >> 24];
+        p += 8;
+        n -= 8;
+    }
+    while (n--) crc = t[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
     return ~crc;
 }
 
@@ -1284,7 +1298,10 @@ typedef struct {
     int soft, bad;      /* soft: damaged data does not stop the program, bad is set and output is kept */
 } dan_inf;
 
-typedef struct { int16_t count[16]; int16_t symbol[288]; } dan_huff;
+/* fast: codes up to DAN_FAST_BITS long by the next bits of the stream: symbol << 4 | length
+   (0 - a longer code, it is decoded bit by bit) */
+#define DAN_FAST_BITS 10
+typedef struct { int16_t count[16]; int16_t symbol[288]; uint16_t fast[1 << DAN_FAST_BITS]; } dan_huff;
 
 static void dan_inf_fail(dan_inf *s) {
     if (!s->soft) dan_error(DAN_MSG_CORRUPT, s->line);
@@ -1311,6 +1328,31 @@ static void dan_inf_put(dan_inf *s, uint8_t b) {
     s->out[s->outlen++] = b;
 }
 
+/* room for n more bytes of output; 0 - near the limit of a "bomb": then bytes go one by one */
+static int dan_inf_room(dan_inf *s, size_t n) {
+    if (s->soft && s->outlen + n > ((size_t)1 << 29)) return 0;
+    if (s->outlen + n > s->outcap) {
+        size_t cap = s->outcap ? s->outcap : 65536;
+        while (cap < s->outlen + n) cap *= 2;
+        s->out = dan_realloc(s->out, cap);
+        s->outcap = cap;
+    }
+    return 1;
+}
+
+/* bytes of the input are read ahead into the bit buffer; whole bytes not used are given back */
+static void dan_inf_refill(dan_inf *s) {
+    while (s->bitcnt <= 24 && s->pos < s->inlen) {
+        s->bitbuf |= (uint32_t)s->in[s->pos++] << s->bitcnt;
+        s->bitcnt += 8;
+    }
+}
+static void dan_inf_unread(dan_inf *s) {
+    s->pos -= (size_t)(s->bitcnt / 8);
+    s->bitcnt %= 8;
+    s->bitbuf &= (1u << s->bitcnt) - 1;
+}
+
 static int dan_huff_build(dan_huff *h, const uint8_t *len, int n) {
     int16_t offs[16];
     for (int i = 0; i < 16; i++) h->count[i] = 0;
@@ -1321,10 +1363,33 @@ static int dan_huff_build(dan_huff *h, const uint8_t *len, int n) {
     offs[1] = 0;
     for (int i = 1; i < 15; i++) offs[i + 1] = (int16_t)(offs[i] + h->count[i]);
     for (int i = 0; i < n; i++) if (len[i]) h->symbol[offs[len[i]]++] = (int16_t)i;
+    memset(h->fast, 0, sizeof h->fast);
+    if (left >= 0) {
+        /* canonical codes in the order of decoding; the stream gives their bits from the first */
+        int code = 0, index = 0;
+        for (int l = 1; l <= DAN_FAST_BITS; l++) {
+            for (int k = 0; k < h->count[l]; k++, code++) {
+                int r = 0;
+                for (int b = 0; b < l; b++) r |= ((code >> b) & 1) << (l - 1 - b);
+                for (int f = r; f < (1 << DAN_FAST_BITS); f += 1 << l)
+                    h->fast[f] = (uint16_t)(h->symbol[index + k] << 4 | l);
+            }
+            index += h->count[l];
+            code <<= 1;
+        }
+    }
     return left;
 }
 
 static int dan_huff_decode(dan_inf *s, const dan_huff *h) {
+    if (s->bad) return 256;
+    dan_inf_refill(s);
+    uint16_t e = h->fast[s->bitbuf & ((1u << DAN_FAST_BITS) - 1)];
+    if ((e & 15) && (e & 15) <= s->bitcnt) {
+        s->bitbuf >>= e & 15;
+        s->bitcnt -= e & 15;
+        return e >> 4;
+    }
     int code = 0, first = 0, index = 0;
     for (int len = 1; len < 16; len++) {
         code |= dan_inf_bits(s, 1);
@@ -1343,7 +1408,11 @@ static int dan_huff_decode(dan_inf *s, const dan_huff *h) {
 static void dan_inf_codes(dan_inf *s, const dan_huff *lc, const dan_huff *dc) {
     while (!s->bad) {
         int sym = dan_huff_decode(s, lc);
-        if (sym < 256) { dan_inf_put(s, (uint8_t)sym); continue; }
+        if (sym < 256) {
+            if (s->outlen < s->outcap && !s->bad && !(s->soft && s->outlen >= ((size_t)1 << 29))) s->out[s->outlen++] = (uint8_t)sym;
+            else dan_inf_put(s, (uint8_t)sym);
+            continue;
+        }
         if (sym == 256) return;
         sym -= 257;
         if (sym >= 29) { dan_inf_fail(s); return; }
@@ -1352,7 +1421,14 @@ static void dan_inf_codes(dan_inf *s, const dan_huff *lc, const dan_huff *dc) {
         if (ds >= 30) { dan_inf_fail(s); return; }
         size_t dist = dan_dist_base[ds] + (size_t)dan_inf_bits(s, dan_dist_extra[ds]);
         if (dist > s->outlen || dist == 0) { dan_inf_fail(s); return; }
-        while (len-- && !s->bad) dan_inf_put(s, s->out[s->outlen - dist]);
+        if (!s->bad && dan_inf_room(s, len)) {
+            uint8_t *o = s->out + s->outlen;
+            const uint8_t *from = o - dist;
+            for (size_t i = 0; i < len; i++) o[i] = from[i];      /* the copy may overlap itself */
+            s->outlen += len;
+        } else {
+            while (len-- && !s->bad) dan_inf_put(s, s->out[s->outlen - dist]);
+        }
     }
 }
 
@@ -1362,6 +1438,7 @@ static void dan_inflate_into(dan_inf *s) {
         last = dan_inf_bits(s, 1);
         int type = dan_inf_bits(s, 2);
         if (type == 0) {
+            dan_inf_unread(s);
             s->bitbuf = 0;
             s->bitcnt = 0;
             if (s->pos + 4 > s->inlen) { dan_inf_fail(s); return; }
@@ -1412,6 +1489,7 @@ static void dan_inflate_into(dan_inf *s) {
 static uint8_t *dan_inflate_raw(const uint8_t *in, size_t n, size_t *outlen, size_t *used, int line) {
     dan_inf s = { in, n, 0, 0, 0, NULL, 0, 0, line, 0, 0 };
     dan_inflate_into(&s);
+    dan_inf_unread(&s);
     *outlen = s.outlen;
     if (used) *used = s.pos;
     if (!s.out) s.out = dan_alloc(1);
