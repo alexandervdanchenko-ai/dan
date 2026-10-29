@@ -201,7 +201,7 @@ class ТестыГонок(unittest.TestCase):
         with tempfile.TemporaryDirectory() as п:
             с = os.path.join(п, "программа.c")
             with open(с, "w", encoding="utf-8") as ф:
-                ф.write(dan.перевести(КОНВЕЙЕР))
+                ф.write(dan.перевести(КОНВЕЙЕР, строки_дан=True))
             исп = os.path.join(п, "программа")
             subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-ffp-contract=off", "-w", "-g", "-O1", "-fsanitize=thread",
                             с, "-o", исп, "-lm", "-pthread"], check=True)

@@ -46,7 +46,7 @@ def под_санитайзером(текст, ввод_данных=None):
     with tempfile.TemporaryDirectory() as п:
         с = os.path.join(п, "программа.c")
         with open(с, "w", encoding="utf-8") as ф:
-            ф.write(dan.перевести(текст))
+            ф.write(dan.перевести(текст, строки_дан=True))       # сообщения санитайзеров - со строками .dan
         исп = os.path.join(п, "программа")
         subprocess.run([КОМПИЛЯТОР, "-std=c11", "-fwrapv", "-ffp-contract=off", "-w", "-g", "-O1", "-fsanitize=address,undefined",
                         "-fno-sanitize-recover=undefined", с, "-o", исп, "-lm"], check=True)
