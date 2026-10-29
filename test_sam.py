@@ -1289,6 +1289,16 @@ class ТестыСамосборки(unittest.TestCase):
             self.assertIn("Возможно, пакет подменили", итоги[1][-2][2])
             self.assertNotIn(os.path.join("ставки", "лишнее.sh"), "\n".join(итоги[1][8][3]))
 
+    def test_подключение_рядом_с_программой_без_папки(self):
+        # программа задана одним именем файла: подключённый файл ищется в текущей папке
+        with tempfile.TemporaryDirectory() as папка:
+            with open(os.path.join(папка, "мод.dan"), "w", encoding="utf-8") as ф:
+                ф.write("общий функ ф() -> цел {\n    вернуть 41 + 1\n}\n")
+            with open(os.path.join(папка, "гл.dan"), "w", encoding="utf-8") as ф:
+                ф.write('подключить "мод.dan"\nвывод(мод.ф())\n')
+            код, вывод_, ошибки = self.дан(self.первая, "запустить", "гл.dan", папка=папка)
+            self.assertEqual((код, вывод_), (0, "42\n"), ошибки)
+
     def test_отладка(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "отл.dan")
