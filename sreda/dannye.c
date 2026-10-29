@@ -1032,6 +1032,10 @@ typedef struct { uint16_t len, dist; } dan_lz;          /* len == 0: literal byt
 static int dan_len_code(int len) { int c = 0; while (c < 28 && dan_len_base[c + 1] <= len) c++; return c; }
 static int dan_dist_code(int dist) { int c = 0; while (c < 29 && dan_dist_base[c + 1] <= dist) c++; return c; }
 
+/* prev: the previous position with the same hash, in a ring of 64 Ki positions (twice the window,
+   so a position within the window is never overwritten): the chains are the same as with an array
+   over the whole input, but the ring takes 256 KiB instead of four bytes per byte of input */
+#define DAN_PREV_MASK 65535u
 typedef struct { const uint8_t *d; size_t n; int32_t *head, *prev; } dan_lz77;
 
 static uint32_t dan_hash3(const uint8_t *p) { return ((uint32_t)p[0] << 10 ^ (uint32_t)p[1] << 5 ^ p[2]) & ((1u << DAN_HASH_BITS) - 1); }
@@ -1039,7 +1043,7 @@ static uint32_t dan_hash3(const uint8_t *p) { return ((uint32_t)p[0] << 10 ^ (ui
 static void dan_lz_insert(dan_lz77 *z, size_t p) {
     if (p + 3 > z->n) return;
     uint32_t h = dan_hash3(z->d + p);
-    z->prev[p] = z->head[h];
+    z->prev[p & DAN_PREV_MASK] = z->head[h];
     z->head[h] = (int32_t)p;
 }
 
@@ -1079,7 +1083,7 @@ static int dan_lz_search_from(dan_lz77 *z, size_t p, int *dist, int chain) {
             int l = dan_lz_common(a, b, maxlen);
             if (l > best) { best = l; *dist = (int)(p - (size_t)cand); if (l >= maxlen || l >= DAN_LZ_NICE) break; }
         }
-        cand = z->prev[cand];
+        cand = z->prev[(size_t)cand & DAN_PREV_MASK];
     }
     return best >= 3 ? best : 0;
 }
@@ -1087,7 +1091,7 @@ static int dan_lz_search_from(dan_lz77 *z, size_t p, int *dist, int chain) {
 static int dan_lz_search(dan_lz77 *z, size_t p, int *dist) { return dan_lz_search_from(z, p, dist, DAN_MAX_CHAIN); }
 
 static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count) {
-    dan_lz77 z = { d, n, dan_alloc(sizeof(int32_t) << DAN_HASH_BITS), dan_alloc(sizeof(int32_t) * (n ? n : 1)) };
+    dan_lz77 z = { d, n, dan_alloc(sizeof(int32_t) << DAN_HASH_BITS), dan_alloc(sizeof(int32_t) * (DAN_PREV_MASK + 1)) };
     for (size_t i = 0; i < (1u << DAN_HASH_BITS); i++) z.head[i] = -1;
     dan_lz *out = dan_alloc(sizeof(dan_lz) * (n ? n : 1));
     size_t k = 0, i = 0;
