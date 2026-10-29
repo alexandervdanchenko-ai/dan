@@ -1007,6 +1007,15 @@ class ТестыСамосборки(unittest.TestCase):
                            cwd=папка)
         return р.returncode, р.stdout.decode("utf-8").replace("\r\n", "\n"), р.stderr.decode("utf-8", "replace")
 
+    def test_каталог_отказов(self):
+        """Программы каталог/отказы компилятор на Дане отклоняет с тем же сообщением, что dan.py."""
+        for путь in sorted(glob.glob(os.path.join(ПАПКА, "каталог", "отказы", "*.dan"))):
+            with self.subTest(путь=os.path.basename(путь)):
+                код, вывод_, ошибки = self.дан(self.первая, "проверить", путь)
+                self.assertEqual(код, 1, вывод_ + ошибки)
+                with open(путь[:-4] + ".сообщение", encoding="utf-8") as ф:
+                    self.assertIn(ф.read().strip(), вывод_)
+
     def test_вторая_и_третья_ступени(self):
         код_0 = dan.перевести(self.исходник, self.путь)
         код, код_2, ошибки = self.дан(self.первая, "си", self.путь)
