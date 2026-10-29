@@ -504,6 +504,15 @@ class ТестыТаблицВстроенных(unittest.TestCase):
             self.assertEqual(ф.read(), модуль.текст(),
                              "таблицы устарели: запустите python сам/создать_встроенные.py")
 
+    def test_коды_совпадают_с_компилятором(self):
+        # сам/коды.dan создаётся сценарием сам/создать_коды.py из kody.КОДЫ
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("создать_коды", os.path.join(САМ, "создать_коды.py"))
+        модуль = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(модуль)
+        with open(os.path.join(САМ, "коды.dan"), encoding="utf-8") as ф:
+            self.assertEqual(ф.read(), модуль.текст(), "коды устарели: запустите python сам/создать_коды.py")
+
 
 def тексты_из_тестов():
     """Программы из тестов проверки и порождения кода (первые аргументы-строки вызовов)."""
@@ -1288,6 +1297,38 @@ class ТестыСамосборки(unittest.TestCase):
             # отказ от подменённого пакета и защита от лишних файлов действительно сработали
             self.assertIn("Возможно, пакет подменили", итоги[1][-2][2])
             self.assertNotIn(os.path.join("ставки", "лишнее.sh"), "\n".join(итоги[1][8][3]))
+
+    def test_проверить_json(self):
+        # машинный вывод ошибок: каталог ошибок, ошибки в подключённых файлах и случайно испорченные программы
+        import random
+        import ustoychivost
+        файлы = [п for п in sorted(glob.glob(os.path.join(ПАПКА, "каталог", "ошибки", "*.dan")))
+                 if not п.endswith(".исправлено.dan")]
+        with tempfile.TemporaryDirectory() as папка:
+            with open(os.path.join(папка, "мод.dan"), "w", encoding="utf-8") as ф:
+                ф.write("общий функ ф() -> цел {\n    вернуть х\n}\n")
+            with open(os.path.join(папка, "мод2.dan"), "w", encoding="utf-8") as ф:
+                ф.write("общий функ ф( -> цел {\n")
+            for имя, текст in (("гл.dan", 'подключить "мод.dan"\nвывод(мод.ф())\n'),
+                               ("гл2.dan", 'подключить "мод2.dan"\n'), ("гл3.dan", 'подключить "нет"\n'),
+                               ("пр.dan", "вывод(праздник(сегодня()))\n"), ("хор.dan", "вывод(1)\n")):
+                with open(os.path.join(папка, имя), "w", encoding="utf-8") as ф:
+                    ф.write(текст)
+                файлы.append(имя)
+            исходники = ustoychivost.исходники()
+            сл = random.Random(7)
+            for н in range(60):
+                имя = f"испорченная{н}.dan"
+                with open(os.path.join(папка, имя), "w", encoding="utf-8") as ф:
+                    ф.write(ustoychivost.испортить(сл.choice(исходники), сл))
+                файлы.append(имя)
+            for путь in файлы:
+                with self.subTest(файл=os.path.basename(путь)):
+                    нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "проверить", "--json", путь],
+                                           capture_output=True, timeout=300, cwd=папка, env=self.среда)
+                    код, вывод_, ошибки = self.дан(self.первая, "проверить", "--json", путь, папка=папка)
+                    self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")),
+                                     ошибки)
 
     def test_подключение_рядом_с_программой_без_папки(self):
         # программа задана одним именем файла: подключённый файл ищется в текущей папке
