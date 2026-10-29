@@ -1357,6 +1357,26 @@ class ТестыСамосборки(unittest.TestCase):
                     self.assertEqual((код, вывод_), (нужно.returncode, нужно.stdout.decode("utf-8").replace("\r\n", "\n")),
                                      ошибки)
 
+    def test_исправить(self):
+        программы = [
+            "def квадрат(х: цел) -> цел {\n    return х * х\n}\nперем сумма = 0\nсумма++\nвывод(квадрат(сума))\n"
+            "перем с = [1]\nс.append(2)\nесли 1 > 0 && 2 > 1 {\n    print(len(с))\n}\n",
+            "вывод(1)\n", "\ufeffпусть сумма = 1\nвывод(сума + сума)\n", "пусть х = None\nвывод(х)\n",
+            "пусть т = \"а\"\nвывод(т.length + т.length)\n", "вывод(1 +)\n",
+        ]
+        for номер, текст in enumerate(программы):
+            итоги = []
+            for команда in ([sys.executable, os.path.join(ПАПКА, "dan.py")], [os.path.abspath(self.первая)]):
+                with tempfile.TemporaryDirectory() as папка:
+                    with open(os.path.join(папка, "п.dan"), "w", encoding="utf-8") as ф:
+                        ф.write(текст)
+                    р = subprocess.run([*команда, "исправить", "п.dan"], capture_output=True, timeout=300, cwd=папка,
+                                       env=self.среда)
+                    with open(os.path.join(папка, "п.dan"), "rb") as ф:
+                        итоги.append((р.returncode, р.stdout.decode("utf-8").replace("\r\n", "\n"), ф.read()))
+            with self.subTest(программа=номер):
+                self.assertEqual(итоги[1], итоги[0])
+
     def test_подключение_рядом_с_программой_без_папки(self):
         # программа задана одним именем файла: подключённый файл ищется в текущей папке
         with tempfile.TemporaryDirectory() as папка:

@@ -100,6 +100,34 @@ class ТестыМашинногоВывода(unittest.TestCase):
         self.assertEqual((код, д["ошибок"], д["предупреждений"], д["сообщения"][0]["вид"]),
                          (0, 0, 1, "предупреждение"))
 
+    def test_исправить(self):
+        текст = ("def квадрат(х: цел) -> цел {\n    return х * х\n}\nперем сумма = 0\nсумма++\nвывод(квадрат(сума))\n"
+                 "перем с = [1]\nс.append(2)\nесли 1 > 0 && 2 > 1 {\n    print(len(с))\n}\n")
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "п.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(текст)
+            р = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "исправить", "п.dan"],
+                               capture_output=True, timeout=120, cwd=папка)
+            with open(путь, encoding="utf-8") as ф:
+                итог = ф.read()
+        вывод_ = р.stdout.decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(р.returncode, 1)          # len(с) готового исправления не имеет
+        self.assertIn("  строка 1: «def» -> «функ»\n", вывод_)
+        self.assertIn("п.dan: исправлено мест: 7\nп.dan: осталось ошибок: 1", вывод_)
+        self.assertEqual(итог, "функ квадрат(х: цел) -> цел {\n    вернуть х * х\n}\nперем сумма = 0\nсумма+= 1\n"
+                               "вывод(квадрат(сумма))\nперем с = [1]\nс.добавить(2)\nесли 1 > 0 и 2 > 1 {\n"
+                               "    вывод(len(с))\n}\n")
+
+    def test_исправить_без_исправлений(self):
+        with tempfile.TemporaryDirectory() as папка:
+            with open(os.path.join(папка, "п.dan"), "w", encoding="utf-8") as ф:
+                ф.write("вывод(1)\n")
+            р = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "исправить", "п.dan"],
+                               capture_output=True, timeout=120, cwd=папка)
+        self.assertEqual((р.returncode, р.stdout.decode("utf-8").replace("\r\n", "\n")),
+                         (0, "п.dan: готовых исправлений нет\nп.dan: ошибок не найдено\n"))
+
     def test_строка_json_как_в_дане(self):
         self.assertEqual(kody.строка_json('а"б\\в\nг\tд\x01'), '"а\\"б\\\\в\\nг\\tд\\u0001"')
 
