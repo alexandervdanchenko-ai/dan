@@ -2998,6 +2998,7 @@ typedef struct {
     dan_mbuf tmp;
     int compact;              /* части_json: kinds in one string, texts separately */
     dan_mbuf kinds;
+    dan_str keys[64];         /* names of fields already met: the same name is one string */
 } dan_json;
 
 static int dan_jis(dan_json *j, size_t i, char c) { return i < j->n && j->s[i] == c; }
@@ -3036,15 +3037,42 @@ static size_t dan_json_space(dan_json *j, size_t i) {
     return i;
 }
 
+/* the text goes straight into the list of parts: the list is its only place, so the new
+   string does not go into the table of temporaries (it is taken back from it at once) */
+static void dan_json_put(dan_json *j, dan_str e) {
+    dl_Ls *l = j->out;
+    if (l->len == l->cap) {
+        l->cap *= 2;
+        l->items = dan_realloc(l->items, (size_t)l->cap * sizeof(dan_str));
+    }
+    l->items[l->len++] = e;
+}
+static char *dan_json_new(const char *text, size_t n) {
+    char *e = dan_str_new(n);
+    dan_hdr *h = dan_str_hdr(e);
+    dan_zct_n--;                          /* dan_str_new put it last into the table */
+    h->flags &= (uint16_t)~DAN_IN_ZCT;
+    h->rc = 1;
+    memcpy(e, text, n);
+    e[n] = 0;
+    return e;
+}
+
 static void dan_json_emit(dan_json *j, char kind, const char *text, size_t n) {
     if (j->compact) {
         dan_mbuf_add(&j->kinds, &kind, 1);
-        if (kind == 'k' || kind == 's' || kind == 'i' || kind == 'd') {
-            char *e = dan_str_new(n);
-            memcpy(e, text, n);
-            e[n] = 0;
-            dl_Ls_push(j->out, e);
+        if (kind == 'k' && n < 64) {
+            /* objects of one kind repeat the same names of fields: they are made once */
+            uint32_t hash = 2166136261u;
+            for (size_t i = 0; i < n; i++) hash = (hash ^ (unsigned char)text[i]) * 16777619u;
+            dan_str *c = &j->keys[hash & 63];
+            if (*c && strlen(*c) == n && !memcmp(*c, text, n)) { dan_json_put(j, dan_str_share(*c)); return; }
+            if (*c) dan_str_release(*c);
+            *c = dan_json_new(text, n);
+            dan_json_put(j, dan_str_share(*c));
+            return;
         }
+        if (kind == 'k' || kind == 's' || kind == 'i' || kind == 'd') dan_json_put(j, dan_json_new(text, n));
         return;
     }
     char *e = dan_str_new(n + 1);
@@ -3333,7 +3361,7 @@ static dan_str dan_json_quote(dan_str s) {
 }
 
 static dr_Ls dan_json_scan(dan_str text, int compact, int line) {
-    dan_json j = { text, strlen(text), dl_Ls_from(0, NULL), NULL, { NULL, 0, 0 }, compact, { NULL, 0, 0 } };
+    dan_json j = { text, strlen(text), dl_Ls_from(0, NULL), NULL, { NULL, 0, 0 }, compact, { NULL, 0, 0 }, { NULL } };
     size_t k = dan_json_space(&j, 0);
     if (k + 3 <= j.n && !memcmp(j.s + k, "\xEF\xBB\xBF", 3)) k = dan_json_space(&j, k + 3);
     size_t e = dan_json_value(&j, k, 0);
@@ -3342,6 +3370,7 @@ static dr_Ls dan_json_scan(dan_str text, int compact, int line) {
         if (end < j.n) dan_json_fail(&j, end, "после значения лишний текст");
     }
     free(j.tmp.s);
+    for (int c = 0; c < 64; c++) if (j.keys[c]) dan_str_release(j.keys[c]);
     if (j.err) { free(j.kinds.s); return dr_Ls_err(j.err, line); }
     if (compact) {
         char *k = dan_str_new(j.kinds.len);
