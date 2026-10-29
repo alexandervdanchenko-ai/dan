@@ -204,6 +204,22 @@ def рекурсивные_функции(функции):
 СРЕДА = r"""
 typedef const char *dan_str;
 
+/* At the end of the main program the system frees all memory at once, so the values of the
+   main program are not released one by one. Memory checkers (AddressSanitizer) need every value
+   released: then everything is freed as in any other function. */
+#ifndef DAN_FREE_AT_EXIT
+#if defined(__SANITIZE_ADDRESS__)
+#define DAN_FREE_AT_EXIT 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DAN_FREE_AT_EXIT 1
+#endif
+#endif
+#endif
+#ifndef DAN_FREE_AT_EXIT
+#define DAN_FREE_AT_EXIT 0
+#endif
+
 /* with tasks: the first error stops the program, other tasks wait for the end */
 static void (*dan_on_error)(void);
 
@@ -2583,7 +2599,7 @@ struct {D} {{ dan_hdr h; int64_t len, n, cap, slots; {K} *keys; {V} *vals; uint6
 static void {D}_destroy(dan_hdr *h) {{
     {D} *d = ({D} *)(void *)h;
     for (int64_t e = 0; e < d->n; e++) if (d->alive[e]) {{ {RK}(d->keys[e]); {RV}(d->vals[e]); }}
-    free(d->keys); free(d->vals); free(d->hashes); free(d->alive); free(d->index);
+    free(d->hashes);
     free(d);
 }}
 static {D} *{D}_new(void) {{
@@ -2604,13 +2620,24 @@ static {D} *{D}_share({D} *d) {{ if (d) dan_hdr_share(&d->h); return d; }}
 static void {D}_release({D} *d) {{ if (d) dan_hdr_release(&d->h, {D}_destroy); }}
 static void {D}_give({D} *d) {{ if (d) dan_hdr_give(&d->h, {D}_destroy); }}
 
-static void {D}_reindex({D} *d) {{
+/* все части словаря - в одном блоке памяти (одно выделение вместо пяти): отпечатки,
+   таблица поиска, ключи, значения и признаки «запись есть» на cap записей */
+static void {D}_block({D} *d, int64_t cap) {{
     int64_t s = 8;
-    while (s < 2 * d->cap) s *= 2;
-    free(d->index);
-    d->index = dan_alloc(sizeof(int64_t) * (size_t)s);
-    for (int64_t i = 0; i < s; i++) d->index[i] = -1;
+    while (s < 2 * cap) s *= 2;
+    size_t c = (size_t)cap, kb = (sizeof({K}) * c + 7) & ~(size_t)7, vb = (sizeof({V}) * c + 7) & ~(size_t)7;
+    char *b = dan_alloc(8 * c + 8 * (size_t)s + kb + vb + c);
+    d->hashes = (uint64_t *)(void *)b;
+    d->index = (int64_t *)(void *)(b + 8 * c);
+    d->keys = ({K} *)(void *)(b + 8 * c + 8 * (size_t)s);
+    d->vals = ({V} *)(void *)(b + 8 * c + 8 * (size_t)s + kb);
+    d->alive = (bool *)(void *)(b + 8 * c + 8 * (size_t)s + kb + vb);
+    d->cap = cap;
     d->slots = s;
+}}
+static void {D}_reindex({D} *d) {{
+    int64_t s = d->slots;
+    for (int64_t i = 0; i < s; i++) d->index[i] = -1;
     for (int64_t e = 0; e < d->n; e++) {{
         if (!d->alive[e]) continue;
         int64_t p = (int64_t)(d->hashes[e] & (uint64_t)(s - 1));
@@ -2628,16 +2655,15 @@ static int64_t {D}_lookup(const {D} *d, {K} k, uint64_t h) {{
 }}
 static void {D}_grow({D} *d) {{   /* убирает удалённые записи и увеличивает таблицу */
     int64_t cap = d->len * 2 < 8 ? 8 : d->len * 2, m = 0;
-    {K} *keys = dan_alloc(sizeof({K}) * (size_t)cap);
-    {V} *vals = dan_alloc(sizeof({V}) * (size_t)cap);
-    uint64_t *hashes = dan_alloc(sizeof(uint64_t) * (size_t)cap);
-    bool *alive = dan_alloc(sizeof(bool) * (size_t)cap);
-    for (int64_t e = 0; e < d->n; e++) {{
-        if (!d->alive[e]) continue;
-        keys[m] = d->keys[e]; vals[m] = d->vals[e]; hashes[m] = d->hashes[e]; alive[m] = true; m++;
+    {K} *keys = d->keys; {V} *vals = d->vals; uint64_t *hashes = d->hashes; bool *alive = d->alive;
+    int64_t n = d->n;
+    {D}_block(d, cap);
+    for (int64_t e = 0; e < n; e++) {{
+        if (!alive[e]) continue;
+        d->keys[m] = keys[e]; d->vals[m] = vals[e]; d->hashes[m] = hashes[e]; d->alive[m] = true; m++;
     }}
-    free(d->keys); free(d->vals); free(d->hashes); free(d->alive);
-    d->keys = keys; d->vals = vals; d->hashes = hashes; d->alive = alive; d->n = m; d->cap = cap;
+    free(hashes);
+    d->n = m;
     {D}_reindex(d);
 }}
 static void {D}_put({D} *d, {K} k, {V} v) {{
@@ -2701,15 +2727,12 @@ static {D} *{D}_copy(const {D} *d) {{
     {D} *r = {D}_new();
     if (d->len == 0) return r;
     int64_t cap = d->len * 2 < 8 ? 8 : d->len * 2, m = 0;
-    r->keys = dan_alloc(sizeof({K}) * (size_t)cap);
-    r->vals = dan_alloc(sizeof({V}) * (size_t)cap);
-    r->hashes = dan_alloc(sizeof(uint64_t) * (size_t)cap);
-    r->alive = dan_alloc(sizeof(bool) * (size_t)cap);
+    {D}_block(r, cap);
     for (int64_t e = 0; e < d->n; e++) {{
         if (!d->alive[e]) continue;
         r->keys[m] = {SK}(d->keys[e]); r->vals[m] = {SV}(d->vals[e]); r->hashes[m] = d->hashes[e]; r->alive[m] = true; m++;
     }}
-    r->n = r->len = m; r->cap = cap;
+    r->n = r->len = m;
     {D}_reindex(r);
     return r;
 }}
@@ -3340,7 +3363,11 @@ class Генератор:
         self.текущий_результат = None
         self.пиши(f"const size_t {self.метка_функции} = dan_mark();")
         self._инструкции(прочие)
+        # в конце программы память освобождает система, сразу всю: поштучное освобождение
+        # значений только занимает время (на программах с большими данными - до 20%)
+        self.пиши("#if DAN_FREE_AT_EXIT")
         self._выход_из_функции()
+        self.пиши("#endif")
         self.пиши("return 0;")
         if self.нужны_задачи:
             self.строки[место_запуска] += " dan_tasks_init();"
