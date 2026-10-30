@@ -98,6 +98,23 @@ def файлы_репозитория():
     return файлы
 
 
+_ВРЕМЕННЫЕ = []
+
+
+def собрать_отдельно(путь, текст):
+    """Собирает программу папки «сам» во временной папке, а не рядом с исходным файлом: части
+    одного класса, запущенные параллельно (testy.py), иначе мешали бы друг другу (в Windows
+    нельзя заменить файл программы, которую выполняет другой процесс)."""
+    import atexit
+    import shutil
+    if not _ВРЕМЕННЫЕ:
+        atexit.register(lambda: [shutil.rmtree(п, ignore_errors=True) for п in _ВРЕМЕННЫЕ])
+    папка = tempfile.mkdtemp(prefix="dan_sam_")
+    _ВРЕМЕННЫЕ.append(папка)
+    основа = os.path.join(папка, os.path.splitext(os.path.basename(путь))[0])
+    return dan.собрать_код(dan.перевести(текст, путь), основа, os.path.dirname(os.path.abspath(путь)))
+
+
 def прочитать(путь):
     # файл читается так же, как его читает dan.py: «\r\n» становится «\n»
     with open(путь, encoding="utf-8") as ф:
@@ -111,7 +128,7 @@ class ТестыЛексераНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "токены.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def выполнить(self, файлы):
         """Вывод программы сверки по файлам: путь -> строки."""
@@ -228,7 +245,7 @@ class ТестыРазбораНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "дерево.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, файлы):
         итог = {}
@@ -328,7 +345,7 @@ class ТестыМодулейНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "модули_дерево.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, файлы):
         итог = {}
@@ -478,7 +495,7 @@ class ТестыТиповНаДане(unittest.TestCase):
     def test_случайные_задания(self):
         путь = os.path.join(САМ, "проба_типов.dan")
         with open(путь, encoding="utf-8") as ф:
-            программа = dan.собрать(путь, ф.read())
+            программа = собрать_отдельно(путь, ф.read())
         задания, ответы = задания_типов(3000)
         with tempfile.TemporaryDirectory() as папка:
             файл = os.path.join(папка, "задания.txt")
@@ -634,7 +651,7 @@ class ТестыПроверкиНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "проверка_ошибки.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, файлы):
         итог = {}
@@ -737,7 +754,7 @@ class ТестыПорожденияНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "перевод.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, файлы, режим=""):
         параметры = параметры_перевода() + (["--" + режим] if режим else [])
@@ -831,7 +848,7 @@ class ТестыФорматаНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "форматы.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, тексты):
         from formatirovanie import отформатировать, ОшибкаФорматирования
@@ -929,7 +946,7 @@ class ТестыДокументацииНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "документы.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def сверить(self, цели):
         import contextlib
@@ -976,7 +993,7 @@ class ТестыОбъясненияНаДане(unittest.TestCase):
     def setUpClass(cls):
         путь = os.path.join(САМ, "объяснения.dan")
         with open(путь, encoding="utf-8") as ф:
-            cls.программа = dan.собрать(путь, ф.read())
+            cls.программа = собрать_отдельно(путь, ф.read())
 
     def test_все_строки(self):
         import objasnenie
@@ -1018,7 +1035,7 @@ class ТестыСамосборки(unittest.TestCase):
         cls.путь = os.path.join(САМ, "дан.dan")
         with open(cls.путь, encoding="utf-8") as ф:
             cls.исходник = ф.read()
-        cls.первая = dan.собрать(cls.путь, cls.исходник)        # ступень 1: собрана компилятором на Python
+        cls.первая = собрать_отдельно(cls.путь, cls.исходник)        # ступень 1: собрана компилятором на Python
         cls.среда = dict(os.environ, DAN_HOME=ПАПКА)
 
     def дан(self, программа, *аргументы, папка=None):
