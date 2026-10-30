@@ -32,7 +32,7 @@ python dan.py тестировать программа.dan        # блоки 
 python -m unittest discover -p "test_*.py"     # всё (около 15-20 минут)
 python -m unittest test_sam                    # сверка двух компиляторов (около 8 минут)
 python -m unittest test_lexer test_parser test_proverka test_kodogen test_katalog test_sovmestimost
-python sverka_sborok.py 150                    # gcc и clang, -O0/-O2/-Os дают одно и то же
+python sverka_sborok.py 150                    # gcc и clang, -O0/-O2/-O3/-Os дают одно и то же
 python fazzing.py --секунд=60                  # разборщики форматов (нужен clang с libFuzzer)
 ```
 
