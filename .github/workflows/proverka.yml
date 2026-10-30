@@ -39,9 +39,17 @@ jobs:
         shell: bash
         run: |
           (command -v gcc || command -v clang || command -v cc) && (gcc --version || clang --version) | head -1
-      - name: Тесты
+      - name: Созданные файлы не устарели
         shell: bash
-        run: python -m unittest discover -p "test_*.py" > вывод_тестов.txt 2>&1
+        run: python пересоздать.py --проверить
+      - name: Тесты
+        # классы тестов идут параллельно на всех ядрах машины (testy.py)
+        shell: bash
+        run: python testy.py > вывод_тестов.txt 2>&1
+      - name: Время тестов
+        if: always()
+        shell: bash
+        run: tail -n 200 вывод_тестов.txt
       - name: Упавшие тесты
         if: failure()
         shell: bash
