@@ -236,13 +236,14 @@ static int64_t dan_run_limit(dan_str command, double seconds, int line) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         /* TerminateJobObject does not wait: the programs the command started may still hold
            its files open (redirected input and output); wait until the job is empty */
-        if (job) {
-            for (int i = 0; i < 1000; i++) {
-                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info;
-                if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof info, NULL)
-                    || info.ActiveProcesses == 0) break;
-                Sleep(5);
+        for (int i = 0; job && i < 2000; i++) {
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info;
+            if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof info, NULL)) {
+                Sleep(200);             /* the job cannot be queried: give the programs time to finish */
+                break;
             }
+            if (info.ActiveProcesses == 0) break;
+            Sleep(5);
         }
         result = -1;
     } else {
