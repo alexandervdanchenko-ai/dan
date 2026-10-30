@@ -1409,6 +1409,27 @@ class ТестыСамосборки(unittest.TestCase):
                              нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
             self.assertIn("удвоить", есть.stdout.decode("utf-8"))
 
+    def test_готовая_среда(self):
+        # компилятор на Дане собирает программу с готовыми частями среды (сам/готовая_среда.dan):
+        # результат тот же, что у программы, собранной целиком, части берутся из кэша
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "г.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write('пусть с = сжать("раз раз раз")\nвывод(распаковать(с))\nвывод(хеш("abc"))\n'
+                        'вывод(синус(пи / 6))\nвывод(сегодня() > разобрать_дату("01.01.2000")!)\n'
+                        'вывод(распаковать(байты([1, 2])))\n')
+            итоги = []
+            for готовая in ("1", "0"):
+                среда = dict(self.среда, DAN_CACHE=os.path.join(папка, "кэш"), DAN_GOTOVAYA_SREDA=готовая)
+                среда.pop("DAN_NO_CACHE", None)
+                р = subprocess.run([os.path.abspath(self.первая), "запустить", путь], capture_output=True,
+                                   timeout=900, env=среда)
+                итоги.append((р.returncode, р.stdout, р.stderr))
+            self.assertEqual(итоги[0], итоги[1])
+            self.assertEqual(итоги[0][0], 1, итоги[0])
+            готовые = os.listdir(os.path.join(папка, "кэш", "среда"))
+            self.assertEqual(len([и for и in готовые if и.endswith(".o")]), 3, готовые)
+
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "привет.dan")
