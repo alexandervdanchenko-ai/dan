@@ -79,7 +79,7 @@ import re
     (["гарантии.md"], ["test_garantii"]),
     (["spec.md", "справочник.md"], ["test_dokumentaciya", "test_soglasovannost", "test_llms", "test_opisaniya"]),
     (["*.md"], ["test_soglasovannost"]),
-    (["testy.py", "testy_svyazi.py"], ["test_testy_svyazi"]),
+    (["testy.py", "testy_svyazi.py", "testy_vremya.json"], ["test_testy_svyazi"]),
     (["библиотека/*"], ["test_katalog", "test_okna"]),
     # файлы, которые тесты не проверяют (проверяют задания CI «Установка» и «Поставка»)
     (["LICENSE", ".gitignore", ".github/*", "поставка/*", "редактор/*", "установить_windows.ps1", "исследование.md",
