@@ -29,11 +29,26 @@ python dan.py тестировать программа.dan        # блоки 
 ## Проверки
 
 ```
-python -m unittest discover -p "test_*.py"     # всё (около 15-20 минут)
-python -m unittest test_sam                    # сверка двух компиляторов (около 8 минут)
-python -m unittest test_lexer test_parser test_proverka test_kodogen test_katalog test_sovmestimost
+python testy.py --изменения                    # после правки: только связанные тесты, параллельно
+python testy.py                                # всё, параллельно по числу ядер
+python testy.py test_sam test_kodogen          # выбранные файлы или классы (test_sam.ТестыСамосборки)
+python пересоздать.py                          # пересоздать созданные файлы (после изменения таблиц или конфликта)
 python sverka_sborok.py 150                    # gcc и clang, -O0/-O2/-O3/-Os дают одно и то же
 python fazzing.py --секунд=60                  # разборщики форматов (нужен clang с libFuzzer)
+```
+
+Выбор тестов по файлам задаёт `testy_svyazi.py`: добавляя новый файл тестов или новую часть компилятора, допишите правило (тест `test_testy_svyazi.py` следит, чтобы каждый файл тестов выбирался каким-нибудь изменением).
+
+## Как отправлять изменения
+
+Прямой push в `main` запрещён (защита ветки действует и для администраторов). Работайте в своей ветке и копии (`git worktree add ../dan-моё -b моя-ветка origin/main`), затем:
+
+```
+git fetch -q && git rebase -q origin/main      # конфликт в созданных файлах: python пересоздать.py, git add, git rebase --continue
+git push -u origin моя-ветка                   # после rebase: git push --force-with-lease
+gh pr create --base main --fill
+gh pr merge --auto --rebase --delete-branch    # слияние само произойдёт после зелёной проверки
+gh pr checks --watch                           # ждать проверки; подробности упавших: gh api repos/<владелец>/dan/check-runs/<id>/annotations
 ```
 
 Не запускайте тесты, пока меняете файлы той же копии репозитория: результаты будут случайными. Сборку под Windows можно проверить так: `x86_64-w64-mingw32-gcc -std=c11 -Werror=implicit-function-declaration` на коде из `python dan.py си программа.dan`.
