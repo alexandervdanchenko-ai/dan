@@ -41,7 +41,7 @@ python fazzing.py --секунд=60                  # разборщики фо
 
 ## Как отправлять изменения
 
-Прямой push в `main` запрещён (защита ветки действует и для администраторов). Работайте в своей ветке и копии (`git worktree add ../dan-моё -b моя-ветка origin/main`), затем:
+Не отправляйте изменения прямо в `main`: в `main` попадает только запрос на слияние, у которого прошла проверка на всех системах (обязательны задания «Тесты» на Linux x86-64 и ARM, macOS и Windows, «Установка в Windows по инструкции» и «Поставка для Windows»; «Фаззинг разборщиков» случаен и не обязателен, но его находку нужно разобрать). Работайте в своей ветке и копии (`git worktree add ../dan-моё -b моя-ветка origin/main`), затем:
 
 ```
 git fetch -q && git rebase -q origin/main      # конфликт в созданных файлах: python пересоздать.py, git add, git rebase --continue
@@ -50,6 +50,16 @@ gh pr create --base main --fill
 gh pr merge --auto --rebase --delete-branch    # слияние само произойдёт после зелёной проверки
 gh pr checks --watch                           # ждать проверки; подробности упавших: gh api repos/<владелец>/dan/check-runs/<id>/annotations
 ```
+
+Если `gh pr` недоступен (в сессиях, где закрыт GraphQL GitHub), те же действия делает REST:
+
+```
+gh api repos/<владелец>/dan/pulls -f title="..." -f head=моя-ветка -f base=main -f body="..."   # создать
+gh run list --branch моя-ветка                                     # проверки ветки; gh run view <id> --json jobs
+gh api -X PUT repos/<владелец>/dan/pulls/<номер>/merge -f merge_method=rebase                   # слить после зелёной проверки
+```
+
+Если `main` ушёл вперёд, перед слиянием - `git rebase origin/main`, `git push --force-with-lease` и новая проверка.
 
 Не запускайте тесты, пока меняете файлы той же копии репозитория: результаты будут случайными. Сборку под Windows можно проверить так: `x86_64-w64-mingw32-gcc -std=c11 -Werror=implicit-function-declaration` на коде из `python dan.py си программа.dan`.
 
