@@ -24,6 +24,7 @@
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -115,7 +116,12 @@ def исполняемый():
             if not os.path.isfile(путь):
                 with tempfile.TemporaryDirectory(prefix="dan_sam_") as временная:
                     готовый = dan.собрать_код(код_компилятора(временная), os.path.join(временная, "дан"), САМ)
-                    os.replace(готовый, путь)
+                    # кэш может быть на другом диске, чем временная папка (Windows): os.replace туда
+                    # не переносит; копия рядом с целью, затем замена - на одном диске
+                    копия = путь + f".{os.getpid()}.tmp"
+                    shutil.copyfile(готовый, копия)
+                    shutil.copymode(готовый, копия)
+                    os.replace(копия, путь)
         finally:
             if os.path.isdir(замок):
                 os.rmdir(замок)
