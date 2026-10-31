@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: echo "DAN_CACHE=$RUNNER_TEMP/dan-kesh" >> "$GITHUB_ENV"
       - name: Кэш собранных программ и готовой среды
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/dan-kesh
           key: dan-kesh-${{ matrix.os }}-${{ strategy.job-index }}-${{ github.sha }}
