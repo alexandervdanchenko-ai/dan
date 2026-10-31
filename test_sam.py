@@ -4,15 +4,26 @@
 (сам/разбор.dan) - с parser.py на всех программах каталога, примерах,
 библиотеке, программах учебника и на наборе трудных случаев: токены с
 местами и значениями, деревья программ и тексты ошибок должны совпасть.
+
+После заморозки компилятора на Python (zamorozka.py, этап 17а) главная сверка - по результату:
+программы каталога, примеров и совместимости, собранные обоими компиляторами, выводят одно и то
+же, а неверные программы оба отклоняют с одним сообщением (ТестыРезультатаПрограмм). Побайтные
+сверки токенов, деревьев, ошибок, кода C, формата и описаний остаются, но расхождение в них -
+предупреждение, а не ошибка: компилятор на Дане развивается, а эталон - нет. Строгими они остаются
+для папок «совместимость» и «каталог/отказы» и при DAN_SVERKA=строго. До заморозки все сверки
+строгие.
 """
 
+import contextlib
 import glob
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import dan
 import sam_kompilyator
@@ -24,6 +35,32 @@ from moduli import загрузить, ОшибкаМодуля, БИБЛИОТ�
 
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
 САМ = os.path.join(ПАПКА, "сам")
+ЗАМОРОЖЕН = os.path.isfile(os.path.join(ПАПКА, "zamorozka.json"))
+СТРОГИЕ_ПАПКИ = ("совместимость" + os.sep, os.path.join("каталог", "отказы") + os.sep)
+
+
+def строгая_сверка(путь=None):
+    """Расхождение с компилятором на Python - ошибка (True) или предупреждение (False)."""
+    if os.environ.get("DAN_SVERKA") == "строго" or not ЗАМОРОЖЕН:
+        return True
+    if путь and os.path.isabs(путь) and путь.startswith(ПАПКА):
+        return os.path.relpath(путь, ПАПКА).startswith(СТРОГИЕ_ПАПКИ)
+    return False
+
+
+@contextlib.contextmanager
+def сверка(тест, путь=None):
+    """Побайтная сверка с компилятором на Python: после заморозки расхождение - предупреждение."""
+    if строгая_сверка(путь):
+        yield
+        return
+    try:
+        yield
+    except тест.failureException as о:
+        где = os.path.relpath(путь, ПАПКА) if путь and путь.startswith(ПАПКА) else (путь or тест.id())
+        первая = str(о).strip().split("\n")[0][:200]
+        print(f"предупреждение: {тест.id()}: {где}: компилятор на Дане расходится с замороженным "
+              f"компилятором на Python: {первая}", file=sys.stderr)
 
 ТРУДНЫЕ = {
     "числа": "пусть а = 1_000_000 + 007 + 1.5 + 6.02e23 + 1.5е-7 + 2E+3 + 1..5\nпусть б = 3.14_15 + 1._5\n",
@@ -155,7 +192,8 @@ class ТестыЛексераНаДане(unittest.TestCase):
         for путь in файлы:
             нужно = ожидается(прочитать(путь))
             есть = полученные.get(путь, [])
-            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь):
+            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь), \
+                    сверка(self, путь):
                 self.assertEqual(len(есть), len(нужно), "\n".join(есть[-3:] + ["---"] + нужно[-3:]))
                 for д, п in zip(есть, нужно):
                     self.assertTrue(одинаковые(д, п), f"\nДан:    {д}\nPython: {п}")
@@ -267,7 +305,8 @@ class ТестыРазбораНаДане(unittest.TestCase):
             есть = итог.get(путь, [])
             while есть and есть[-1] == "":
                 есть.pop()
-            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь):
+            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь), \
+                    сверка(self, путь):
                 if есть != нужно:
                     for номер, (д, п) in enumerate(zip(есть, нужно)):
                         if д != п:
@@ -368,7 +407,8 @@ class ТестыМодулейНаДане(unittest.TestCase):
             есть = итог.get(путь, [])
             while есть and есть[-1] == "":
                 есть.pop()
-            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь):
+            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь), \
+                    сверка(self, путь):
                 if есть != нужно:
                     for номер, (д, п) in enumerate(zip(есть, нужно)):
                         if д != п:
@@ -670,7 +710,8 @@ class ТестыПроверкиНаДане(unittest.TestCase):
                 elif путь is not None and строка:
                     итог[путь].append(строка)
         for путь in файлы:
-            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь):
+            with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь), \
+                    сверка(self, путь):
                 self.assertEqual(итог.get(путь, []), ожидаемые_ошибки(путь))
 
     def сверить_тексты(self, тексты):
@@ -774,7 +815,8 @@ class ТестыПорожденияНаДане(unittest.TestCase):
                 if os.path.exists(выход):
                     with open(выход, encoding="utf-8", newline="") as ф:
                         есть = ф.read()
-                with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь, режим=режим):
+                with self.subTest(файл=os.path.relpath(путь, ПАПКА) if путь.startswith(ПАПКА) else путь, режим=режим), \
+                        сверка(self, путь):
                     if нужно != есть:
                         self.assertIsNotNone(есть, "компилятор на Дане не создал код")
                         self.assertIsNotNone(нужно, "компилятор на Python нашёл ошибки")
@@ -871,7 +913,7 @@ class ТестыФорматаНаДане(unittest.TestCase):
                     нужно = "ОШИБКА " + str(о)
                 with open(os.path.join(папка, f"{номер}.txt"), encoding="utf-8", newline="") as ф:
                     есть = ф.read()
-                with self.subTest(номер=номер, начало=текст[:60]):
+                with self.subTest(номер=номер, начало=текст[:60]), сверка(self):
                     self.assertEqual(есть, нужно)
 
     def test_программы_репозитория(self):
@@ -973,7 +1015,7 @@ class ТестыДокументацииНаДане(unittest.TestCase):
     def test_библиотека_примеры_и_сам(self):
         for цели in (["библиотека"], ["примеры"], ["сам"], ["примеры/модули"], ["библиотека", "примеры/все_конструкции.dan"],
                      ["нет_такого.dan"]):
-            with self.subTest(цели=цели):
+            with self.subTest(цели=цели), сверка(self):
                 self.сверить([os.path.join(ПАПКА, ц) for ц in цели])
 
     def test_разметка(self):
@@ -982,7 +1024,7 @@ class ТестыДокументацииНаДане(unittest.TestCase):
                 путь = os.path.join(папка, f"д{номер}.dan")
                 with open(путь, "w", encoding="utf-8") as ф:
                     ф.write(текст)
-                with self.subTest(файл=номер):
+                with self.subTest(файл=номер), сверка(self):
                     self.сверить([путь])
 
 
@@ -1020,7 +1062,7 @@ class ТестыОбъясненияНаДане(unittest.TestCase):
                         части.append("ОШИБКА " + str(о))
                 with open(os.path.join(папка, f"{номер}.txt"), encoding="utf-8") as ф:
                     есть = ф.read().split("\n=====\n")
-                with self.subTest(файл=os.path.relpath(путь, ПАПКА)):
+                with self.subTest(файл=os.path.relpath(путь, ПАПКА)), сверка(self, путь):
                     for н, (д, п) in enumerate(zip(есть, части)):
                         self.assertEqual(д, п, f"строка {н + 1}")
                     self.assertEqual(len(есть), len(части))
@@ -1065,7 +1107,8 @@ class ТестыСамосборки(unittest.TestCase):
         код_0 = dan.перевести(self.исходник, self.путь)
         код, код_2, ошибки = self.дан(self.первая, "си", self.путь)
         self.assertEqual(код, 0, ошибки)
-        self.assertEqual(код_2, код_0, "ступень 1 создала не тот код, что компилятор на Python")
+        with сверка(self):
+            self.assertEqual(код_2, код_0, "ступень 1 создала не тот код, что компилятор на Python")
         with tempfile.TemporaryDirectory() as папка:
             вторая = dan.собрать_код(код_2, os.path.join(папка, "ступень2"), САМ)
             код, код_3, ошибки = self.дан(вторая, "си", self.путь)
@@ -1466,6 +1509,145 @@ class ТестыСамосборки(unittest.TestCase):
             код, вывод_, ошибки = self.дан(self.первая, "собрать", путь)
             self.assertEqual(код, 0, ошибки)
             self.assertTrue(вывод_.startswith("Готово: "), вывод_)
+
+# ---------- сверка результата программ ----------
+
+def среда_python():
+    """Среда для эталона: «python dan.py» без DAN_KOMPILYATOR выполняет компилятор на Python."""
+    среда = dict(os.environ, DAN_HOME=ПАПКА)
+    среда.pop("DAN_KOMPILYATOR", None)
+    return среда
+
+
+def программы_для_сверки():
+    """[(путь, ввод)]: верные программы каталога и совместимости, их исправленные варианты и примеры
+    (кроме окна и программ со случайными числами и временем)."""
+    итог = []
+    for образец in ("каталог/программы/*.dan", "каталог/ошибки/*.исправлено.dan", "совместимость/*/программы/*.dan",
+                    "совместимость/*/ошибки/*.исправлено.dan", "примеры/*.dan"):
+        for путь in sorted(glob.glob(os.path.join(ПАПКА, *образец.split("/")))):
+            текст = прочитать(путь)
+            if any(с in текст for с in ("окно", "случайн", "сейчас(", "время(")):
+                continue
+            ввод_ = путь[:-4] + ".ввод"
+            итог.append((путь, прочитать(ввод_) if os.path.isfile(ввод_) else ""))
+    return итог
+
+
+def неверные_программы():
+    итог = []
+    for образец in ("каталог/ошибки/*.dan", "каталог/отказы/*.dan", "совместимость/*/ошибки/*.dan"):
+        итог += [п for п in sorted(glob.glob(os.path.join(ПАПКА, *образец.split("/"))))
+                 if not п.endswith(".исправлено.dan")]
+    return итог
+
+
+class ТестыСтрогостиСверки(unittest.TestCase):
+    """До заморозки расхождение с компилятором на Python - ошибка, после - предупреждение
+    (кроме папок «совместимость» и «каталог/отказы» и режима DAN_SVERKA=строго)."""
+
+    def расхождение(self, путь):
+        поток = io.StringIO()
+        with contextlib.redirect_stderr(поток), mock.patch.dict(os.environ, {"DAN_SVERKA": ""}):
+            with сверка(self, путь):
+                self.assertEqual(1, 2)
+        return поток.getvalue()
+
+    def test_до_заморозки_строго(self):
+        with mock.patch(__name__ + ".ЗАМОРОЖЕН", False), self.assertRaises(self.failureException):
+            self.расхождение(None)
+
+    def test_после_заморозки(self):
+        with mock.patch(__name__ + ".ЗАМОРОЖЕН", True):
+            self.assertIn("предупреждение:", self.расхождение(os.path.join(ПАПКА, "примеры", "сумма.dan")))
+            self.assertIn("предупреждение:", self.расхождение(None))
+            for путь in (os.path.join(ПАПКА, "совместимость", "2026", "программы", "01_привет.dan"),
+                         os.path.join(ПАПКА, "каталог", "отказы", "01.dan")):
+                with self.assertRaises(self.failureException):
+                    self.расхождение(путь)
+            with mock.patch.dict(os.environ, {"DAN_SVERKA": "строго"}), self.assertRaises(self.failureException):
+                with сверка(self, None):
+                    self.assertEqual(1, 2)
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыРезультатаПрограмм(unittest.TestCase):
+    """Программы, собранные компилятором на Дане и замороженным компилятором на Python, работают
+    одинаково: тот же вывод, поток ошибок и код завершения; неверные программы оба отклоняют
+    с одним и тем же сообщением. Это главная сверка двух компиляторов после заморозки: код C
+    может различаться, поведение - нет. Программа, которую эталон не принимает (новая возможность
+    языка после заморозки), пропускается с предупреждением; до заморозки это ошибка."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.дан = sam_kompilyator.исполняемый()
+
+    def выполнить(self, исполняемый, папка, ввод_):
+        р = subprocess.run([os.path.abspath(исполняемый)], input=ввод_.encode("utf-8"), capture_output=True,
+                           timeout=60, cwd=папка)
+        return (р.returncode, р.stdout.decode("utf-8", "replace").replace("\r\n", "\n"),
+                р.stderr.decode("utf-8", "replace").replace("\r\n", "\n"))
+
+    def собрать(self, путь, папка):
+        """(эталон, Дан): исполняемые файлы двух компиляторов; эталон None - его компилятор не принял программу."""
+        текст = прочитать(путь)
+        основа = os.path.join(папка, "п")
+        os.makedirs(основа)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):        # предупреждения эталона не нужны
+                код_python = dan.перевести_python(текст, путь)
+        except Exception:
+            код_python = None
+        р = subprocess.run([self.дан, "си", путь], capture_output=True, timeout=300,
+                           env=sam_kompilyator.среда())
+        self.assertEqual(р.returncode, 0, "компилятор на Дане не принял программу:\n"
+                         + р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace"))
+        код_дан = р.stdout.decode("utf-8").replace("\r\n", "\n")
+        папка_программы = os.path.dirname(путь)
+        дан_ = dan.собрать_код(код_дан, os.path.join(основа, "дан"), папка_программы)
+        if код_python is None:
+            return None, дан_
+        if код_python == код_дан:
+            return дан_, дан_
+        return dan.собрать_код(код_python, os.path.join(основа, "эталон"), папка_программы), дан_
+
+    def test_верные_программы(self):
+        программы = программы_для_сверки()
+        self.assertGreater(len(программы), 150)
+        новые = []
+        for путь, ввод_ in программы:
+            имя = os.path.relpath(путь, ПАПКА)
+            with self.subTest(программа=имя), tempfile.TemporaryDirectory() as папка:
+                эталон, дан_ = self.собрать(путь, папка)
+                if эталон is None:
+                    self.assertTrue(ЗАМОРОЖЕН, "компилятор на Python не принял программу")
+                    новые.append(имя)
+                    continue
+                рабочая_д, рабочая_п = os.path.join(папка, "д"), os.path.join(папка, "э")
+                os.makedirs(рабочая_д)
+                os.makedirs(рабочая_п)
+                есть = self.выполнить(дан_, рабочая_д, ввод_)
+                нужно = self.выполнить(эталон, рабочая_п, ввод_)
+                self.assertEqual(есть, нужно)
+        if новые:
+            print("предупреждение: программы с возможностями после заморозки сверяются только компилятором "
+                  "на Дане: " + ", ".join(новые), file=sys.stderr)
+
+    def test_неверные_программы(self):
+        программы = неверные_программы()
+        self.assertGreater(len(программы), 50)
+        for путь in программы:
+            with self.subTest(программа=os.path.relpath(путь, ПАПКА)):
+                нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "проверить", путь],
+                                       capture_output=True, timeout=300, env=среда_python())
+                есть = subprocess.run([self.дан, "проверить", путь], capture_output=True, timeout=300,
+                                      env=sam_kompilyator.среда())
+                self.assertEqual(есть.returncode, нужно.returncode)
+                # текст сообщения после заморозки может стать точнее; строго - только для каталог/отказы
+                with сверка(self, путь if os.sep + "отказы" + os.sep in путь else None):
+                    self.assertEqual(есть.stdout.decode("utf-8").replace("\r\n", "\n"),
+                                     нужно.stdout.decode("utf-8").replace("\r\n", "\n"))
+
 
 
 # Сверка двух компиляторов и самосборка выполняются в обычном прогоне; при DAN_KOMPILYATOR=сам их

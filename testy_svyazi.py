@@ -28,11 +28,11 @@ import re
                   "test_garantii", "test_raskladka", "test_formatirovanie", "test_objasnenie"]
 # классы сверки с компилятором на Дане для проверки смысла (типы, ошибки, пометки для порождения)
 САМ_ПРОВЕРКА = ["test_sam.ТестыПроверкиНаДане", "test_sam.ТестыТиповНаДане", "test_sam.ТестыПорожденияНаДане",
-                "test_sam.ТестыСамосборки"]
+                "test_sam.ТестыСамосборки", "test_sam.ТестыРезультатаПрограмм"]
 ПОРОЖДЕНИЕ = ["test_kodogen", "test_poryadok", "test_garantii", "test_pamyat", "test_zadachi", "test_sverka",
               "test_sverka_sborok", "test_sovmestimost", "test_katalog", "test_testy", "test_zamery", "test_profil",
               "test_otladka", "test_sam.ТестыПорожденияНаДане", "test_sam.ТестыТаблицСреды",
-              "test_sam.ТестыСамосборки"]
+              "test_sam.ТестыСамосборки", "test_sam.ТестыРезультатаПрограмм"]
 ТАБЛИЦЫ = ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды", "test_llms", "test_katalog"]
 ДАННЫЕ = ["test_dannye", "test_json", "test_excel", "test_xml", "test_word", "test_fazzing", "test_pamyat"]
 
@@ -47,7 +47,8 @@ import re
                   "test_mingw", "test_veb", "test_katalog", "test_sam.ТестыСамосборки", "test_poryadok",
                   "test_sam_kompilyator"]),
     # проверка тестами через компилятор на Дане (DAN_KOMPILYATOR=сам)
-    (["sam_kompilyator.py"], ["test_sam_kompilyator", "test_proverka", "test_kodogen", "test_sovmestimost"]),
+    (["sam_kompilyator.py"], ["test_sam_kompilyator", "test_proverka", "test_kodogen", "test_sovmestimost",
+                              "test_sam.ТестыРезультатаПрограмм"]),
     (["matematika.py", "vysshaya.py"], ТАБЛИЦЫ + ["test_chisla", "test_vysshaya", "test_sverka"]),
     (["dannye.py"], ТАБЛИЦЫ + ДАННЫЕ),
     (["sistema.py"], ТАБЛИЦЫ + ["test_sistema", "test_http", "test_pochta", "test_sqlite", "test_okna", "test_paketi"]),
@@ -154,6 +155,9 @@ def _тесты_dan(путь):
     for класс, (программы, весь_репозиторий, _) in _классы_test_sam().items():
         if (весь_репозиторий and сверка_всех) or any(имя in _подключения(п) for п in программы):
             итог.add("test_sam." + класс)
+    if сверка_всех:
+        # сверка результата программ собирает весь компилятор на Дане (sam_kompilyator.py)
+        итог.add("test_sam.ТестыРезультатаПрограмм")
     if путь.startswith("библиотека/"):
         if имя in ТЕСТЫ_МОДУЛЕЙ:
             итог.add(ТЕСТЫ_МОДУЛЕЙ[имя])
