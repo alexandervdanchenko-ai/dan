@@ -46,6 +46,10 @@ import re
     (["dan.py"], ["test_kesh", "test_testy", "test_zamery", "test_profil", "test_otladka", "test_kody", "test_moduli",
                   "test_mingw", "test_veb", "test_katalog", "test_sam.ТестыСамосборки", "test_poryadok",
                   "test_sam_kompilyator"]),
+    # заморозка компилятора на Python: изменение его файлов проверяет test_zamorozka
+    (["zamorozka.py", "zamorozka.json", "lexer.py", "parser.py", "uzly.py", "moduli.py", "proverka.py",
+      "obobshchenie.py", "kodogen.py", "dan.py", "formatirovanie.py", "objasnenie.py", "dokumentaciya.py",
+      "zadachnik.py", "paketi.py", "gotovaya_sreda.py"], ["test_zamorozka", "test_sam.ТестыСтрогостиСверки"]),
     # проверка тестами через компилятор на Дане (DAN_KOMPILYATOR=сам)
     (["sam_kompilyator.py"], ["test_sam_kompilyator", "test_proverka", "test_kodogen", "test_sovmestimost",
                               "test_sam.ТестыРезультатаПрограмм"]),
