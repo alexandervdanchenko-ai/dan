@@ -9,3 +9,7 @@
 *.xlsx binary
 # образцы и находки фаззинга - точные байты
 фаззинг/** binary
+# семя - код C компилятора на Дане, созданный им самим (semya/obnovit.dan)
+semya/dan.c linguist-generated=true
+# сценарии cmd.exe - с окончаниями строк Windows
+*.cmd text eol=crlf
