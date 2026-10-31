@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 import dan
+import sam_kompilyator
 import versiya
 from parser import разобрать, ОшибкаРазбора
 from test_katalog import КОМПИЛЯТОР_ЕСТЬ, выполнить, ошибка_компиляции, прочитать
@@ -110,6 +111,7 @@ class ТестыРедакций(unittest.TestCase):
             with self.assertRaises(versiya.ОшибкаРедакции):
                 versiya.перевести("редакция 2028\n", "2026")
 
+    @sam_kompilyator.про_компилятор_на_python      # подменяет таблицу устаревших функций внутри процесса
     def test_устаревшие_функции(self):
         import contextlib
         т = 'подключить "json"\nвывод(сумма([1, 2]))\nвывод(json.записать_красиво(json.Пусто))\n'

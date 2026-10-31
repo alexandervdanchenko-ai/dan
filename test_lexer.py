@@ -1,5 +1,7 @@
 import unittest
 
+import sam_kompilyator
+
 from lexer import разобрать, Т, ОшибкаЛексера
 
 
@@ -7,6 +9,7 @@ def виды_и_значения(текст):
     return [(т.вид, т.значение) for т in разобрать(текст)]
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыЛексера(unittest.TestCase):
 
     def test_пустой_файл(self):
@@ -96,6 +99,7 @@ class ТестыЛексера(unittest.TestCase):
             разобрать("5кг")
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыНадёжностиИмён(unittest.TestCase):
 
     def test_смешение_алфавитов_в_слове_запрещено(self):
@@ -114,6 +118,7 @@ class ТестыНадёжностиИмён(unittest.TestCase):
         self.assertEqual(имена, ["счетчик", "счетчик", "Еж"])
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыНевидимыхСимволов(unittest.TestCase):
     """Защита от атаки Trojan Source (CVE-2021-42574)."""
 

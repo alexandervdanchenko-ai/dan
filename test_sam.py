@@ -15,6 +15,7 @@ import tempfile
 import unittest
 
 import dan
+import sam_kompilyator
 import uzly
 import versiya
 from lexer import Т, разобрать, ОшибкаЛексера
@@ -1465,6 +1466,13 @@ class ТестыСамосборки(unittest.TestCase):
             код, вывод_, ошибки = self.дан(self.первая, "собрать", путь)
             self.assertEqual(код, 0, ошибки)
             self.assertTrue(вывод_.startswith("Готово: "), вывод_)
+
+
+# Сверка двух компиляторов и самосборка выполняются в обычном прогоне; при DAN_KOMPILYATOR=сам их
+# повторять незачем: там весь набор тестов и так проверяет компилятор на Дане.
+for _имя, _класс in list(globals().items()):
+    if isinstance(_класс, type) and issubclass(_класс, unittest.TestCase):
+        globals()[_имя] = sam_kompilyator.про_компилятор_на_python(_класс)
 
 
 if __name__ == "__main__":

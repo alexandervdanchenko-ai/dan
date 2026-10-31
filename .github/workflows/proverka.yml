@@ -83,6 +83,39 @@ jobs:
           semya/dan собрать сам/дан.dan
           semya/dan запустить semya/obnovit.dan --проверить сам/дан
 
+  testy-sam:
+    # тот же набор тестов, но программы переводит компилятор на Дане (sam_kompilyator.py): после
+    # заморозки компилятора на Python новые возможности языка есть только в нём
+    name: Тесты на компиляторе на Дане (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      DAN_GUI_NO_BROWSER: "1"
+      DAN_KOMPILYATOR: сам
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Программы для проверки документов
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0 clang
+          sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
+          python -m pip install pypdf reportlab openpyxl python-docx markdown
+      - name: Сборка компилятора на Дане
+        run: python -c "import sam_kompilyator; print(sam_kompilyator.исполняемый())"
+      - name: Тесты
+        run: python testy.py > вывод_тестов.txt 2>&1
+      - name: Время тестов
+        if: always()
+        run: tail -n 200 вывод_тестов.txt
+      - name: Упавшие тесты
+        if: failure()
+        run: python .github/otchet.py вывод_тестов.txt
+
   fazzing:
     name: Фаззинг разборщиков
     # образ закреплён: libFuzzer и санитайзеры зависят от пакетов clang конкретной версии Ubuntu;

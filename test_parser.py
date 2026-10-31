@@ -1,5 +1,7 @@
 import unittest
 
+import sam_kompilyator
+
 from parser import разобрать, ОшибкаРазбора
 import uzly as у
 
@@ -20,6 +22,7 @@ def выр(текст):
 Б = у.Бинарная
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыВыражений(unittest.TestCase):
 
     def test_приоритет_умножения(self):
@@ -64,6 +67,7 @@ class ТестыВыражений(unittest.TestCase):
         self.assertEqual(выр("ф(1,\n   2)"), у.Вызов(И("ф"), [Ц(1), Ц(2)]))
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыИнструкций(unittest.TestCase):
 
     def test_пусть_и_перем(self):
@@ -123,6 +127,7 @@ class ТестыИнструкций(unittest.TestCase):
         self.assertEqual((п.инструкции[0].строка, п.инструкции[0].столбец), (3, 3))
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыСписков(unittest.TestCase):
 
     def test_литерал_списка(self):
@@ -149,6 +154,7 @@ class ТестыСписков(unittest.TestCase):
         self.assertEqual(len(п.инструкции), 2)
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыОшибок(unittest.TestCase):
 
     def ошибка(self, текст, фрагмент):
@@ -198,6 +204,7 @@ class ТестыОшибок(unittest.TestCase):
         self.ошибка("функ ф(а: цел, а: цел) {}", "дважды")
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыПримеров(unittest.TestCase):
 
     def test_примеры_разбираются(self):
@@ -209,6 +216,7 @@ class ТестыПримеров(unittest.TestCase):
                 разобрать(ф.read())
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыСоветов(unittest.TestCase):
 
     def test_присваивание_вместо_сравнения(self):
@@ -217,6 +225,7 @@ class ТестыСоветов(unittest.TestCase):
         self.assertIn("используйте «==»", str(к.exception))
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыТипов(unittest.TestCase):
 
     def test_объявление_типа(self):
@@ -244,6 +253,7 @@ class ТестыТипов(unittest.TestCase):
         self.assertIsInstance(одна("а.б.г += 1"), у.ПрисваиваниеПоля)
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыОшибокКакЗначенийРазбор(unittest.TestCase):
 
     def test_подключение_и_общий(self):
@@ -269,6 +279,7 @@ class ТестыОшибокКакЗначенийРазбор(unittest.TestCase
         self.assertEqual(разобрать("функ ф() -> [цел]?! { }").инструкции[0].тип_результата, "[цел]?!")
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыГрамматики10(unittest.TestCase):
     """Уточнения записи, согласованные с приложением А спецификации."""
 
