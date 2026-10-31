@@ -9,19 +9,47 @@ on:
 
 jobs:
   testy:
-    name: Тесты (${{ matrix.os }})
+    name: Тесты (${{ matrix.os }}${{ matrix.chast && format(', часть {0}', matrix.chast) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        # в Windows сборки компилятором C в несколько раз дольше: тесты делятся на две машины
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
+          - os: macos-latest
+          - os: windows-latest
+            chast: 1/2
+          - os: windows-latest
+            chast: 2/2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
       DAN_GUI_NO_BROWSER: "1"
+      DAN_CHAST: ${{ matrix.chast }}
     steps:
       - uses: actions/checkout@v5
+      - name: Папка кэша Дана
+        # кэш собранных программ и готовой среды переносится между прогонами (actions/cache ниже);
+        # отпечаток в кэше учитывает весь код C, ключи, компилятор и версию Дана
+        shell: bash
+        run: echo "DAN_CACHE=$RUNNER_TEMP/dan-kesh" >> "$GITHUB_ENV"
+      - name: Кэш собранных программ и готовой среды
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dan-kesh
+          key: dan-kesh-${{ matrix.os }}-${{ strategy.job-index }}-${{ github.sha }}
+          restore-keys: dan-kesh-${{ matrix.os }}-${{ strategy.job-index }}-
+      - name: Защитник Windows не проверяет сборки
+        # проверка каждого нового .exe и .o заметно замедляет сотни сборок тестов
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}", $env:TEMP, $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess "gcc.exe", "cc1.exe", "as.exe", "ld.exe", "collect2.exe"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -45,11 +73,13 @@ jobs:
       - name: Тесты
         # классы тестов идут параллельно на всех ядрах машины (testy.py)
         shell: bash
-        run: python testy.py > вывод_тестов.txt 2>&1
+        run: python testy.py ${DAN_CHAST:+--часть=$DAN_CHAST} > вывод_тестов.txt 2>&1
       - name: Время тестов
         if: always()
         shell: bash
-        run: tail -n 200 вывод_тестов.txt
+        run: |
+          tail -n 200 вывод_тестов.txt
+          python .github/vremya.py вывод_тестов.txt
       - name: Упавшие тесты
         if: failure()
         shell: bash
@@ -119,11 +149,20 @@ jobs:
         run: python .github/otchet.py вывод_тестов.txt
 
   fazzing:
-    name: Фаззинг разборщиков
+    name: Фаззинг разборщиков (${{ matrix.mesto }})
     # образ закреплён: libFuzzer и санитайзеры зависят от пакетов clang конкретной версии Ubuntu;
     # переход ubuntu-latest на новую версию проверяют тесты (ubuntu-latest в матрице выше)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # мишени делятся на две машины: каждая мишень получает те же 45 секунд, а ждать вдвое меньше
+        include:
+          - mesto: тексты
+            misheni: json csv xml base64 почта
+          - mesto: документы и архивы
+            misheni: word excel pdf архив распаковка расшифровка
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -135,11 +174,23 @@ jobs:
           sudo apt-get install -y clang fonts-dejavu-core
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
       - name: Фаззинг (по 45 секунд на каждую мишень)
-        run: python fazzing.py --секунд=45
-      - name: Сверка сборок (gcc и clang, -O0, -O2, -Os)
+        run: python fazzing.py ${{ matrix.misheni }} --секунд=45
+
+  sverka:
+    name: Сверка сборок
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: gcc и clang
         run: |
-          sudo apt-get install -y gcc
-          python sverka_sborok.py 150 ${{ github.run_number }}
+          sudo apt-get update
+          sudo apt-get install -y gcc clang fonts-dejavu-core
+      - name: Сверка сборок (gcc и clang, -O0, -O2, -O3, -Os)
+        run: python sverka_sborok.py 150 ${{ github.run_number }}
       - name: Находки сверки сборок
         if: failure()
         uses: actions/upload-artifact@v7
