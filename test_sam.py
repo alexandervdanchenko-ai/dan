@@ -1492,6 +1492,35 @@ class ТестыСамосборки(unittest.TestCase):
             готовые = os.listdir(os.path.join(папка, "кэш", "среда"))
             self.assertEqual(len([и for и in готовые if и.endswith(".o")]), 3, готовые)
 
+    @unittest.skipIf(os.name == "nt", "обёртка компилятора - сценарий оболочки")
+    def test_оптимизация_команд(self):
+        # «запустить» и «собрать» собирают с -O3, «тестировать» - с -O2, «--малый» - с -Os, в обоих компиляторах
+        with tempfile.TemporaryDirectory() as папка:
+            журнал = os.path.join(папка, "ключи.txt")
+            обёртка = os.path.join(папка, "cc.sh")
+            настоящий = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
+            with open(обёртка, "w", encoding="utf-8") as ф:
+                ф.write(f'#!/bin/sh\necho "$@" >> "{журнал}"\nexec "{настоящий}" "$@"\n')
+            os.chmod(обёртка, 0o755)
+            путь = os.path.join(папка, "о.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write('вывод(2 + 2)\nтест "сложение" { утвердить(2 + 2 == 4) }\n')
+            for компилятор in ([sys.executable, os.path.join(ПАПКА, "dan.py")], [os.path.abspath(self.первая)]):
+                for команда, нужно in ((["запустить"], "-O3"), (["собрать"], "-O3"), (["тестировать"], "-O2"),
+                                       (["запустить", "--малый"], "-Os")):
+                    with self.subTest(компилятор=компилятор[-1], команда=команда):
+                        if os.path.exists(журнал):
+                            os.remove(журнал)
+                        среда = dict(self.среда, DAN_COMPILER=обёртка, DAN_NO_CACHE="1")
+                        р = subprocess.run([*компилятор, *команда, путь], capture_output=True, timeout=900, env=среда)
+                        self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
+                        with open(журнал, encoding="utf-8") as ф:
+                            ключи = [с.split() for с in ф.read().splitlines()
+                                     if any(os.path.basename(ч).startswith("о") and ч.endswith(".c") for ч in с.split())]
+                        self.assertTrue(ключи)
+                        self.assertTrue(all(нужно in с and not ({"-O2", "-O3", "-Os"} - {нужно}) & set(с)
+                                            for с in ключи), ключи)
+
     def test_запуск(self):
         with tempfile.TemporaryDirectory() as папка:
             путь = os.path.join(папка, "привет.dan")

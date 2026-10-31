@@ -88352,66 +88352,66 @@ static int64_t d_glavnaya(dl_Ls* const d_argumenty_) {
     dan_sweep(_m22241);
     const size_t _m22242 = dan_mark();
     {
-        const dr_s _opt22243 = ({ bool const _seq22244 = dl_Ls_contains(d_parametry, dan_lit_5164.s); d_sobratq(d_putq, d_kod_c, _seq22244, dan_str_eq(d_komanda, dan_lit_5167.s)); });
+        const dr_s _opt22243 = d_sobratq(d_putq, d_kod_c, dl_Ls_contains(d_parametry, dan_lit_5164.s), true);
         if (dr_s_has(_opt22243)) {
             dan_str const d_gotovyj = dr_s_val(_opt22243);
-            const size_t _m22245 = dan_mark();
-            { dan_str _old22246 = d_ispolnyaemyj; d_ispolnyaemyj = dan_str_share(d_gotovyj); dan_str_release(_old22246); }
-            dan_sweep(_m22245);
+            const size_t _m22244 = dan_mark();
+            { dan_str _old22245 = d_ispolnyaemyj; d_ispolnyaemyj = dan_str_share(d_gotovyj); dan_str_release(_old22245); }
+            dan_sweep(_m22244);
         } else {
             dan_str const d_o = _opt22243.err;
-            const size_t _m22247 = dan_mark();
+            const size_t _m22246 = dan_mark();
             (DAN_OUT_LOCK(), dan_write_str(dan_concat(dan_lit_5092.s, d_o)), dan_newline(), DAN_OUT_UNLOCK());
-            dan_sweep(_m22247);
+            dan_sweep(_m22246);
             dan_exit(INT64_C(1));
         }
     }
     dan_sweep(_m22242);
-    const size_t _m22248 = dan_mark();
+    const size_t _m22247 = dan_mark();
     if (dan_str_eq(d_komanda, dan_lit_5167.s)) {
-        const size_t _m22249 = dan_mark();
+        const size_t _m22248 = dan_mark();
         (DAN_OUT_LOCK(), dan_write_str(dan_concat(dan_concat(dan_concat(dan_concat(dan_lit_3949.s, d_ispolnyaemyj), dan_lit_262.s), dan_int_to_str(dan_file_size(d_ispolnyaemyj, 1504))), dan_lit_5171.s)), dan_newline(), DAN_OUT_UNLOCK());
-        dan_sweep(_m22249);
+        dan_sweep(_m22248);
         dan_exit(INT64_C(0));
     }
-    dan_sweep(_m22248);
-    const size_t _m22250 = dan_mark();
+    dan_sweep(_m22247);
+    const size_t _m22249 = dan_mark();
     dan_str d_zapusk = dan_str_share(d_ispolnyaemyj);
-    dan_sweep(_m22250);
-    const size_t _m22251 = dan_mark();
+    dan_sweep(_m22249);
+    const size_t _m22250 = dan_mark();
     if (((!d_windows()) && (!dan_str_starts(d_zapusk, dan_lit_289.s)))) {
-        const size_t _m22252 = dan_mark();
-        { dan_str _old22253 = d_zapusk; d_zapusk = dan_str_share(dan_concat(dan_lit_5086.s, d_zapusk)); dan_str_release(_old22253); }
-        dan_sweep(_m22252);
+        const size_t _m22251 = dan_mark();
+        { dan_str _old22252 = d_zapusk; d_zapusk = dan_str_share(dan_concat(dan_lit_5086.s, d_zapusk)); dan_str_release(_old22252); }
+        dan_sweep(_m22251);
     }
-    dan_sweep(_m22251);
-    const size_t _m22254 = dan_mark();
+    dan_sweep(_m22250);
+    const size_t _m22253 = dan_mark();
     dan_str d_stroka_komandy = dan_str_share(d_v_kavychkah(d_zapusk));
-    dan_sweep(_m22254);
-    const size_t _m22255 = dan_mark();
+    dan_sweep(_m22253);
+    const size_t _m22254 = dan_mark();
     {
-        dl_Ls* const _list22256 = dl_Ls_share(d_dlya_programmy);
-        for (int64_t _i22257 = 0; _i22257 < _list22256->len; _i22257++) {
-            dan_str const d_z = _list22256->items[_i22257];
-            const size_t _m22258 = dan_mark();
-            { dan_str _old22259 = d_stroka_komandy; d_stroka_komandy = dan_str_share(dan_concat(d_stroka_komandy, dan_concat(dan_lit_268.s, d_v_kavychkah(d_z)))); dan_str_release(_old22259); }
-            dan_sweep(_m22258);
+        dl_Ls* const _list22255 = dl_Ls_share(d_dlya_programmy);
+        for (int64_t _i22256 = 0; _i22256 < _list22255->len; _i22256++) {
+            dan_str const d_z = _list22255->items[_i22256];
+            const size_t _m22257 = dan_mark();
+            { dan_str _old22258 = d_stroka_komandy; d_stroka_komandy = dan_str_share(dan_concat(d_stroka_komandy, dan_concat(dan_lit_268.s, d_v_kavychkah(d_z)))); dan_str_release(_old22258); }
+            dan_sweep(_m22257);
         }
-        dl_Ls_release(_list22256);
+        dl_Ls_release(_list22255);
     }
-    dan_sweep(_m22255);
-    const size_t _m22260 = dan_mark();
+    dan_sweep(_m22254);
+    const size_t _m22259 = dan_mark();
     dan_exit(dan_run(d_dlya_obolochki(d_stroka_komandy), 1511));
-    dan_sweep(_m22260);
-    { int64_t const _ret22261 = INT64_C(0); dan_str_release(d_stroka_komandy); dan_str_release(d_zapusk); dan_str_release(d_ispolnyaemyj); dan_str_release(d_kod_c); dt_Perevod_release(d_perevod); dan_str_release(d_rezhim); dt_moduliu2eNastrojki_release(d_nastrojki); dan_str_release(d_ishodnik); dan_str_release(d_putq); dan_str_release(d_komanda); dl_Ls_release(d_rezhimy_si); dl_Ls_release(d_neizvestnye); dl_Ls_release(d_slova); dl_Ls_release(d_parametry); dl_Ls_release(d_dlya_programmy); dl_Ls_release(d_argumenty); dan_sweep(dan_fmark); return _ret22261; }
+    dan_sweep(_m22259);
+    { int64_t const _ret22260 = INT64_C(0); dan_str_release(d_stroka_komandy); dan_str_release(d_zapusk); dan_str_release(d_ispolnyaemyj); dan_str_release(d_kod_c); dt_Perevod_release(d_perevod); dan_str_release(d_rezhim); dt_moduliu2eNastrojki_release(d_nastrojki); dan_str_release(d_ishodnik); dan_str_release(d_putq); dan_str_release(d_komanda); dl_Ls_release(d_rezhimy_si); dl_Ls_release(d_neizvestnye); dl_Ls_release(d_slova); dl_Ls_release(d_parametry); dl_Ls_release(d_dlya_programmy); dl_Ls_release(d_argumenty); dan_sweep(dan_fmark); return _ret22260; }
 }
 
 int main(int argc, char **argv) {
     dan_argc = argc; dan_argv = argv; dan_start();
     const size_t dan_main_mark = dan_mark();
-    const size_t _m22262 = dan_mark();
+    const size_t _m22261 = dan_mark();
     dan_exit(d_glavnaya(dan_program_args()));
-    dan_sweep(_m22262);
+    dan_sweep(_m22261);
     #if DAN_FREE_AT_EXIT
     dan_sweep(dan_main_mark);
     #endif
