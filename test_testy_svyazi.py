@@ -69,6 +69,25 @@ class ТестыВыбора(unittest.TestCase):
         # класс не повторяется, если выбран весь файл
         self.assertNotIn("test_sam.ТестыСамосборки", т(["lexer.py", "dan.py"]))
 
+    def test_части_для_нескольких_машин(self):
+        # --часть=N/M: части не пересекаются, вместе дают весь набор, по времени примерно равны
+        прошлое = testy.прочитать_время_репозитория()
+        все = [е for к in testy.единицы() for е in
+               ([testy.Единица(к)] if testy.по_одному(к) else testy.разбить(к, прошлое))]
+        for частей in (2, 3):
+            части = [testy.доля(все, н, частей, прошлое) for н in range(1, частей + 1)]
+            имена = [str(е) for ч in части for е in ч]
+            self.assertEqual(sorted(имена), sorted(str(е) for е in все))
+            суммы = [sum(testy.оценка(е, прошлое) for е in ч) for ч in части]
+            self.assertLess(max(суммы) - min(суммы), max(testy.оценка(е, прошлое) for е in все) + 1)
+        р = subprocess.run([testy.sys.executable, "testy.py", "--список", "--часть=2/2"], cwd=ПАПКА,
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
+        self.assertTrue(р.stdout.strip())
+        р = subprocess.run([testy.sys.executable, "testy.py", "--часть=3/2"], cwd=ПАПКА,
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(р.returncode, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
