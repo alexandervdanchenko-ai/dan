@@ -72,5 +72,32 @@ class ТестыСемени(unittest.TestCase):
         self.assertIn("провалено: 0", вывод_)
 
 
+class ТестыСозданияСемени(unittest.TestCase):
+    """semya/создать_семя.py (python пересоздать.py): быстрый путь и путь через компилятор на Дане."""
+
+    def загрузить(self):
+        import importlib.util
+        описание = importlib.util.spec_from_file_location("создать_семя_тест", os.path.join(СЕМЯ, "создать_семя.py"))
+        модуль = importlib.util.module_from_spec(описание)
+        описание.loader.exec_module(модуль)
+        return модуль
+
+    def test_семя_совпадает_с_кодом_от_python(self):
+        модуль = self.загрузить()
+        модуль._код_от_компилятора_на_дане = lambda: self.fail("семя не устарело: компилятор на Дане не нужен")
+        self.assertEqual(модуль.текст(), прочитать("semya/dan.c"))
+
+    def test_расхождение_с_python_решает_компилятор_на_дане(self):
+        модуль = self.загрузить()
+        модуль._код_от_python = lambda: "/* другой код */\n"
+        модуль._код_от_компилятора_на_дане = lambda: "/* код от компилятора на Дане */\n"
+        self.assertEqual(модуль.текст(), "/* код от компилятора на Дане */\n")
+
+        def отказ():
+            raise RuntimeError("компилятор на Python не принял новый код")
+        модуль._код_от_python = отказ
+        self.assertEqual(модуль.текст(), "/* код от компилятора на Дане */\n")
+
+
 if __name__ == "__main__":
     unittest.main()
