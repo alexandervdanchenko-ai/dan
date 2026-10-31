@@ -55,3 +55,4 @@ semya/*
 !semya/*.dan
 !semya/sobrat.sh
 !semya/sobrat.cmd
+!semya/создать_семя.py

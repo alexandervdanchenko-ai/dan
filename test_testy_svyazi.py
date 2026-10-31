@@ -50,7 +50,8 @@ class ТестыВыбора(unittest.TestCase):
         import glob
         import пересоздать
         сценарии = {os.path.relpath(п, ПАПКА).replace(os.sep, "/")
-                    for п in glob.glob(os.path.join(ПАПКА, "создать_*.py")) + glob.glob(os.path.join(ПАПКА, "сам", "создать_*.py"))}
+                    for п in glob.glob(os.path.join(ПАПКА, "создать_*.py")) + glob.glob(os.path.join(ПАПКА, "сам", "создать_*.py"))
+                    + glob.glob(os.path.join(ПАПКА, "semya", "создать_*.py"))}
         self.assertEqual({с for с, _ in пересоздать.СЦЕНАРИИ}, сценарии)
         self.assertEqual(пересоздать.главная(["--проверить"]), 0)
 
