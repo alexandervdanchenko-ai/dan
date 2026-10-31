@@ -5,12 +5,15 @@ import os
 import random
 import unittest
 
+import sam_kompilyator
+
 from formatirovanie import отформатировать, ОшибкаФорматирования
 import ustoychivost
 
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
 
 
+@sam_kompilyator.про_компилятор_на_python
 class ТестыФорматирования(unittest.TestCase):
 
     def проверить(self, было, стало):

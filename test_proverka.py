@@ -1,17 +1,27 @@
 import unittest
 
+import dan
+import sam_kompilyator
 from parser import разобрать
 from proverka import проверить, ОшибкаПроверки
 import uzly as у
 
 
 def ок(текст):
+    """Проверенная программа. При DAN_KOMPILYATOR=сам программу проверяет компилятор на Дане, а тесты,
+    которым нужно дерево программы с типами узлов, пропускаются."""
+    if sam_kompilyator.включён():
+        dan.перевести(текст)
+        return sam_kompilyator.БЕЗ_ДЕРЕВА
     return проверить(разобрать(текст))
 
 
 def ошибки(текст):
     try:
-        проверить(разобрать(текст))
+        if sam_kompilyator.включён():
+            dan.перевести(текст)
+        else:
+            проверить(разобрать(текст))
     except ОшибкаПроверки as о:
         return о.ошибки
     raise AssertionError("ожидалась ошибка проверки")
