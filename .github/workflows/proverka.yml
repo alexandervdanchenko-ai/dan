@@ -55,6 +55,34 @@ jobs:
         shell: bash
         run: python .github/otchet.py вывод_тестов.txt
 
+  semya:
+    name: Компилятор из семени (${{ matrix.os }})
+    # Python здесь не запускается: компилятор собирается из semya/dan.c компилятором C,
+    # затем собирает сам себя и сверяет код C с семенем
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Сборка из семени (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: time sh semya/sobrat.sh
+      - name: Сборка из семени (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: semya\sobrat.cmd
+      - name: Семя не устарело
+        shell: bash
+        run: semya/dan запустить semya/obnovit.dan --проверить
+      - name: Компилятор собирает сам себя, код C совпадает с семенем
+        shell: bash
+        run: |
+          semya/dan собрать сам/дан.dan
+          semya/dan запустить semya/obnovit.dan --проверить сам/дан
+
   fazzing:
     name: Фаззинг разборщиков
     # образ закреплён: libFuzzer и санитайзеры зависят от пакетов clang конкретной версии Ubuntu;
