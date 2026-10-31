@@ -70484,7 +70484,7 @@ static bool d_porozhdenieu2elovushka(dt_razboru2eUzel const d_u) {
     DAN_STACK_CHECK(9004034);
     const size_t dan_fmark = dan_mark();
     const size_t _m15797 = dan_mark();
-    if ((dm_Dss_contains((d_u).f_pometki, dan_lit_3513.s) || dan_str_eq((d_u).f_vid, dan_lit_596.s))) {
+    if (((dm_Dss_contains((d_u).f_pometki, dan_lit_3513.s) || dan_str_eq((d_u).f_vid, dan_lit_596.s)) || d_porozhdenieu2epostoyannoe(d_u))) {
         { bool const _ret15798 = false;  dan_sweep(dan_fmark); return _ret15798; }
     }
     dan_sweep(_m15797);
