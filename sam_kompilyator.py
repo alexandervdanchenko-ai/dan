@@ -17,7 +17,8 @@
 
 Компилятор на Дане собирается один раз и хранится в кэше (папка кэша Дана, «сам/<отпечаток>»);
 отпечаток - по файлам папок «сам» и «sreda» и файлам компилятора на Python, которым он собирается.
-Готовый исполняемый файл можно указать переменной DAN_SAM_EXE (например, собранный из семени).
+Готовый исполняемый файл можно указать переменной DAN_SAM_EXE. Код C компилятора на Дане даёт компилятор
+на Python, а если не может (или DAN_SAM_IZ_SEMENI=1) - компилятор, собранный из семени semya/dan.c.
 """
 
 import hashlib
@@ -112,17 +113,35 @@ def исполняемый():
                 time.sleep(1)
         try:
             if not os.path.isfile(путь):
-                исходный = os.path.join(САМ, "дан.dan")
-                with open(исходный, encoding="utf-8") as ф:
-                    код = dan.перевести_python(ф.read(), исходный)
                 with tempfile.TemporaryDirectory(prefix="dan_sam_") as временная:
-                    готовый = dan.собрать_код(код, os.path.join(временная, "дан"), САМ)
+                    готовый = dan.собрать_код(код_компилятора(временная), os.path.join(временная, "дан"), САМ)
                     os.replace(готовый, путь)
         finally:
             if os.path.isdir(замок):
                 os.rmdir(замок)
     _ИСПОЛНЯЕМЫЙ.append(путь)
     return путь
+
+
+def код_компилятора(временная):
+    """Код C компилятора на Дане из текущих файлов папки «сам». Переводит его компилятор на Python, а если
+    не может (после заморозки компилятор на Дане вправе пользоваться новыми возможностями языка) или
+    задано DAN_SAM_IZ_SEMENI=1 - компилятор, собранный из семени semya/dan.c."""
+    import dan
+    исходный = os.path.join(САМ, "дан.dan")
+    if os.environ.get("DAN_SAM_IZ_SEMENI") != "1":
+        try:
+            with open(исходный, encoding="utf-8") as ф:
+                return dan.перевести_python(ф.read(), исходный)
+        except Exception:
+            pass
+    with open(os.path.join(ПАПКА, "semya", "dan.c"), encoding="utf-8") as ф:
+        семя = dan.собрать_код(ф.read(), os.path.join(временная, "семя"), САМ)
+    р = subprocess.run([семя, "си", исходный], capture_output=True, env=среда(), timeout=900)
+    if р.returncode != 0:
+        raise RuntimeError("компилятор из семени не перевёл сам/дан.dan:\n"
+                           + р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace"))
+    return р.stdout.decode("utf-8").replace("\r\n", "\n")
 
 
 def среда():

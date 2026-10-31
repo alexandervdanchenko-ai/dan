@@ -94,6 +94,8 @@ jobs:
       PYTHONIOENCODING: utf-8
       DAN_GUI_NO_BROWSER: "1"
       DAN_KOMPILYATOR: сам
+      # компилятор на Дане для тестов переводит компилятор из семени, а не компилятор на Python
+      DAN_SAM_IZ_SEMENI: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
