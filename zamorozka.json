@@ -1,0 +1,23 @@
+{
+  "начало": {
+    "дата": "2026-10-31",
+    "причина": "начало заморозки компилятора на Python: этап 17а, язык развивается только в папке «сам»"
+  },
+  "исключения": [],
+  "отпечатки": {
+    "lexer.py": "3dcfa474359ba29cf16c524f61580a627b99d4d7f30359613a67154e7ca922a0",
+    "parser.py": "7dbe1e6fcffc53e540fabc434c23076c342210781802e052797818db12ef06ed",
+    "uzly.py": "41327c6293df7dfbf002916d7e95e1e50d98e7a3c9aea5d3e1d8edc1fe81ae06",
+    "moduli.py": "db8cd7811e780504317e975359f337c7a28ac9ffa15b44b47b46dd299cc334c2",
+    "proverka.py": "6e47f5039f1f1d9daa14836d8837271bc40d5769b4843b819166b0c416755557",
+    "obobshchenie.py": "ca85ad96b7071cccda0ac6e8d7509100114e842efddae34f34d7688c75428524",
+    "kodogen.py": "2100039da21e6fb052ab75d4aafb2216c19b8ce43b24f4584f08475230ec93f3",
+    "dan.py": "96fa47b473cf46e8430436eef6e3a34d877cdfbe818fbe3447f738f4b62e8166",
+    "formatirovanie.py": "d10ce4532ed3d1817b0862925ca9da998a176e8bac297abb2d2583b446cf0113",
+    "objasnenie.py": "3055ca22b34c789ba9fd48133c3457b841c1b8df48452de63fcbed8f8b433178",
+    "dokumentaciya.py": "06d9920b5d6c7caf76f76ac271c7fc9f9075f665a74532e832e463879d14671f",
+    "zadachnik.py": "a153cfc733b29558ee51d9701a1510c37bea48ca50e313de86846b69dc8c7a5f",
+    "paketi.py": "8ea964e2b2d91f740a530cf0500d1cfb87d2a677693cf44742d185a54b3ec3f1",
+    "gotovaya_sreda.py": "9b7a3a948f6204c2eea8cafd771363f28b0600e9723bd6a87e9487ab80c33682"
+  }
+}
