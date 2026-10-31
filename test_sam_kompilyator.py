@@ -85,6 +85,37 @@ class ТестыРежимовСи(unittest.TestCase):
             self.assertIn("Неизвестный параметр: --тесты", вывод_.getvalue())
 
 
+class ТестыКэшаКомпилятора(unittest.TestCase):
+
+    def test_кэш_на_другом_диске(self):
+        # в Windows временная папка и кэш (DAN_CACHE) могут быть на разных дисках: os.replace между
+        # дисками не работает, и собранный компилятор переносится копией рядом с целью
+        настоящий = os.replace
+
+        def замена(откуда, куда):
+            if os.path.dirname(os.path.abspath(откуда)) != os.path.dirname(os.path.abspath(куда)):
+                raise OSError(17, "The system cannot move the file to a different disk drive")
+            настоящий(откуда, куда)
+
+        def собрать_код(код, основа, папка):
+            with open(основа + ".exe", "w", encoding="utf-8") as ф:
+                ф.write(код)
+            return основа + ".exe"
+
+        with tempfile.TemporaryDirectory() as кэш, \
+                mock.patch.object(sam_kompilyator, "_DAN_CACHE", кэш), \
+                mock.patch.object(sam_kompilyator, "_ИСПОЛНЯЕМЫЙ", []), \
+                mock.patch.dict(os.environ, {"DAN_SAM_EXE": ""}), \
+                mock.patch.object(sam_kompilyator, "код_компилятора", lambda временная: "код"), \
+                mock.patch.object(dan, "собрать_код", собрать_код), \
+                mock.patch.object(sam_kompilyator.os, "replace", замена):
+            путь = sam_kompilyator.исполняемый()
+            self.assertTrue(путь.startswith(кэш))
+            with open(путь, encoding="utf-8") as ф:
+                self.assertEqual(ф.read(), "код")
+            self.assertEqual([и for и in os.listdir(os.path.dirname(путь)) if и.endswith(".tmp")], [])
+
+
 @unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
 class ТестыЧерезКомпиляторНаДане(unittest.TestCase):
     """dan.перевести при DAN_KOMPILYATOR=сам: код и ошибки от компилятора на Дане."""
