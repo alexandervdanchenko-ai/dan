@@ -47,6 +47,7 @@
 #if !defined(_WIN32) && !defined(__wasi__)
 #include <pthread.h>
 #endif
+#include <stdatomic.h>
 
 #define DAN_VK_L32 64   /* lanes of a float dot product */
 #define DAN_VK_L64 32   /* lanes of a double dot product */
@@ -849,7 +850,7 @@ static int dan_vk_has_dotprod(void) {
 
 /* ---- choice of the variant ---- */
 
-static const dan_vk_table *dan_vk_cur;
+static _Atomic(const dan_vk_table *) dan_vk_cur;
 
 /* 1 if the processor can run the variant with this name */
 static int dan_vk_supported(const char *name, const dan_vk_table **t) {
@@ -871,13 +872,14 @@ static int dan_vk_supported(const char *name, const dan_vk_table **t) {
 }
 
 static const dan_vk_table *dan_vk(void) {
-    const dan_vk_table *t = dan_vk_cur;
+    const dan_vk_table *t = atomic_load_explicit(&dan_vk_cur, memory_order_relaxed);
     if (t) return t;
     static const char *const best[] = {"avx512", "avx2", "dotprod", "neon", "c"};
     const char *want = getenv("DAN_YADRA");
     if (!(want && dan_vk_supported(want, &t)))
         for (int i = 0; i < 5; i++) if (dan_vk_supported(best[i], &t)) break;
-    dan_vk_cur = t;   /* a race here is harmless: every thread finds the same table */
+    /* two threads may choose at once: both find the same table */
+    atomic_store_explicit(&dan_vk_cur, t, memory_order_relaxed);
     return t;
 }
 
@@ -920,7 +922,7 @@ static void dan_pool_wake_all(dan_pool_cv *c) { pthread_cond_broadcast(c); }
 #endif
 
 static struct {
-    int state;          /* 0 - not started, 1 - working, -1 - one thread only */
+    _Atomic int state;  /* 0 - not started, 1 - working, -1 - one thread only; set after threads */
     int threads;        /* threads including the calling one */
     dan_pool_mx busy;   /* held by the thread that runs a job */
     dan_pool_mx mx;
@@ -1010,20 +1012,20 @@ static void dan_pool_start(void) {
         made++;
     }
     dan_pool.threads = made;
-    dan_pool.state = made > 1 ? 1 : -1;
+    atomic_store_explicit(&dan_pool.state, made > 1 ? 1 : -1, memory_order_release);
 }
 
-static int dan_pool_ready;
+static _Atomic int dan_pool_ready;
 #ifndef _WIN32
-static void dan_pool_init_busy(void) { dan_pool_mx_init(&dan_pool.busy); dan_pool_ready = 1; }
+static void dan_pool_init_busy(void) { dan_pool_mx_init(&dan_pool.busy); atomic_store(&dan_pool_ready, 1); }
 #endif
 
 static void dan_pool_init_once(void) {
-    if (dan_pool_ready) return;
+    if (atomic_load(&dan_pool_ready)) return;
 #ifdef _WIN32
     static volatile LONG once = 0;
-    if (InterlockedCompareExchange(&once, 1, 0) == 0) { dan_pool_mx_init(&dan_pool.busy); dan_pool_ready = 1; }
-    else while (!dan_pool_ready) Sleep(0);
+    if (InterlockedCompareExchange(&once, 1, 0) == 0) { dan_pool_mx_init(&dan_pool.busy); atomic_store(&dan_pool_ready, 1); }
+    else while (!atomic_load(&dan_pool_ready)) Sleep(0);
 #else
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, dan_pool_init_busy);
@@ -1043,9 +1045,12 @@ static void dan_pool_run(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx)
     if (dan_pool.state == 0) dan_pool_start();
     if (dan_pool.state < 0) { dan_pool_unlock(&dan_pool.busy); fn(ctx, 0, n); return; }
     int t = dan_pool.threads;
-    if (n / min_part < t) {   /* fewer parts: still one call per thread, some get nothing */
+    if (n / min_part < t) {
+        /* fewer parts of min_part than threads: the whole range runs on this
+           thread. The pool is free again, so a job started inside (for
+           example a large product of matrices in each of a few steps) can
+           still use all cores; the bits do not depend on that. */
         dan_pool_unlock(&dan_pool.busy);
-        /* keep the parts a function of n and the thread count only: run whole */
         fn(ctx, 0, n);
         return;
     }
@@ -1070,7 +1075,8 @@ static int dan_pool_threads(void) {
         if (dan_pool.state == 0) dan_pool_start();
         dan_pool_unlock(&dan_pool.busy);
     }
-    return dan_pool.state > 0 ? dan_pool.threads : 1;
+    /* «threads» is written before «state» (release), so it is read after it */
+    return atomic_load_explicit(&dan_pool.state, memory_order_acquire) > 0 ? dan_pool.threads : 1;
 }
 #endif
 
@@ -1357,7 +1363,6 @@ static void dan_vk_q8_dequantize(const uint8_t *in, float *x, int64_t n) {
     }
 }
 
-static float dan_vk_q8_dot(const uint8_t *a, const uint8_t *b, int64_t blocks) { return dan_vk()->q8_dot(a, b, blocks); }
 
 /* y[i] = row i of w (rows x cols, cols a multiple of 32, in blocks) . xq (x in blocks) */
 typedef struct { const uint8_t *w, *x; float *y; int64_t blocks; } dan_vk_q8mv_job;
