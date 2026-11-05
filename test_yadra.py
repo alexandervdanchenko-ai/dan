@@ -55,13 +55,13 @@ class ТестыЯдер(unittest.TestCase):
     @unittest.skipUnless(shutil.which("x86_64-w64-mingw32-gcc"), "нет MinGW")
     def test_сборка_для_windows(self):
         with tempfile.TemporaryDirectory() as папка:
-            код, ошибки = собрать("x86_64-w64-mingw32-gcc", os.path.join(папка, "т.exe"))
+            код, ошибки = собрать("x86_64-w64-mingw32-gcc", os.path.join(папка, "t.exe"))
             self.assertEqual(код, 0, ошибки)
 
     @unittest.skipUnless(shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64"), "нет сборки для ARM")
     def test_arm_в_qemu(self):
         with tempfile.TemporaryDirectory() as папка:
-            выход = os.path.join(папка, "т")
+            выход = os.path.join(папка, "t")
             код, ошибки = собрать("aarch64-linux-gnu-gcc", выход, ["-static"])
             self.assertEqual(код, 0, ошибки)
             вывод = self.выполнить(["qemu-aarch64", "-cpu", "max", выход])
