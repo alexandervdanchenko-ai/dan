@@ -1,0 +1,22 @@
+# Временная ветка: замер векторных ядер и пула потоков на машинах GitHub (для замеры/результаты.md).
+name: Замер ядер
+on: push
+jobs:
+  zamer:
+    name: Замер (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Замер
+        shell: bash
+        run: |
+          nproc 2>/dev/null || sysctl -n hw.ncpu || echo "$NUMBER_OF_PROCESSORS"
+          cat /proc/cpuinfo 2>/dev/null | grep -m1 "model name" || sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+          if [ "$RUNNER_OS" = "Windows" ]; then P=""; else P="-pthread"; fi
+          gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P || clang -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P
+          ./b
+          for t in 1 2 4 ""; do DAN_POTOKI=$t ./b замер; done
