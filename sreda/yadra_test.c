@@ -292,6 +292,16 @@ static void nested(void *ctx, int64_t b, int64_t e) {
     }
 }
 
+static int saw_inside;
+static void check_inside(void *ctx, int64_t b, int64_t e) {
+    (void)ctx; (void)b; (void)e;
+    if (dan_pool_inside) saw_inside++;
+}
+static void few_parts(void *ctx, int64_t b, int64_t e) {
+    (void)ctx;
+    for (int64_t i = b; i < e; i++) dan_pool_run(1000, 1, check_inside, NULL);   /* inside: one whole call */
+}
+
 static void test_pool(void) {
     static const int64_t sizes[] = {1, 2, 3, 17, 1000, 100003};
     marks = calloc(100003, sizeof(int64_t));
@@ -307,6 +317,61 @@ static void test_pool(void) {
     for (int r = 0; r < 2000; r++) dan_pool_run(64, 1, mark, NULL);   /* many short jobs */
     free(marks);
     CHECK(dan_pool_threads() >= 1, "число потоков");
+    /* a job with fewer parts than threads runs whole, and so does a job inside it */
+    int t = dan_pool_threads();
+    if (t >= 3) {
+        saw_inside = 0;
+        dan_pool_run(2 * 10, 10, few_parts, NULL);   /* 2 parts of 10 < t threads */
+        CHECK(saw_inside == 20, "работа внутри короткой работы: %d из 20 целиком", saw_inside);
+    }
+}
+
+/* layer normalisation as written before the variants (the reference) */
+static void layernorm_ref(float *y, const float *x, const float *w, const float *b, int64_t n, float eps) {
+    float mean = dan_vk_sum_f32_c(x, n) / (float)n;
+    float acc[64] = {0};
+    int64_t k = 0;
+    for (; k + 64 <= n; k += 64)
+        for (int l = 0; l < 64; l++) { float d = x[k + l] - mean, p = d * d; acc[l] = acc[l] + p; }
+    for (int s = 32; s >= 1; s /= 2)
+        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
+    float v = acc[0];
+    for (; k < n; k++) { float d = x[k] - mean, p = d * d; v = v + p; }
+    float sc = 1.0f / sqrtf(v / (float)n + eps);
+    for (int64_t i = 0; i < n; i++) {
+        float t = (x[i] - mean) * sc;
+        if (w) t = t * w[i];
+        if (b) t = t + b[i];
+        y[i] = t;
+    }
+}
+
+static void test_sums(void) {
+    static const int64_t sizes[] = {0, 1, 31, 63, 64, 65, 200, 1000, 4097};
+    float a[4097], y1[4097], y2[4097], w[4097], bb[4097];
+    double c[4097];
+    for (int i = 0; i < 4097; i++) { a[i] = (float)rnd() * 3; c[i] = rnd(); w[i] = (float)rnd(); bb[i] = (float)rnd(); }
+    for (int v = 0; v < nvariants; v++)
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int64_t n = sizes[s];
+            CHECK(same32(variants[v]->sum_f32(a, n), dan_vk_sum_f32_c(a, n)), "%s sum_f32 n = %d", variants[v]->name, (int)n);
+            CHECK(same64(variants[v]->sum_f64(c, n), dan_vk_sum_f64_c(c, n)), "%s sum_f64 n = %d", variants[v]->name, (int)n);
+            if (n == 0) continue;
+            dan_vk_cur = variants[v];
+            layernorm_ref(y1, a, w, bb, n, 1e-5f);
+            dan_vk_layernorm_f32(y2, a, w, bb, n, 1e-5f);
+            CHECK(memcmp(y1, y2, (size_t)n * 4) == 0, "%s layernorm n = %d", variants[v]->name, (int)n);
+            memcpy(y2, a, (size_t)n * 4);
+            dan_vk_layernorm_f32(y2, y2, NULL, NULL, n, 1e-5f);   /* in place */
+            layernorm_ref(y1, a, NULL, NULL, n, 1e-5f);
+            CHECK(memcmp(y1, y2, (size_t)n * 4) == 0, "%s layernorm на месте n = %d", variants[v]->name, (int)n);
+        }
+}
+
+static double dan_vk_dot_f64_fast_check(void) {
+    double a[1] = {1}, b[1] = {1}, c[1];
+    dan_vk_matvec_f64_fast(a, b, c, 1, 1);
+    return c[0];
 }
 
 static void test_norms(void) {
@@ -348,6 +413,19 @@ static void test_norms(void) {
     mean = 0;
     for (int i = 0; i < N; i++) mean += ys[i];
     CHECK(fabs(mean) < 1e-9, "layernorm f64");
+    {   /* double kernels used by the language */
+        double w2[6] = {1, 2, 3, 4, 5, 6}, x2[3] = {1, 0, -1}, y2[2], z2[3] = {1, 1, 1};
+        dan_vk_matvec_f64(w2, x2, y2, 2, 3);
+        CHECK(y2[0] == -2 && y2[1] == -2, "matvec_f64");
+        dan_vk_axpy_f64(z2, 2.0, x2, 3);
+        CHECK(z2[0] == 3 && z2[1] == 1 && z2[2] == -1, "axpy_f64");
+        float t2[3] = {1, 2, 3};
+        uint16_t h2[3];
+        dan_vk_f2h(t2, h2, 3);
+        CHECK(dan_f16_to_f32(h2[2]) == 3.0f, "f2h");
+        double r = dan_vk_dot_f64_fast_check();
+        CHECK(r == 1.0, "dot_f64_fast %g", r);
+    }
     float s1 = dan_vk_sum_f32(x, N);
     double e = 0;
     for (int i = 0; i < N; i++) e += x[i];
@@ -431,6 +509,7 @@ int main(int argc, char **argv) {
     test_fast();
     test_pool();
     test_norms();
+    test_sums();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", variants[v]->name);
     dan_vk_cur = NULL;
