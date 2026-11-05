@@ -179,9 +179,16 @@ static void mark(void *ctx, int64_t b, int64_t e) {
     (void)ctx;
     for (int64_t i = b; i < e; i++) marks[i]++;
 }
+static void count4(void *ctx, int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) ((int *)ctx)[i]++;
+}
 static void nested(void *ctx, int64_t b, int64_t e) {
     (void)ctx;
-    for (int64_t i = b; i < e; i++) dan_pool_run(4, 1, mark, NULL);   /* runs whole on this thread */
+    for (int64_t i = b; i < e; i++) {   /* runs whole on this thread */
+        int c[4] = {0, 0, 0, 0};
+        dan_pool_run(4, 1, count4, c);
+        marks[i] = c[0] == 1 && c[1] == 1 && c[2] == 1 && c[3] == 1;
+    }
 }
 
 static void test_pool(void) {
@@ -193,9 +200,9 @@ static void test_pool(void) {
         dan_pool_run(n, 1, mark, NULL);
         for (int64_t i = 0; i < n; i++) CHECK(marks[i] == 1, "пул: n = %d, элемент %d - %d раз", (int)n, (int)i, (int)marks[i]);
     }
-    memset(marks, 0, 4 * sizeof(int64_t));
+    memset(marks, 0, 1000 * sizeof(int64_t));
     dan_pool_run(1000, 1, nested, NULL);
-    for (int i = 0; i < 4; i++) CHECK(marks[i] == 1000, "пул внутри пула");
+    for (int i = 0; i < 1000; i++) CHECK(marks[i] == 1, "пул внутри пула");
     for (int r = 0; r < 2000; r++) dan_pool_run(64, 1, mark, NULL);   /* many short jobs */
     free(marks);
     CHECK(dan_pool_threads() >= 1, "число потоков");
