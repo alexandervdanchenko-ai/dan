@@ -8,7 +8,11 @@
 
 import os
 import re
+import subprocess
+import tempfile
 import unittest
+
+import sam_kompilyator
 
 from lexer import ОшибкаЛексера
 from parser import ОшибкаРазбора, разобрать
@@ -21,6 +25,17 @@ def блоки(файл):
     with open(os.path.join(ПАПКА, файл), encoding="utf-8") as ф:
         # блоки с указанием языка (```ebnf - грамматика) - не программы на Дане
         return [код for язык, код in re.findall(r"^```(\w*)\n(.*?)^```", ф.read(), re.S | re.M) if not язык]
+
+
+def ошибка_разбора_на_дане(блок):
+    """Разбор компилятором на Дане (дан дерево): запись, которой нет в замороженном компиляторе на Python."""
+    with tempfile.TemporaryDirectory() as папка:
+        путь = os.path.join(папка, "p.dan")
+        with open(путь, "w", encoding="utf-8") as ф:
+            ф.write(блок)
+        р = subprocess.run([sam_kompilyator.исполняемый(), "дерево", путь], capture_output=True,
+                           env=sam_kompilyator.среда(), timeout=600)
+        return None if р.returncode == 0 else р.stderr.decode("utf-8", "replace") + р.stdout.decode("utf-8", "replace")
 
 
 def сообщение(блок):
@@ -42,6 +57,9 @@ class ТестыПримеровДокументации(unittest.TestCase):
                         ошибка = None
                     except (ОшибкаЛексера, ОшибкаРазбора) as о:
                         ошибка = str(о)
+                        if not намеренная:
+                            # новая запись (после заморозки) есть только в компиляторе на Дане
+                            ошибка = ошибка_разбора_на_дане(блок)
                     if намеренная:
                         self.assertIsNotNone(ошибка, "пример должен показывать ошибку")
                     else:
