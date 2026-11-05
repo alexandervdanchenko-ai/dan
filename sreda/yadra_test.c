@@ -132,6 +132,27 @@ static void test_q8(void) {
         int32_t r = dan_vk_q8_block_c(x, y);
         for (int v = 0; v < nvariants; v++) CHECK(variants[v]->q8_block(x, y) == r, "%s q8_block", variants[v]->name);
     }
+    /* dot products of rows of blocks: every variant, any number of blocks */
+    {
+        static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 63, 64, 65};
+        uint8_t *qa = malloc(65 * 34), *qb = malloc(65 * 34);
+        float va[65 * 32], vb[65 * 32];
+        for (int i = 0; i < 65 * 32; i++) { va[i] = (float)rnd() * 7; vb[i] = (float)rnd(); }
+        dan_vk_q8_quantize(va, qa, 65 * 32);
+        dan_vk_q8_quantize(vb, qb, 65 * 32);
+        for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+            float r = variants[0]->q8_dot(qa, qb, nb[s]);
+            double e = 0;
+            float da[65 * 32], db[65 * 32];
+            dan_vk_q8_dequantize(qa, da, nb[s] * 32);
+            dan_vk_q8_dequantize(qb, db, nb[s] * 32);
+            for (int64_t i = 0; i < nb[s] * 32; i++) e += (double)da[i] * db[i];
+            CHECK(fabs(r - e) <= 1e-4 * (1 + fabs(e)), "q8_dot %d блоков: %g и %g", (int)nb[s], r, e);
+            for (int v = 0; v < nvariants; v++)
+                CHECK(same32(variants[v]->q8_dot(qa, qb, nb[s]), r), "%s q8_dot %d блоков", variants[v]->name, (int)nb[s]);
+        }
+        free(qa); free(qb);
+    }
     /* matrix 300 x 256 by vector: by blocks equals the float product of the
        dequantized numbers within rounding */
     int64_t rows = 300, cols = 256;
