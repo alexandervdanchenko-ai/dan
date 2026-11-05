@@ -195,6 +195,36 @@ static void test_matvec(void) {
     free(w); free(x); free(y1); free(y2);
 }
 
+static void test_f16_kernels(void) {
+    static const int64_t sizes[] = {0, 1, 63, 64, 65, 1023, 1024, 1025, 3000, 5000};
+    enum { N = 5000 };
+    uint16_t *a = malloc(N * 2), *b = malloc(N * 2);
+    float *fa = malloc(N * 4), *fb = malloc(N * 4), *x = malloc(N * 4);
+    for (int i = 0; i < N; i++) {
+        a[i] = dan_f32_to_f16((float)rnd() * 4); b[i] = dan_f32_to_f16((float)rnd());
+        fa[i] = dan_f16_to_f32(a[i]); fb[i] = dan_f16_to_f32(b[i]); x[i] = (float)rnd();
+    }
+    for (int v = 0; v < nvariants; v++) {
+        dan_vk_cur = variants[v];
+        float h[N];
+        variants[v]->h2f(a, h, N);
+        CHECK(memcmp(h, fa, sizeof h) == 0, "%s h2f", variants[v]->name);
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int64_t n = sizes[s];
+            CHECK(same32(dan_vk_dot_f16(a, b, n), dan_vk_dot_f32_c(fa, fb, n)), "%s dot_f16 n = %d", variants[v]->name, (int)n);
+            CHECK(same32(dan_vk_dot_h(a, NULL, x, n), dan_vk_dot_f32_c(fa, x, n)), "%s dot_f16_f32 n = %d", variants[v]->name, (int)n);
+        }
+        /* weights 40 x 125 in half precision by a float vector */
+        float y[40];
+        dan_vk_matvec_f16(a, x, y, 40, 125);
+        for (int i = 0; i < 40; i++) CHECK(same32(y[i], dan_vk_dot_f32_c(fa + i * 125, x, 125)), "%s matvec_f16", variants[v]->name);
+    }
+    uint16_t back[N];
+    dan_vk_f2h(fa, back, N);
+    CHECK(memcmp(back, a, sizeof back) == 0, "f2h");
+    free(a); free(b); free(fa); free(fb); free(x);
+}
+
 static int64_t *marks;
 static void mark(void *ctx, int64_t b, int64_t e) {
     (void)ctx;
@@ -340,6 +370,7 @@ int main(int argc, char **argv) {
     test_mm();
     test_q8();
     test_matvec();
+    test_f16_kernels();
     test_pool();
     test_norms();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
