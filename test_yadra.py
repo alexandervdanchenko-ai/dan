@@ -18,7 +18,7 @@ import sam_kompilyator
 
 ПАПКА = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sreda")
 ТЕСТ = os.path.join(ПАПКА, "yadra_test.c")
-ФЛАГИ = ["-std=c11", "-O2", "-ffp-contract=off", "-Werror=implicit-function-declaration", "-w"]
+ФЛАГИ = ["-std=c11", "-O2", "-ffp-contract=off", "-Werror=implicit-function-declaration", "-Werror=unused-function"]
 
 
 def собрать(компилятор, выход, дополнительно=()):

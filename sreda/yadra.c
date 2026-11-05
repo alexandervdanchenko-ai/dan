@@ -155,6 +155,9 @@ typedef struct {
     const char *name;
     float (*dot_f32)(const float *, const float *, int64_t);
     double (*dot_f64)(const double *, const double *, int64_t);
+    /* sums in the lanes of the dot products */
+    float (*sum_f32)(const float *, int64_t);
+    double (*sum_f64)(const double *, int64_t);
     void (*mm_f32)(const float *, const float *, float *, int64_t, int64_t, int64_t, int64_t, int64_t);
     void (*mm_f64)(const double *, const double *, double *, int64_t, int64_t, int64_t, int64_t, int64_t);
     int32_t (*q8_block)(const int8_t *, const int8_t *);
@@ -212,7 +215,32 @@ ATTR static float NAME(const uint8_t *a, const uint8_t *b, int64_t blocks) { \
 }
 DAN_VK_Q8_DOT(dan_vk_q8_dot_c, , dan_vk_q8_block_c)
 
-static const dan_vk_table dan_vk_plain = {"c", dan_vk_dot_f32_c, dan_vk_dot_f64_c, dan_vk_mm_f32_c,
+/* sums: the order of a dot product with the products replaced by the numbers */
+static float dan_vk_sum_f32_c(const float *a, int64_t n) {
+    float acc[DAN_VK_L32] = {0};
+    int64_t k = 0;
+    for (; k + DAN_VK_L32 <= n; k += DAN_VK_L32)
+        for (int l = 0; l < DAN_VK_L32; l++) acc[l] = acc[l] + a[k + l];
+    for (int s = DAN_VK_L32 / 2; s >= 1; s /= 2)
+        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
+    float r = acc[0];
+    for (; k < n; k++) r = r + a[k];
+    return r;
+}
+
+static double dan_vk_sum_f64_c(const double *a, int64_t n) {
+    double acc[DAN_VK_L64] = {0};
+    int64_t k = 0;
+    for (; k + DAN_VK_L64 <= n; k += DAN_VK_L64)
+        for (int l = 0; l < DAN_VK_L64; l++) acc[l] = acc[l] + a[k + l];
+    for (int s = DAN_VK_L64 / 2; s >= 1; s /= 2)
+        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
+    double r = acc[0];
+    for (; k < n; k++) r = r + a[k];
+    return r;
+}
+
+static const dan_vk_table dan_vk_plain = {"c", dan_vk_dot_f32_c, dan_vk_dot_f64_c, dan_vk_sum_f32_c, dan_vk_sum_f64_c, dan_vk_mm_f32_c,
                                           dan_vk_mm_f64_c, dan_vk_q8_block_c, dan_vk_q8_dot_c, dan_vk_dot32_acc_c, dan_vk_h2f_c, dan_vk_dot_f32_c, dan_vk_dot_f64_c, dan_vk_mm_f32_c, dan_vk_mm_f64_c};
 
 /* Edges of a blocked matrix product: rows [i0, m) or columns [j0, j1) that do
@@ -295,6 +323,31 @@ DAN_VK_AVX2 static double dan_vk_dot_f64_avx2(const double *a, const double *b, 
     for (int j = 0; j < 2; j++) s[j] = _mm256_add_pd(s[j], s[j + 2]);
     double r = dan_vk_hsum4_f64(_mm256_add_pd(s[0], s[1]));
     for (; k < n; k++) { double p = a[k] * b[k]; r = r + p; }
+    return r;
+}
+
+DAN_VK_AVX2 static float dan_vk_sum_f32_avx2(const float *a, int64_t n) {
+    __m256 s[8];
+    for (int j = 0; j < 8; j++) s[j] = _mm256_setzero_ps();
+    int64_t k = 0;
+    for (; k + 64 <= n; k += 64)
+        for (int j = 0; j < 8; j++) s[j] = _mm256_add_ps(s[j], _mm256_loadu_ps(a + k + 8 * j));
+    for (int j = 0; j < 4; j++) s[j] = _mm256_add_ps(s[j], s[j + 4]);
+    for (int j = 0; j < 2; j++) s[j] = _mm256_add_ps(s[j], s[j + 2]);
+    float r = dan_vk_hsum8_f32(_mm256_add_ps(s[0], s[1]));
+    for (; k < n; k++) r = r + a[k];
+    return r;
+}
+DAN_VK_AVX2 static double dan_vk_sum_f64_avx2(const double *a, int64_t n) {
+    __m256d s[8];
+    for (int j = 0; j < 8; j++) s[j] = _mm256_setzero_pd();
+    int64_t k = 0;
+    for (; k + 32 <= n; k += 32)
+        for (int j = 0; j < 8; j++) s[j] = _mm256_add_pd(s[j], _mm256_loadu_pd(a + k + 4 * j));
+    for (int j = 0; j < 4; j++) s[j] = _mm256_add_pd(s[j], s[j + 4]);
+    for (int j = 0; j < 2; j++) s[j] = _mm256_add_pd(s[j], s[j + 2]);
+    double r = dan_vk_hsum4_f64(_mm256_add_pd(s[0], s[1]));
+    for (; k < n; k++) r = r + a[k];
     return r;
 }
 
@@ -468,7 +521,7 @@ DAN_VK_AVX2FMA static double dan_vk_dot_f64_avx2_fast(const double *a, const dou
     return r;
 }
 
-static const dan_vk_table dan_vk_avx2 = {"avx2", dan_vk_dot_f32_avx2, dan_vk_dot_f64_avx2, dan_vk_mm_f32_avx2,
+static const dan_vk_table dan_vk_avx2 = {"avx2", dan_vk_dot_f32_avx2, dan_vk_dot_f64_avx2, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2, dan_vk_mm_f32_avx2,
                                          dan_vk_mm_f64_avx2, dan_vk_q8_block_avx2, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx2, dan_vk_h2f_avx2, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx2_fast, dan_vk_mm_f64_avx2_fast};
 
 /* ---- AVX-512 ---- */
@@ -599,7 +652,7 @@ DAN_VK_AVX512 static void dan_vk_h2f_avx512(const uint16_t *h, float *f, int64_t
     for (; i < n; i++) f[i] = dan_f16_to_f32(h[i]);
 }
 
-static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512,
+static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast};
 #endif
 
@@ -638,6 +691,36 @@ static double dan_vk_dot_f64_neon(const double *a, const double *b, int64_t n) {
     float64x2_t v = vaddq_f64(s[0], s[1]);
     double r = vgetq_lane_f64(v, 0) + vgetq_lane_f64(v, 1);
     for (; k < n; k++) { double p = a[k] * b[k]; r = r + p; }
+    return r;
+}
+
+static float dan_vk_sum_f32_neon(const float *a, int64_t n) {
+    float32x4_t s[16];
+    for (int j = 0; j < 16; j++) s[j] = vdupq_n_f32(0.0f);
+    int64_t k = 0;
+    for (; k + 64 <= n; k += 64)
+        for (int j = 0; j < 16; j++) s[j] = vaddq_f32(s[j], vld1q_f32(a + k + 4 * j));
+    for (int j = 0; j < 8; j++) s[j] = vaddq_f32(s[j], s[j + 8]);
+    for (int j = 0; j < 4; j++) s[j] = vaddq_f32(s[j], s[j + 4]);
+    for (int j = 0; j < 2; j++) s[j] = vaddq_f32(s[j], s[j + 2]);
+    float32x4_t v = vaddq_f32(s[0], s[1]);
+    float32x2_t h = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+    float r = vget_lane_f32(h, 0) + vget_lane_f32(h, 1);
+    for (; k < n; k++) r = r + a[k];
+    return r;
+}
+static double dan_vk_sum_f64_neon(const double *a, int64_t n) {
+    float64x2_t s[16];
+    for (int j = 0; j < 16; j++) s[j] = vdupq_n_f64(0.0);
+    int64_t k = 0;
+    for (; k + 32 <= n; k += 32)
+        for (int j = 0; j < 16; j++) s[j] = vaddq_f64(s[j], vld1q_f64(a + k + 2 * j));
+    for (int j = 0; j < 8; j++) s[j] = vaddq_f64(s[j], s[j + 8]);
+    for (int j = 0; j < 4; j++) s[j] = vaddq_f64(s[j], s[j + 4]);
+    for (int j = 0; j < 2; j++) s[j] = vaddq_f64(s[j], s[j + 2]);
+    float64x2_t v = vaddq_f64(s[0], s[1]);
+    double r = vgetq_lane_f64(v, 0) + vgetq_lane_f64(v, 1);
+    for (; k < n; k++) r = r + a[k];
     return r;
 }
 
@@ -805,7 +888,7 @@ static double dan_vk_dot_f64_neon_fast(const double *a, const double *b, int64_t
     return r;
 }
 
-static const dan_vk_table dan_vk_neon = {"neon", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon, dan_vk_mm_f32_neon,
+static const dan_vk_table dan_vk_neon = {"neon", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon, dan_vk_sum_f32_neon, dan_vk_sum_f64_neon, dan_vk_mm_f32_neon,
                                          dan_vk_mm_f64_neon, dan_vk_q8_block_neon, dan_vk_q8_dot_neon, dan_vk_dot32_acc_neon, dan_vk_h2f_neon, dan_vk_dot_f32_neon_fast, dan_vk_dot_f64_neon_fast, dan_vk_mm_f32_neon_fast, dan_vk_mm_f64_neon_fast};
 
 #if defined(__clang__)
@@ -826,7 +909,7 @@ DAN_VK_DOTPROD static inline int32x4_t dan_vk_q8_part_dotprod(const uint8_t *a, 
 }
 DAN_VK_Q8_DOT_NEON(dan_vk_q8_dot_dotprod, DAN_VK_DOTPROD, dan_vk_q8_part_dotprod, dan_vk_q8_block_dotprod)
 
-static const dan_vk_table dan_vk_dotprod = {"dotprod", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon,
+static const dan_vk_table dan_vk_dotprod = {"dotprod", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon, dan_vk_sum_f32_neon, dan_vk_sum_f64_neon,
                                             dan_vk_mm_f32_neon, dan_vk_mm_f64_neon, dan_vk_q8_block_dotprod, dan_vk_q8_dot_dotprod, dan_vk_dot32_acc_neon, dan_vk_h2f_neon, dan_vk_dot_f32_neon_fast, dan_vk_dot_f64_neon_fast, dan_vk_mm_f32_neon_fast, dan_vk_mm_f64_neon_fast};
 
 static int dan_vk_has_dotprod(void) {
@@ -1047,11 +1130,11 @@ static void dan_pool_run(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx)
     int t = dan_pool.threads;
     if (n / min_part < t) {
         /* fewer parts of min_part than threads: the whole range runs on this
-           thread. The pool is free again, so a job started inside (for
-           example a large product of matrices in each of a few steps) can
-           still use all cores; the bits do not depend on that. */
+           thread as a part of a job, so a job started inside runs whole too */
         dan_pool_unlock(&dan_pool.busy);
+        dan_pool_inside = 1;
         fn(ctx, 0, n);
+        dan_pool_inside = 0;
         return;
     }
     dan_pool_lock(&dan_pool.mx);
@@ -1115,29 +1198,8 @@ static void dan_vk_f2h(const float *f, uint16_t *h, int64_t n) {
     for (int64_t i = 0; i < n; i++) h[i] = dan_f32_to_f16(f[i]);
 }
 
-static float dan_vk_sum_f32(const float *a, int64_t n) {
-    float acc[DAN_VK_L32] = {0};
-    int64_t k = 0;
-    for (; k + DAN_VK_L32 <= n; k += DAN_VK_L32)
-        for (int l = 0; l < DAN_VK_L32; l++) acc[l] = acc[l] + a[k + l];
-    for (int s = DAN_VK_L32 / 2; s >= 1; s /= 2)
-        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
-    float r = acc[0];
-    for (; k < n; k++) r = r + a[k];
-    return r;
-}
-
-static double dan_vk_sum_f64(const double *a, int64_t n) {
-    double acc[DAN_VK_L64] = {0};
-    int64_t k = 0;
-    for (; k + DAN_VK_L64 <= n; k += DAN_VK_L64)
-        for (int l = 0; l < DAN_VK_L64; l++) acc[l] = acc[l] + a[k + l];
-    for (int s = DAN_VK_L64 / 2; s >= 1; s /= 2)
-        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
-    double r = acc[0];
-    for (; k < n; k++) r = r + a[k];
-    return r;
-}
+static float dan_vk_sum_f32(const float *a, int64_t n) { return dan_vk()->sum_f32(a, n); }
+static double dan_vk_sum_f64(const double *a, int64_t n) { return dan_vk()->sum_f64(a, n); }
 
 /* y = y + a x */
 static void dan_vk_axpy_f32(float *y, float a, const float *x, int64_t n) {
@@ -1298,17 +1360,13 @@ static void dan_vk_rmsnorm_f64(double *y, const double *x, const double *w, int6
 static void dan_vk_layernorm_f32(float *y, const float *x, const float *w, const float *b, int64_t n, float eps) {
     if (n <= 0) return;
     float mean = dan_vk_sum_f32(x, n) / (float)n;
-    float acc[DAN_VK_L32] = {0};
-    int64_t k = 0;
-    for (; k + DAN_VK_L32 <= n; k += DAN_VK_L32)
-        for (int l = 0; l < DAN_VK_L32; l++) { float d = x[k + l] - mean, p = d * d; acc[l] = acc[l] + p; }
-    for (int s = DAN_VK_L32 / 2; s >= 1; s /= 2)
-        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
-    float v = acc[0];
-    for (; k < n; k++) { float d = x[k] - mean, p = d * d; v = v + p; }
+    /* y holds x - mean (y may be x); the sum of its squares is the dot product
+       of y with itself: the same order as before, now in the variant's lanes */
+    for (int64_t i = 0; i < n; i++) y[i] = x[i] - mean;
+    float v = dan_vk_dot_f32(y, y, n);
     float sc = 1.0f / sqrtf(v / (float)n + eps);
     for (int64_t i = 0; i < n; i++) {
-        float t = (x[i] - mean) * sc;
+        float t = y[i] * sc;
         if (w) t = t * w[i];
         if (b) t = t + b[i];
         y[i] = t;
@@ -1318,17 +1376,13 @@ static void dan_vk_layernorm_f64(double *y, const double *x, const double *w, co
                                  double eps) {
     if (n <= 0) return;
     double mean = dan_vk_sum_f64(x, n) / (double)n;
-    double acc[DAN_VK_L64] = {0};
-    int64_t k = 0;
-    for (; k + DAN_VK_L64 <= n; k += DAN_VK_L64)
-        for (int l = 0; l < DAN_VK_L64; l++) { double d = x[k + l] - mean, p = d * d; acc[l] = acc[l] + p; }
-    for (int s = DAN_VK_L64 / 2; s >= 1; s /= 2)
-        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
-    double v = acc[0];
-    for (; k < n; k++) { double d = x[k] - mean, p = d * d; v = v + p; }
+    /* y holds x - mean (y may be x); the sum of its squares is the dot product
+       of y with itself: the same order as before, now in the variant's lanes */
+    for (int64_t i = 0; i < n; i++) y[i] = x[i] - mean;
+    double v = dan_vk_dot_f64(y, y, n);
     double sc = 1.0 / sqrt(v / (double)n + eps);
     for (int64_t i = 0; i < n; i++) {
-        double t = (x[i] - mean) * sc;
+        double t = y[i] * sc;
         if (w) t = t * w[i];
         if (b) t = t + b[i];
         y[i] = t;
@@ -1351,8 +1405,10 @@ static void dan_vk_q8_quantize(const float *x, uint8_t *out, int64_t n) {
         memcpy(o, &h, 2);
         for (int i = 0; i < DAN_Q8_BLOCK; i++) {
             float q = v[i] * id;
-            /* NaN and anything outside -127..127 (only with a bad scale) become 0 */
-            o[2 + i] = (uint8_t)(int8_t)(q >= -127.5f && q <= 127.5f ? lrintf(q) : 0);
+            /* within -127..127 before rounding (lrintf outside the range of the
+               result is undefined); NaN becomes 0 */
+            q = q != q ? 0.0f : q < -127.0f ? -127.0f : q > 127.0f ? 127.0f : q;
+            o[2 + i] = (uint8_t)(int8_t)lrintf(q);
         }
     }
 }
@@ -1427,8 +1483,7 @@ static void dan_k_mm_dims(const dan_arr *a, const dan_arr *b, int64_t k, int64_t
     if (b->len % k != 0) dan_k_error("матмат: длина второй матрицы (%lld) не делится на %lld", b->len, k, line);
     *m = a->len / k;
     *n = b->len / k;
-    int64_t mn;
-    if (__builtin_mul_overflow(*m, *n, &mn))
+    if (*m > 0 && *n > INT64_MAX / *m)
         dan_k_error("матмат: результат из %lld строк по %lld чисел слишком велик", *m, *n, line);
 }
 
