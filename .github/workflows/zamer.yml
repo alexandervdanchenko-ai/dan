@@ -19,4 +19,4 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then P=""; else P="-pthread"; fi
           gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P || clang -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P
           ./b
-          for t in 1 2 4 ""; do DAN_POTOKI=$t ./b замер; done
+          for t in 1 2 4 ""; do DAN_POTOKI=$t ./b zamer; done

@@ -132,6 +132,27 @@ static void test_q8(void) {
         int32_t r = dan_vk_q8_block_c(x, y);
         for (int v = 0; v < nvariants; v++) CHECK(variants[v]->q8_block(x, y) == r, "%s q8_block", variants[v]->name);
     }
+    /* dot products of rows of blocks: every variant, any number of blocks */
+    {
+        static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 63, 64, 65};
+        uint8_t *qa = malloc(65 * 34), *qb = malloc(65 * 34);
+        float va[65 * 32], vb[65 * 32];
+        for (int i = 0; i < 65 * 32; i++) { va[i] = (float)rnd() * 7; vb[i] = (float)rnd(); }
+        dan_vk_q8_quantize(va, qa, 65 * 32);
+        dan_vk_q8_quantize(vb, qb, 65 * 32);
+        for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+            float r = variants[0]->q8_dot(qa, qb, nb[s]);
+            double e = 0;
+            float da[65 * 32], db[65 * 32];
+            dan_vk_q8_dequantize(qa, da, nb[s] * 32);
+            dan_vk_q8_dequantize(qb, db, nb[s] * 32);
+            for (int64_t i = 0; i < nb[s] * 32; i++) e += (double)da[i] * db[i];
+            CHECK(fabs(r - e) <= 1e-4 * (1 + fabs(e)), "q8_dot %d блоков: %g и %g", (int)nb[s], r, e);
+            for (int v = 0; v < nvariants; v++)
+                CHECK(same32(variants[v]->q8_dot(qa, qb, nb[s]), r), "%s q8_dot %d блоков", variants[v]->name, (int)nb[s]);
+        }
+        free(qa); free(qb);
+    }
     /* matrix 300 x 256 by vector: by blocks equals the float product of the
        dequantized numbers within rounding */
     int64_t rows = 300, cols = 256;
@@ -172,6 +193,73 @@ static void test_matvec(void) {
         CHECK(memcmp(y1, y2, rows * 4) == 0, "%s matvec_f32", variants[v]->name);
     }
     free(w); free(x); free(y1); free(y2);
+}
+
+static void test_f16_kernels(void) {
+    static const int64_t sizes[] = {0, 1, 63, 64, 65, 1023, 1024, 1025, 3000, 5000};
+    enum { N = 5000 };
+    uint16_t *a = malloc(N * 2), *b = malloc(N * 2);
+    float *fa = malloc(N * 4), *fb = malloc(N * 4), *x = malloc(N * 4);
+    for (int i = 0; i < N; i++) {
+        a[i] = dan_f32_to_f16((float)rnd() * 4); b[i] = dan_f32_to_f16((float)rnd());
+        fa[i] = dan_f16_to_f32(a[i]); fb[i] = dan_f16_to_f32(b[i]); x[i] = (float)rnd();
+    }
+    for (int v = 0; v < nvariants; v++) {
+        dan_vk_cur = variants[v];
+        float h[N];
+        variants[v]->h2f(a, h, N);
+        CHECK(memcmp(h, fa, sizeof h) == 0, "%s h2f", variants[v]->name);
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int64_t n = sizes[s];
+            CHECK(same32(dan_vk_dot_f16(a, b, n), dan_vk_dot_f32_c(fa, fb, n)), "%s dot_f16 n = %d", variants[v]->name, (int)n);
+            CHECK(same32(dan_vk_dot_h(a, NULL, x, n), dan_vk_dot_f32_c(fa, x, n)), "%s dot_f16_f32 n = %d", variants[v]->name, (int)n);
+        }
+        /* weights 40 x 125 in half precision by a float vector */
+        float y[40];
+        dan_vk_matvec_f16(a, x, y, 40, 125);
+        for (int i = 0; i < 40; i++) CHECK(same32(y[i], dan_vk_dot_f32_c(fa + i * 125, x, 125)), "%s matvec_f16", variants[v]->name);
+    }
+    uint16_t back[N];
+    dan_vk_f2h(fa, back, N);
+    CHECK(memcmp(back, a, sizeof back) == 0, "f2h");
+    free(a); free(b); free(fa); free(fb); free(x);
+}
+
+/* «приближённо»: close to the exact result */
+static void test_fast(void) {
+    enum { N = 4099 };
+    float *a = malloc(N * 4), *b = malloc(N * 4);
+    double *c = malloc(N * 8), *d = malloc(N * 8);
+    for (int i = 0; i < N; i++) { a[i] = (float)rnd(); b[i] = (float)rnd(); c[i] = rnd(); d[i] = rnd(); }
+    static const int64_t sizes[] = {0, 1, 5, 31, 64, 100, 1000, 4099};
+    for (int v = 0; v < nvariants; v++) {
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int64_t n = sizes[s];
+            double e32 = 0, e64 = 0;
+            for (int64_t i = 0; i < n; i++) { e32 += (double)a[i] * b[i]; e64 += c[i] * d[i]; }
+            CHECK(fabs(variants[v]->dot_f32_fast(a, b, n) - e32) <= 1e-4 * (1 + n), "%s dot_f32_fast", variants[v]->name);
+            CHECK(fabs(variants[v]->dot_f64_fast(c, d, n) - e64) <= 1e-12 * (1 + n), "%s dot_f64_fast", variants[v]->name);
+        }
+        int64_t m = 37, n = 75, k = 41;
+        float A[37 * 41], B[41 * 75], C1[37 * 75], C2[37 * 75];
+        double A2[37 * 41], B2[41 * 75], D1[37 * 75], D2[37 * 75];
+        for (int i = 0; i < m * k; i++) { A[i] = (float)rnd(); A2[i] = rnd(); }
+        for (int i = 0; i < k * n; i++) { B[i] = (float)rnd(); B2[i] = rnd(); }
+        dan_vk_mm_f32_c(A, B, C1, m, n, k, 0, n);
+        dan_vk_mm_f64_c(A2, B2, D1, m, n, k, 0, n);
+        dan_vk_cur = variants[v];
+        dan_vk_matmat_f32_fast(A, B, C2, m, n, k);
+        dan_vk_matmat_f64_fast(A2, B2, D2, m, n, k);
+        for (int i = 0; i < m * n; i++) {
+            CHECK(fabsf(C1[i] - C2[i]) <= 1e-5f * k, "%s matmat_f32_fast", variants[v]->name);
+            CHECK(fabs(D1[i] - D2[i]) <= 1e-13 * k, "%s matmat_f64_fast", variants[v]->name);
+        }
+        float y1[37], y2[37];
+        for (int i = 0; i < m; i++) y1[i] = dan_vk_dot_f32_c(A + i * k, B, k);
+        dan_vk_matvec_f32_fast(A, B, y2, m, k);
+        for (int i = 0; i < m; i++) CHECK(fabsf(y1[i] - y2[i]) <= 1e-5f * k, "%s matvec_f32_fast", variants[v]->name);
+    }
+    free(a); free(b); free(c); free(d);
 }
 
 static int64_t *marks;
@@ -272,9 +360,9 @@ static double now(void) {
 
 static volatile float sink;
 
-/* measurements: GFLOP/s by variant; «замер» as the first argument */
+/* measurements: GFLOP/s by variant; «замер» or «zamer» (Windows) as the first argument */
 static void bench(void) {
-    enum { DN = 4096, MV = 4096, MM = 512 };
+    enum { DN = 4096, MV = 4096, MM = 1024 };
     float *a = malloc(DN * 4), *b = malloc(DN * 4);
     float *w = malloc((size_t)MV * MV * 4), *x = malloc(MV * 4), *y = malloc(MV * 4);
     float *A = malloc(MM * MM * 4), *B = malloc(MM * MM * 4), *C = malloc(MM * MM * 4);
@@ -298,9 +386,19 @@ static void bench(void) {
         t0 = now();
         for (int r = 0; r < 5; r++) dan_vk_matvec_q8(wq, xq, y, MV, MV);
         double t_q8 = (now() - t0) / 5;
-        t0 = now();
-        dan_vk_matmat_f32(A, B, C, MM, MM, MM);
-        double t_mm = now() - t0;
+        double t_mm = 1e30;
+        for (int r = 0; r < 3; r++) {   /* the best of three */
+            t0 = now();
+            dan_vk_matmat_f32(A, B, C, MM, MM, MM);
+            if (now() - t0 < t_mm) t_mm = now() - t0;
+        }
+        double t_mf = 1e30;
+        for (int r = 0; r < 3; r++) {
+            t0 = now();
+            dan_vk_matmat_f32_fast(A, B, C, MM, MM, MM);
+            if (now() - t0 < t_mf) t_mf = now() - t0;
+        }
+        printf("%-8s приближённо: матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * MM * MM * MM / t_mf * 1e-9);
         printf("%-8s скалярное %.1f ГФлопс; матрица на вектор %.1f ГФлопс (%.1f ГБ/с); q8 %.1f ГФлопс (%.1f ГБ/с); "
                "матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * DN * reps / t_dot * 1e-9,
                2.0 * MV * MV / t_mv * 1e-9, 4.0 * MV * MV / t_mv * 1e-9, 2.0 * MV * MV / t_q8 * 1e-9,
@@ -310,12 +408,14 @@ static void bench(void) {
 
 int main(int argc, char **argv) {
     find_variants();
-    if (argc > 1 && strcmp(argv[1], "замер") == 0) { bench(); return 0; }
+    if (argc > 1 && (strcmp(argv[1], "замер") == 0 || strcmp(argv[1], "zamer") == 0)) { bench(); return 0; }
     test_f16();
     test_dot();
     test_mm();
     test_q8();
     test_matvec();
+    test_f16_kernels();
+    test_fast();
     test_pool();
     test_norms();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
