@@ -183,6 +183,40 @@ class ТестыФункцийЯдер(unittest.TestCase):
         self.assertEqual(р.returncode, 1)
         self.assertIn("70000", р.stderr.decode("utf-8", "replace"))
 
+    def test_приближённо(self):
+        текст = """
+перем а = массив(дроб32, 64 * 64)
+для н в 0..а.длина - 1 { а[н] = (н % 13) * 0.0625 - 0.3 }
+пусть точно = матмат(а, а, 64)
+перем быстро = массив(дроб32, 0)
+перем с = 0.0
+приближённо {
+    быстро = матмат(а, а, 64)
+    с = скаляр(а, а)
+    вывод(матвек(а, а[0..63]).длина)
+}
+перем разница = 0.0
+для н в 0..точно.длина - 1 { разница = макс(разница, модуль(точно[н] - быстро[н])) }
+вывод(разница < 0.001)
+вывод(модуль(с - скаляр(а, а)) < 0.01)
+// слово не зарезервировано
+пусть приближённо = 5
+вывод(приближённо + 1)
+"""
+        р = запустить(текст)
+        вывод = р.stdout.decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(р.returncode, 0, вывод + р.stderr.decode("utf-8", "replace"))
+        self.assertEqual(вывод, "64\nистина\nистина\n6\n")
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "p.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(текст)
+            си = subprocess.run([sam_kompilyator.исполняемый(), "си", путь], capture_output=True,
+                                env=sam_kompilyator.среда(), timeout=900).stdout.decode("utf-8")
+        self.assertIn("dan_k_matmat_f32_fast(", си)
+        self.assertIn("dan_k_dot_f32_fast(", си)
+        self.assertIn("dan_k_matmat_f32(", си.replace("dan_k_matmat_f32(const", ""))
+
     def test_ошибки(self):
         for текст, сообщение in [
             ("вывод(скаляр(массив(дроб32, 3), массив(дроб32, 4)))", "скаляр: массивы разной длины (3 и 4)"),

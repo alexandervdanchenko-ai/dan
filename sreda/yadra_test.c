@@ -225,6 +225,43 @@ static void test_f16_kernels(void) {
     free(a); free(b); free(fa); free(fb); free(x);
 }
 
+/* «приближённо»: close to the exact result */
+static void test_fast(void) {
+    enum { N = 4099 };
+    float *a = malloc(N * 4), *b = malloc(N * 4);
+    double *c = malloc(N * 8), *d = malloc(N * 8);
+    for (int i = 0; i < N; i++) { a[i] = (float)rnd(); b[i] = (float)rnd(); c[i] = rnd(); d[i] = rnd(); }
+    static const int64_t sizes[] = {0, 1, 5, 31, 64, 100, 1000, 4099};
+    for (int v = 0; v < nvariants; v++) {
+        for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
+            int64_t n = sizes[s];
+            double e32 = 0, e64 = 0;
+            for (int64_t i = 0; i < n; i++) { e32 += (double)a[i] * b[i]; e64 += c[i] * d[i]; }
+            CHECK(fabs(variants[v]->dot_f32_fast(a, b, n) - e32) <= 1e-4 * (1 + n), "%s dot_f32_fast", variants[v]->name);
+            CHECK(fabs(variants[v]->dot_f64_fast(c, d, n) - e64) <= 1e-12 * (1 + n), "%s dot_f64_fast", variants[v]->name);
+        }
+        int64_t m = 37, n = 75, k = 41;
+        float A[37 * 41], B[41 * 75], C1[37 * 75], C2[37 * 75];
+        double A2[37 * 41], B2[41 * 75], D1[37 * 75], D2[37 * 75];
+        for (int i = 0; i < m * k; i++) { A[i] = (float)rnd(); A2[i] = rnd(); }
+        for (int i = 0; i < k * n; i++) { B[i] = (float)rnd(); B2[i] = rnd(); }
+        dan_vk_mm_f32_c(A, B, C1, m, n, k, 0, n);
+        dan_vk_mm_f64_c(A2, B2, D1, m, n, k, 0, n);
+        dan_vk_cur = variants[v];
+        dan_vk_matmat_f32_fast(A, B, C2, m, n, k);
+        dan_vk_matmat_f64_fast(A2, B2, D2, m, n, k);
+        for (int i = 0; i < m * n; i++) {
+            CHECK(fabsf(C1[i] - C2[i]) <= 1e-5f * k, "%s matmat_f32_fast", variants[v]->name);
+            CHECK(fabs(D1[i] - D2[i]) <= 1e-13 * k, "%s matmat_f64_fast", variants[v]->name);
+        }
+        float y1[37], y2[37];
+        for (int i = 0; i < m; i++) y1[i] = dan_vk_dot_f32_c(A + i * k, B, k);
+        dan_vk_matvec_f32_fast(A, B, y2, m, k);
+        for (int i = 0; i < m; i++) CHECK(fabsf(y1[i] - y2[i]) <= 1e-5f * k, "%s matvec_f32_fast", variants[v]->name);
+    }
+    free(a); free(b); free(c); free(d);
+}
+
 static int64_t *marks;
 static void mark(void *ctx, int64_t b, int64_t e) {
     (void)ctx;
@@ -355,6 +392,13 @@ static void bench(void) {
             dan_vk_matmat_f32(A, B, C, MM, MM, MM);
             if (now() - t0 < t_mm) t_mm = now() - t0;
         }
+        double t_mf = 1e30;
+        for (int r = 0; r < 3; r++) {
+            t0 = now();
+            dan_vk_matmat_f32_fast(A, B, C, MM, MM, MM);
+            if (now() - t0 < t_mf) t_mf = now() - t0;
+        }
+        printf("%-8s приближённо: матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * MM * MM * MM / t_mf * 1e-9);
         printf("%-8s скалярное %.1f ГФлопс; матрица на вектор %.1f ГФлопс (%.1f ГБ/с); q8 %.1f ГФлопс (%.1f ГБ/с); "
                "матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * DN * reps / t_dot * 1e-9,
                2.0 * MV * MV / t_mv * 1e-9, 4.0 * MV * MV / t_mv * 1e-9, 2.0 * MV * MV / t_q8 * 1e-9,
@@ -371,6 +415,7 @@ int main(int argc, char **argv) {
     test_q8();
     test_matvec();
     test_f16_kernels();
+    test_fast();
     test_pool();
     test_norms();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
