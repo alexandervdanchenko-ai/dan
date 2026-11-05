@@ -145,9 +145,11 @@ static void dan_natural_error(const char *name, int64_t n, int line) {
 
 static uint64_t dan_uabs(int64_t a) { return a < 0 ? (uint64_t)0 - (uint64_t)a : (uint64_t)a; }
 
+/* через dan_uabs: запись «a < 0 ? -a : a» gcc 13 с -O3 в одной из программ превращал в -a при любом
+   знаке (находка сверки сборок, фаззинг/находки_сборок/зерно_191_18.dan) */
 static int64_t dan_abs_int(int64_t a, int line) {
     if (a == INT64_MIN) dan_error(DAN_MSG_TOO_BIG, line);
-    return a < 0 ? -a : a;
+    return (int64_t)dan_uabs(a);
 }
 
 static double dan_abs_float(double a) { return a < 0 ? -a : (a == 0 ? 0.0 : a); }
