@@ -132,5 +132,28 @@ class ТестыМашинногоВывода(unittest.TestCase):
         self.assertEqual(kody.строка_json('а"б\\в\nг\tд\x01'), '"а\\"б\\\\в\\nг\\tд\\u0001"')
 
 
+
+class ТестыСбояКомпилятора(unittest.TestCase):
+    """Ошибка внутри самого компилятора: короткое русское сообщение и файл с подробностями вместо трассировки."""
+
+    def test_сообщение_и_файл(self):
+        import contextlib, io
+        with tempfile.TemporaryDirectory() as папка:
+            старая = tempfile.tempdir
+            tempfile.tempdir = папка
+            поток = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(поток):
+                    код = dan._сбой_компилятора(ValueError("проверка"))
+            finally:
+                tempfile.tempdir = старая
+            self.assertEqual(код, 70)
+            текст = поток.getvalue()
+            self.assertIn("Внутренняя ошибка компилятора Дана: ValueError", текст)
+            self.assertNotIn("Traceback", текст)
+            with open(os.path.join(папка, "dan-sboy.txt"), encoding="utf-8") as ф:
+                подробно = ф.read()
+            self.assertIn("ValueError: проверка", подробно)
+
 if __name__ == "__main__":
     unittest.main()
