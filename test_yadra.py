@@ -65,7 +65,7 @@ class ТестыЯдер(unittest.TestCase):
             итог = subprocess.run(команда, capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(итог.returncode, 0, итог.stderr)
             for потоков in ("1", ""):
-                итог = subprocess.run([выход, "замер"], capture_output=True, text=True, encoding="utf-8",
+                итог = subprocess.run([выход, "zamer"], capture_output=True, text=True, encoding="utf-8",
                                       errors="replace", env={**os.environ, "DAN_POTOKI": потоков}, timeout=600)
                 self.assertEqual(итог.returncode, 0, итог.stderr)
                 print("\nЗАМЕР ЯДЕР:", итог.stdout.strip().replace("\n", "\nЗАМЕР ЯДЕР: "))
@@ -161,6 +161,27 @@ class ТестыФункцийЯдер(unittest.TestCase):
             выводы.append(вывод)
         # любой вариант ядер и любое число потоков - те же биты
         self.assertEqual(выводы[0], выводы[1])
+
+    def test_дроб16(self):
+        текст = """
+пусть а = массив(дроб16, [1.0, 2.0, 0.5, -4.0])
+пусть б = массив(дроб16, [2.0, 0.25, 4.0, 1.0])
+вывод(скаляр(а, б))
+вывод(матвек(а, массив(дроб32, [1.0, 1.0])))
+вывод(в_дроб32(а))
+вывод(в_дроб16(массив(дроб32, [0.1, 65504.0])))
+перем вх = массив(дроб32, 3000)
+для н в 0..2999 { вх[н] = (н % 7) * 0.5 }
+пусть п = в_дроб16(вх)
+вывод(скаляр(п, п) == скаляр(в_дроб32(п), в_дроб32(п)))
+"""
+        р = запустить(текст)
+        вывод = р.stdout.decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(р.returncode, 0, вывод + р.stderr.decode("utf-8", "replace"))
+        self.assertEqual(вывод, "0.5\n[3.0, -3.5]\n[1.0, 2.0, 0.5, -4.0]\n[0.1, 65500.0]\nистина\n")
+        р = запустить("вывод(в_дроб16(массив(дроб32, [70000.0])))")
+        self.assertEqual(р.returncode, 1)
+        self.assertIn("70000", р.stderr.decode("utf-8", "replace"))
 
     def test_ошибки(self):
         for текст, сообщение in [
