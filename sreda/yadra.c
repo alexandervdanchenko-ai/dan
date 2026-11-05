@@ -626,11 +626,20 @@ static int dan_pool_cpus(void) {
 #endif
 }
 
+/* set while the thread runs a part of a job: a job started inside runs whole
+   (a critical section of Windows can be entered again by its owner, so the
+   lock alone does not tell) */
+static _Thread_local int dan_pool_inside;
+
 static void dan_pool_part(int part) {
     int64_t n = dan_pool.n, t = dan_pool.threads;
     int64_t b = n / t * part + (part < n % t ? part : n % t);
     int64_t e = b + n / t + (part < n % t ? 1 : 0);
-    if (b < e) dan_pool.fn(dan_pool.ctx, b, e);
+    if (b < e) {
+        dan_pool_inside = 1;
+        dan_pool.fn(dan_pool.ctx, b, e);
+        dan_pool_inside = 0;
+    }
 }
 
 #ifdef _WIN32
@@ -711,8 +720,9 @@ static void dan_pool_init_once(void) {
 static void dan_pool_run(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx) {
     if (n <= 0) return;
     if (min_part < 1) min_part = 1;
+    if (dan_pool_inside || n < 2 * min_part) { fn(ctx, 0, n); return; }
     dan_pool_init_once();
-    if (n < 2 * min_part || !dan_pool_trylock(&dan_pool.busy)) { fn(ctx, 0, n); return; }
+    if (!dan_pool_trylock(&dan_pool.busy)) { fn(ctx, 0, n); return; }
     if (dan_pool.state == 0) dan_pool_start();
     if (dan_pool.state < 0) { dan_pool_unlock(&dan_pool.busy); fn(ctx, 0, n); return; }
     int t = dan_pool.threads;
