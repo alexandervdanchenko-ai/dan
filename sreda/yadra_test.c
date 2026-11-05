@@ -132,6 +132,19 @@ static void test_q8(void) {
         int32_t r = dan_vk_q8_block_c(x, y);
         for (int v = 0; v < nvariants; v++) CHECK(variants[v]->q8_block(x, y) == r, "%s q8_block", variants[v]->name);
     }
+    /* quantizing: tiny, huge and not finite numbers do not break the block */
+    {
+        float v[64];
+        uint8_t q[68];
+        for (int i = 0; i < 32; i++) v[i] = 1e-41f * (i - 16);   /* subnormal: 1/d is infinite */
+        v[32] = NAN; v[33] = INFINITY;
+        for (int i = 34; i < 64; i++) v[i] = (float)i;
+        dan_vk_q8_quantize(v, q, 64);
+        for (int i = 0; i < 32; i++) CHECK(q[2 + i] == 0, "крошечные числа");
+        float back[64];
+        dan_vk_q8_dequantize(q, back, 64);
+        for (int i = 0; i < 64; i++) CHECK(!isnan(back[i]), "без NaN после квантования");
+    }
     /* dot products of rows of blocks: every variant, any number of blocks */
     {
         static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 63, 64, 65};
