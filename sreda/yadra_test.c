@@ -17,6 +17,7 @@
 #include <windows.h>
 #endif
 #include "yadra.c"
+#include "yadra_etalon.h"
 
 static int failures;
 #define CHECK(c, ...) do { if (!(c)) { failures++; printf("ошибка, строка %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -326,46 +327,31 @@ static void test_pool(void) {
     }
 }
 
-/* layer normalisation as written before the variants (the reference) */
-static void layernorm_ref(float *y, const float *x, const float *w, const float *b, int64_t n, float eps) {
-    float mean = dan_vk_sum_f32_c(x, n) / (float)n;
-    float acc[64] = {0};
-    int64_t k = 0;
-    for (; k + 64 <= n; k += 64)
-        for (int l = 0; l < 64; l++) { float d = x[k + l] - mean, p = d * d; acc[l] = acc[l] + p; }
-    for (int s = 32; s >= 1; s /= 2)
-        for (int l = 0; l < s; l++) acc[l] = acc[l] + acc[l + s];
-    float v = acc[0];
-    for (; k < n; k++) { float d = x[k] - mean, p = d * d; v = v + p; }
-    float sc = 1.0f / sqrtf(v / (float)n + eps);
-    for (int64_t i = 0; i < n; i++) {
-        float t = (x[i] - mean) * sc;
-        if (w) t = t * w[i];
-        if (b) t = t + b[i];
-        y[i] = t;
-    }
-}
-
+/* sums, normalisations and softmax: the bits recorded before the variants of
+   sums (sreda/yadra_etalon.h), in every variant */
 static void test_sums(void) {
+    static const uint64_t etalon[4] = {0xe339639362246289ull, 0xf0b1b42632833252ull, 0x27e200fb1756f484ull,
+                                       0x176b0614a28ca690ull};
     static const int64_t sizes[] = {0, 1, 31, 63, 64, 65, 200, 1000, 4097};
-    float a[4097], y1[4097], y2[4097], w[4097], bb[4097];
+    float a[4097];
     double c[4097];
-    for (int i = 0; i < 4097; i++) { a[i] = (float)rnd() * 3; c[i] = rnd(); w[i] = (float)rnd(); bb[i] = (float)rnd(); }
-    for (int v = 0; v < nvariants; v++)
+    for (int i = 0; i < 4097; i++) { a[i] = (float)rnd() * 3; c[i] = rnd(); }
+    for (int v = 0; v < nvariants; v++) {
         for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++) {
             int64_t n = sizes[s];
             CHECK(same32(variants[v]->sum_f32(a, n), dan_vk_sum_f32_c(a, n)), "%s sum_f32 n = %d", variants[v]->name, (int)n);
             CHECK(same64(variants[v]->sum_f64(c, n), dan_vk_sum_f64_c(c, n)), "%s sum_f64 n = %d", variants[v]->name, (int)n);
-            if (n == 0) continue;
-            dan_vk_cur = variants[v];
-            layernorm_ref(y1, a, w, bb, n, 1e-5f);
-            dan_vk_layernorm_f32(y2, a, w, bb, n, 1e-5f);
-            CHECK(memcmp(y1, y2, (size_t)n * 4) == 0, "%s layernorm n = %d", variants[v]->name, (int)n);
-            memcpy(y2, a, (size_t)n * 4);
-            dan_vk_layernorm_f32(y2, y2, NULL, NULL, n, 1e-5f);   /* in place */
-            layernorm_ref(y1, a, NULL, NULL, n, 1e-5f);
-            CHECK(memcmp(y1, y2, (size_t)n * 4) == 0, "%s layernorm на месте n = %d", variants[v]->name, (int)n);
         }
+        dan_vk_cur = variants[v];
+        uint64_t h[4];
+        etalon_hashes(h);
+        CHECK(h[0] == etalon[0], "%s суммы: биты не те, что были записаны", variants[v]->name);
+        CHECK(h[1] == etalon[1], "%s послойная нормировка: биты не те, что были записаны", variants[v]->name);
+        CHECK(h[2] == etalon[2], "%s нормировка по среднеквадратичному: биты не те, что были записаны", variants[v]->name);
+#ifdef __GLIBC__
+        CHECK(h[3] == etalon[3], "%s софтмакс: биты не те, что были записаны (exp из glibc)", variants[v]->name);
+#endif
+    }
 }
 
 static double dan_vk_dot_f64_fast_check(void) {
@@ -497,8 +483,25 @@ static void bench(void) {
     }
 }
 
+/* The bits recorded in the tests are those without flushing subnormal numbers
+   to zero: the environment of a Dan program does not turn FTZ/DAZ (x86) or
+   FZ (ARM) on, and the test checks that nothing else did. */
+static void check_subnormals(void) {
+#ifdef DAN_VK_X86
+    unsigned csr = _mm_getcsr();
+    CHECK(!(csr & 0x8000) && !(csr & 0x40), "включены FTZ/DAZ (MXCSR %x): денормалы обнулялись бы", csr);
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    CHECK(!(fpcr & (1u << 24)), "включён FZ (FPCR %llx): денормалы обнулялись бы", (unsigned long long)fpcr);
+#endif
+    volatile float tiny = 1e-41f;
+    CHECK(tiny * 2.0f != 0.0f, "денормалы обнуляются");
+}
+
 int main(int argc, char **argv) {
     find_variants();
+    check_subnormals();
     if (argc > 1 && (strcmp(argv[1], "замер") == 0 || strcmp(argv[1], "zamer") == 0)) { bench(); return 0; }
     test_f16();
     test_dot();
