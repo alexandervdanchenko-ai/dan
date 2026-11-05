@@ -1,5 +1,7 @@
 # Дан
 
+[![Проверка](https://github.com/alexandervdanchenko-ai/dan/actions/workflows/proverka.yml/badge.svg)](https://github.com/alexandervdanchenko-ai/dan/actions/workflows/proverka.yml)
+
 ![Дан - язык программирования на русском языке](.github/обложка.jpg)
 
 **Дан - это язык программирования, на котором программы пишутся по-русски.** Вместо английских слов `if`, `while`, `function` в нём используются привычные `если`, `пока`, `функ`. Готовую программу Дан превращает в обычный файл `.exe`, который запускается двойным щелчком, как любая другая программа.
