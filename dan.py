@@ -1265,7 +1265,33 @@ def показать_ошибку(путь, исходник, о):
         print(о)
 
 
+def _сбой_компилятора(исключение):
+    """Ошибка внутри самого компилятора: коротко по-русски и подробности в файл, а не трассировка."""
+    import tempfile, traceback
+    import versiya
+    путь = os.path.join(tempfile.gettempdir(), "dan-sboy.txt")
+    try:
+        with open(путь, "w", encoding="utf-8") as ф:
+            ф.write(f"Дан {versiya.ВЕРСИЯ}\nКоманда: {' '.join(sys.argv[1:])}\n\n")
+            traceback.print_exception(исключение, file=ф)
+        подробности = f"Подробности записаны в файл {путь}."
+    except OSError:
+        подробности = "Подробности записать не удалось."
+    print(f"Внутренняя ошибка компилятора Дана: {type(исключение).__name__}. Это ошибка в самом Дане, "
+          f"а не в вашей программе. {подробности} Пожалуйста, сообщите о ней на "
+          "https://github.com/alexandervdanchenko-ai/dan/issues и приложите этот файл и программу.",
+          file=sys.stderr)
+    return 70
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as исключение:          # SystemExit и KeyboardInterrupt сюда не попадают
+        if os.environ.get("DAN_TRASSIROVKA"):
+            raise
+        sys.exit(_сбой_компилятора(исключение))
