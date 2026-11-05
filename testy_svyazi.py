@@ -66,6 +66,7 @@ import re
     (["sreda/baza.c"], ["test_sqlite", "test_sam.ТестыТаблицСреды"]),
     (["sreda/okna.c", "sreda/okna_veb.c"], ["test_okna", "test_sam.ТестыТаблицСреды"]),
     (["sreda/pdf.c"], ["test_pdf", "test_sam.ТестыТаблицСреды"]),
+    (["sreda/yadra.c", "sreda/yadra_test.c"], ["test_yadra"]),
     (["formatirovanie.py"], ["test_formatirovanie", "test_raskladka", "test_ustoychivost",
                              "test_sam.ТестыФорматаНаДане"]),
     (["dokumentaciya.py"], ["test_dokumentaciya", "test_opisaniya", "test_sam.ТестыДокументацииНаДане"]),
