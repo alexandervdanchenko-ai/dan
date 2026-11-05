@@ -16,11 +16,15 @@
 #include <fcntl.h>
 #endif
 
-enum { DAN_AF64, DAN_AF32, DAN_AF16, DAN_AI64, DAN_AI32, DAN_AI16, DAN_AI8, DAN_AU8 };
-static const uint8_t dan_arr_size[] = { 8, 4, 2, 8, 4, 2, 1, 1 };
+/* цел4 and цел2 are packed: two and four elements in a byte, the first one in the low bits */
+enum { DAN_AF64, DAN_AF32, DAN_AF16, DAN_AI64, DAN_AI32, DAN_AI16, DAN_AI8, DAN_AU8, DAN_AI4, DAN_AI2 };
+static const uint8_t dan_arr_bits[] = { 64, 32, 16, 64, 32, 16, 8, 8, 4, 2 };
 static const char *const dan_arr_kind_name[] = {
-    "дроб", "дроб32", "дроб16", "цел", "цел32", "цел16", "цел8", "байт"
+    "дроб", "дроб32", "дроб16", "цел", "цел32", "цел16", "цел8", "байт", "цел4", "цел2"
 };
+
+/* bytes taken by n elements (n is checked by the caller) */
+static inline size_t dan_arr_nbytes(int32_t kind, int64_t n) { return ((size_t)n * dan_arr_bits[kind] + 7) / 8; }
 
 typedef struct dan_arr {
     dan_hdr h;
@@ -55,8 +59,9 @@ static void dan_arr_size_error(int64_t n, int line) {
 static uint8_t *dan_arr_block(int32_t kind, int64_t n, void **block, int line) {
     if (n < 0) dan_arr_size_error(n, line);
     size_t bytes;
-    if (__builtin_mul_overflow((size_t)n, (size_t)dan_arr_size[kind], &bytes) || bytes > SIZE_MAX - DAN_ARR_ALIGN)
+    if (__builtin_mul_overflow((size_t)n, (size_t)dan_arr_bits[kind], &bytes) || bytes > SIZE_MAX - DAN_ARR_ALIGN - 7)
         dan_error("массив слишком большой", line);
+    bytes = (bytes + 7) / 8;
     void *p = calloc(1, bytes + DAN_ARR_ALIGN);
     if (!p) dan_error("не хватает памяти для массива", line);
     *block = p;
@@ -131,7 +136,7 @@ static void dan_arr_range_error(int32_t kind, const char *value, const char *ran
 
 static void dan_arr_int_range_error(int32_t kind, int64_t v, int line) {
     static const char *const range[] = { "", "", "", "", "от -2147483648 до 2147483647", "от -32768 до 32767",
-                                         "от -128 до 127", "от 0 до 255" };
+                                         "от -128 до 127", "от 0 до 255", "от -8 до 7", "от -2 до 1" };
     char b[24];
     dan_arr_range_error(kind, dan_itoa(v, b + sizeof b), range[kind], line);
 }
@@ -162,7 +167,9 @@ static inline int64_t dan_arr_rik(int32_t kind, const dan_arr *a, int64_t i) {
     case DAN_AI32: { int32_t v; memcpy(&v, a->data + i * 4, 4); return v; }
     case DAN_AI16: { int16_t v; memcpy(&v, a->data + i * 2, 2); return v; }
     case DAN_AI8: return (int8_t)a->data[i];
-    default: return a->data[i];
+    case DAN_AU8: return a->data[i];
+    case DAN_AI4: return (int64_t)((int8_t)(uint8_t)(a->data[i >> 1] >> ((i & 1) * 4) << 4) >> 4);
+    default: return (int64_t)((int8_t)(uint8_t)(a->data[i >> 2] >> ((i & 3) * 2) << 6) >> 6);
     }
 }
 
@@ -202,9 +209,23 @@ static inline void dan_arr_wik(int32_t kind, dan_arr *a, int64_t i, int64_t v, i
         if (v < -128 || v > 127) dan_arr_int_range_error(kind, v, line);
         a->data[i] = (uint8_t)(int8_t)v;
         break;
-    default:
+    case DAN_AU8:
         if (v < 0 || v > 255) dan_arr_int_range_error(kind, v, line);
         a->data[i] = (uint8_t)v;
+        break;
+    case DAN_AI4: {
+        if (v < -8 || v > 7) dan_arr_int_range_error(kind, v, line);
+        int sh = (int)(i & 1) * 4;
+        uint8_t *b = &a->data[i >> 1];
+        *b = (uint8_t)((*b & ~(0xFu << sh)) | (((unsigned)v & 0xFu) << sh));
+        break;
+    }
+    default: {
+        if (v < -2 || v > 1) dan_arr_int_range_error(kind, v, line);
+        int sh = (int)(i & 3) * 2;
+        uint8_t *b = &a->data[i >> 2];
+        *b = (uint8_t)((*b & ~(0x3u << sh)) | (((unsigned)v & 0x3u) << sh));
+    }
     }
 }
 
@@ -270,7 +291,7 @@ static inline void dan_arr_give(dan_arr *a) { if (a) dan_hdr_give(&a->h, dan_arr
 /* a new array with its own copy of the elements */
 static dan_arr *dan_arr_copy(const dan_arr *a) {
     dan_arr *r = dan_arr_new(a->kind, a->len, 0);
-    if (a->len) memcpy(r->data, a->data, (size_t)a->len * dan_arr_size[a->kind]);
+    if (a->len) memcpy(r->data, a->data, dan_arr_nbytes(a->kind, a->len));
     return r;
 }
 
@@ -295,7 +316,7 @@ static dan_arr *dan_arr_clone(dan_arr *a) {
     *r = (dan_arr){ .len = a->len, .kind = a->kind };
     dan_hdr_detached(&r->h);
     r->data = dan_arr_block(a->kind, a->len, &r->block, 0);
-    if (a->len) memcpy(r->data, a->data, (size_t)a->len * dan_arr_size[a->kind]);
+    if (a->len) memcpy(r->data, a->data, dan_arr_nbytes(a->kind, a->len));
     return r;
 }
 
@@ -303,11 +324,17 @@ static dan_arr *dan_arr_clone(dan_arr *a) {
 static dan_arr *dan_arr_slice(dan_arr *a, int64_t from, int64_t to, int line) {
     if (from < 0 || from > a->len) dan_index_error(from, a->len, line);
     if (to < from - 1 || to >= a->len) dan_index_error(to, a->len, line);
+    if ((from * dan_arr_bits[a->kind]) % 8) {
+        /* a packed part that starts inside a byte: its own copy */
+        dan_arr *r = dan_arr_new(a->kind, to - from + 1, line);
+        for (int64_t i = 0; i < r->len; i++) dan_arr_wi(r, i, dan_arr_ri(a, from + i), line);
+        return r;
+    }
     dan_arr *root = a->owner ? a->owner : a;
     dan_arr *r = dan_arr_head(a->kind, to - from + 1);
     dan_hdr_share(&root->h);
     r->owner = root;
-    r->data = a->data + from * dan_arr_size[a->kind];
+    r->data = a->data + from * dan_arr_bits[a->kind] / 8;
     r->ro = 1;
     return r;
 }
@@ -370,22 +397,23 @@ static dan_str dan_arr_str(const dan_arr *a) {
 
 /* байты(м): the elements as they lie in memory (little-endian on every supported computer) */
 static dan_bytes dan_arr_to_bytes(const dan_arr *a) {
-    size_t n = (size_t)a->len * dan_arr_size[a->kind];
+    size_t n = dan_arr_nbytes(a->kind, a->len);
     dan_bytes_s *b = dan_bytes_alloc((int64_t)n);
     if (n) memcpy(b->data, a->data, n);
+    if (a->len * dan_arr_bits[a->kind] % 8) b->data[n - 1] &= (uint8_t)((1u << (a->len * dan_arr_bits[a->kind] % 8)) - 1);
     return b;
 }
 
 /* массив(вид, байты): a copy of the bytes as elements of the kind */
 static dan_arr *dan_arr_from_bytes(int32_t kind, dan_bytes b, int line) {
-    int64_t size = dan_arr_size[kind];
+    int64_t size = dan_arr_bits[kind] >= 8 ? dan_arr_bits[kind] / 8 : 1;
     if (b->len % size) {
         char buf[300];
         snprintf(buf, sizeof buf, "в байтах %lld байт, а элемент массива<%s> занимает %lld: число байтов должно делиться на %lld",
                  (long long)b->len, dan_arr_kind_name[kind], (long long)size, (long long)size);
         dan_error(buf, line);
     }
-    dan_arr *a = dan_arr_new(kind, b->len / size, line);
+    dan_arr *a = dan_arr_new(kind, b->len * 8 / dan_arr_bits[kind], line);
     if (b->len) memcpy(a->data, b->data, (size_t)b->len);
     return a;
 }
@@ -419,7 +447,8 @@ static void *dan_arr_map_view(dan_str path, int64_t file_size_check, int64_t off
 
 static dan_arr *dan_arr_map(int32_t kind, dan_str path, int64_t off, int64_t count, dan_str *err) {
     char buf[300];
-    int64_t esize = dan_arr_size[kind];
+    /* a packed element (цел4, цел2) never crosses a byte: such arrays are counted by bytes */
+    int64_t esize = dan_arr_bits[kind] >= 8 ? dan_arr_bits[kind] / 8 : 1, per = dan_arr_bits[kind] >= 8 ? 1 : 8 / dan_arr_bits[kind];
     if (off < 0) {
         snprintf(buf, sizeof buf, "смещение не может быть отрицательным: %lld", (long long)off);
         *err = dan_arr_map_error(path, buf);
@@ -447,21 +476,22 @@ static dan_arr *dan_arr_map(int32_t kind, dan_str path, int64_t off, int64_t cou
             *err = dan_arr_map_error(path, buf);
             return NULL;
         }
-        count = (size - off) / esize;
-    } else if (count > (size - off) / esize) {
+        count = (size - off) / esize * per;
+    } else if (count > (size - off) / esize * per) {
         snprintf(buf, sizeof buf, "нужно %lld элементов массива<%s> после смещения %lld, а в файле после него %lld байт",
                  (long long)count, dan_arr_kind_name[kind], (long long)off, (long long)(size - off));
         *err = dan_arr_map_error(path, buf);
         return NULL;
     }
     if (count == 0) return dan_arr_new(kind, 0, 0);
-    void *view = dan_arr_map_view(path, 0, off, (size_t)(count * esize), &start, &size, err);
+    int64_t bytes = (int64_t)dan_arr_nbytes(kind, count);
+    void *view = dan_arr_map_view(path, 0, off, (size_t)bytes, &start, &size, err);
     if (!view) return NULL;
-    if (off + count * esize > size) {       /* the file became shorter in between */
+    if (off + bytes > size) {               /* the file became shorter in between */
 #ifdef __wasi__
         free(view);
 #else
-        dan_arr_unmap(view, (size_t)(start - (uint8_t *)view) + (size_t)(count * esize));
+        dan_arr_unmap(view, (size_t)(start - (uint8_t *)view) + (size_t)bytes);
 #endif
         *err = dan_arr_map_error(path, "файл изменился во время отображения");
         return NULL;
@@ -473,7 +503,7 @@ static dan_arr *dan_arr_map(int32_t kind, dan_str path, int64_t off, int64_t cou
 #ifdef __wasi__
     a->map_len = 0;                         /* read into memory: freed as an ordinary block */
 #else
-    a->map_len = (size_t)(start - (uint8_t *)view) + (size_t)(count * esize);
+    a->map_len = (size_t)(start - (uint8_t *)view) + (size_t)bytes;
 #endif
     return a;
 }
