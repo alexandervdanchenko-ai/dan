@@ -293,9 +293,9 @@ static double now(void) {
 
 static volatile float sink;
 
-/* measurements: GFLOP/s by variant; «замер» as the first argument */
+/* measurements: GFLOP/s by variant; «замер» or «zamer» (Windows) as the first argument */
 static void bench(void) {
-    enum { DN = 4096, MV = 4096, MM = 512 };
+    enum { DN = 4096, MV = 4096, MM = 1024 };
     float *a = malloc(DN * 4), *b = malloc(DN * 4);
     float *w = malloc((size_t)MV * MV * 4), *x = malloc(MV * 4), *y = malloc(MV * 4);
     float *A = malloc(MM * MM * 4), *B = malloc(MM * MM * 4), *C = malloc(MM * MM * 4);
@@ -319,9 +319,12 @@ static void bench(void) {
         t0 = now();
         for (int r = 0; r < 5; r++) dan_vk_matvec_q8(wq, xq, y, MV, MV);
         double t_q8 = (now() - t0) / 5;
-        t0 = now();
-        dan_vk_matmat_f32(A, B, C, MM, MM, MM);
-        double t_mm = now() - t0;
+        double t_mm = 1e30;
+        for (int r = 0; r < 3; r++) {   /* the best of three */
+            t0 = now();
+            dan_vk_matmat_f32(A, B, C, MM, MM, MM);
+            if (now() - t0 < t_mm) t_mm = now() - t0;
+        }
         printf("%-8s скалярное %.1f ГФлопс; матрица на вектор %.1f ГФлопс (%.1f ГБ/с); q8 %.1f ГФлопс (%.1f ГБ/с); "
                "матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * DN * reps / t_dot * 1e-9,
                2.0 * MV * MV / t_mv * 1e-9, 4.0 * MV * MV / t_mv * 1e-9, 2.0 * MV * MV / t_q8 * 1e-9,
@@ -331,7 +334,7 @@ static void bench(void) {
 
 int main(int argc, char **argv) {
     find_variants();
-    if (argc > 1 && strcmp(argv[1], "замер") == 0) { bench(); return 0; }
+    if (argc > 1 && (strcmp(argv[1], "замер") == 0 || strcmp(argv[1], "zamer") == 0)) { bench(); return 0; }
     test_f16();
     test_dot();
     test_mm();
