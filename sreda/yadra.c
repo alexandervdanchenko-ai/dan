@@ -25,7 +25,7 @@
 
    The pool runs a range [0, n) in parts on all cores: the parts are fixed by
    n and the number of threads, so a kernel run in parallel gives the same
-   bits as run on one core. DAN_POTOKI=N limits the number of threads. */
+   bits as run on one core. DAN_POTOKI=N sets the number of threads (up to 256, even above the core count). */
 
 #if defined(__clang__)
 #pragma STDC FP_CONTRACT OFF
@@ -1075,7 +1075,7 @@ static void dan_pool_start(void) {
     const char *lim = getenv("DAN_POTOKI");
     if (lim && *lim) {
         long v = strtol(lim, NULL, 10);
-        if (v >= 1 && v < t) t = (int)v;
+        if (v >= 1) t = (int)v;       /* set explicitly: exactly N threads, even above the core count */
     }
     if (t > DAN_POOL_MAX) t = DAN_POOL_MAX;
     dan_pool_mx_init(&dan_pool.mx);
