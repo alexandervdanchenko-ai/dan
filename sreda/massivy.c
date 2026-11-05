@@ -366,7 +366,35 @@ static dan_str dan_arr_str(const dan_arr *a) {
     return dan_buf_str(&b);
 }
 
-/* ---- arrays mapped from files ---- */
+/* ---- arrays and bytes ---- */
+
+/* байты(м): the elements as they lie in memory (little-endian on every supported computer) */
+static dan_bytes dan_arr_to_bytes(const dan_arr *a) {
+    size_t n = (size_t)a->len * dan_arr_size[a->kind];
+    dan_bytes_s *b = dan_bytes_alloc((int64_t)n);
+    if (n) memcpy(b->data, a->data, n);
+    return b;
+}
+
+/* массив(вид, байты): a copy of the bytes as elements of the kind */
+static dan_arr *dan_arr_from_bytes(int32_t kind, dan_bytes b, int line) {
+    int64_t size = dan_arr_size[kind];
+    if (b->len % size) {
+        char buf[300];
+        snprintf(buf, sizeof buf, "в байтах %lld байт, а элемент массива<%s> занимает %lld: число байтов должно делиться на %lld",
+                 (long long)b->len, dan_arr_kind_name[kind], (long long)size, (long long)size);
+        dan_error(buf, line);
+    }
+    dan_arr *a = dan_arr_new(kind, b->len / size, line);
+    if (b->len) memcpy(a->data, b->data, (size_t)b->len);
+    return a;
+}
+
+/* ---- arrays mapped from files ----
+
+   массив_из_файла(вид, путь, смещение, количество): the elements are read by the system from the file
+   when they are first needed, nothing is read in advance; several programs that map the same file share
+   one copy of it in memory. The file is mapped for reading: changing the array makes its own copy. */
 
 #ifdef _WIN32
 static void dan_arr_unmap(void *block, size_t n) { (void)n; UnmapViewOfFile(block); }
@@ -374,4 +402,182 @@ static void dan_arr_unmap(void *block, size_t n) { (void)n; UnmapViewOfFile(bloc
 static void dan_arr_unmap(void *block, size_t n) { (void)n; free(block); }
 #else
 static void dan_arr_unmap(void *block, size_t n) { munmap(block, n); }
+#endif
+
+static dan_str dan_arr_map_error(dan_str path, const char *text) {
+    dan_buf b = { NULL, 0, 0 };
+    dan_buf_add(&b, "файл \"");
+    dan_buf_add(&b, path);
+    dan_buf_add(&b, "\": ");
+    dan_buf_add(&b, text);
+    return dan_buf_str(&b);
+}
+
+/* the view of bytes [off, off + n) of the file, n > 0; NULL and *err on failure */
+static void *dan_arr_map_view(dan_str path, int64_t file_size_check, int64_t off, size_t n, uint8_t **start, int64_t *size,
+                              dan_str *err);
+
+static dan_arr *dan_arr_map(int32_t kind, dan_str path, int64_t off, int64_t count, dan_str *err) {
+    char buf[300];
+    int64_t esize = dan_arr_size[kind];
+    if (off < 0) {
+        snprintf(buf, sizeof buf, "смещение не может быть отрицательным: %lld", (long long)off);
+        *err = dan_arr_map_error(path, buf);
+        return NULL;
+    }
+    if (count < -1) {
+        snprintf(buf, sizeof buf, "количество элементов не может быть отрицательным: %lld", (long long)count);
+        *err = dan_arr_map_error(path, buf);
+        return NULL;
+    }
+    uint8_t *start = NULL;
+    int64_t size = -1;
+    /* first only the size of the file: the number of elements may depend on it */
+    if (!dan_arr_map_view(path, 1, 0, 0, NULL, &size, err)) return NULL;
+    if (off > size) {
+        snprintf(buf, sizeof buf, "смещение %lld за концом файла (в файле %lld байт)", (long long)off, (long long)size);
+        *err = dan_arr_map_error(path, buf);
+        return NULL;
+    }
+    if (count == -1) {
+        if ((size - off) % esize) {
+            snprintf(buf, sizeof buf, "после смещения %lld в файле %lld байт, а элемент массива<%s> занимает %lld: "
+                     "укажите количество элементов", (long long)off, (long long)(size - off), dan_arr_kind_name[kind],
+                     (long long)esize);
+            *err = dan_arr_map_error(path, buf);
+            return NULL;
+        }
+        count = (size - off) / esize;
+    } else if (count > (size - off) / esize) {
+        snprintf(buf, sizeof buf, "нужно %lld элементов массива<%s> после смещения %lld, а в файле после него %lld байт",
+                 (long long)count, dan_arr_kind_name[kind], (long long)off, (long long)(size - off));
+        *err = dan_arr_map_error(path, buf);
+        return NULL;
+    }
+    if (count == 0) return dan_arr_new(kind, 0, 0);
+    void *view = dan_arr_map_view(path, 0, off, (size_t)(count * esize), &start, &size, err);
+    if (!view) return NULL;
+    if (off + count * esize > size) {       /* the file became shorter in between */
+#ifdef __wasi__
+        free(view);
+#else
+        dan_arr_unmap(view, (size_t)(start - (uint8_t *)view) + (size_t)(count * esize));
+#endif
+        *err = dan_arr_map_error(path, "файл изменился во время отображения");
+        return NULL;
+    }
+    dan_arr *a = dan_arr_head(kind, count);
+    a->block = view;
+    a->data = start;
+    a->ro = 1;
+#ifdef __wasi__
+    a->map_len = 0;                         /* read into memory: freed as an ordinary block */
+#else
+    a->map_len = (size_t)(start - (uint8_t *)view) + (size_t)(count * esize);
+#endif
+    return a;
+}
+
+#ifdef _WIN32
+static void *dan_arr_map_view(dan_str path, int64_t only_size, int64_t off, size_t n, uint8_t **start, int64_t *size,
+                              dan_str *err) {
+    wchar_t *w = dan_wide(path);
+    HANDLE f = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD e = GetLastError();
+    dan_free(w);
+    if (f == INVALID_HANDLE_VALUE) {
+        *err = dan_arr_map_error(path, e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND
+                                 ? "файла нет" : "файл нельзя открыть для чтения");
+        return NULL;
+    }
+    LARGE_INTEGER li;
+    if (!GetFileSizeEx(f, &li)) {
+        CloseHandle(f);
+        *err = dan_arr_map_error(path, "нельзя узнать размер файла");
+        return NULL;
+    }
+    *size = li.QuadPart;
+    if (only_size) {
+        CloseHandle(f);
+        return (void *)1;
+    }
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int64_t gran = si.dwAllocationGranularity, base = off / gran * gran;
+    HANDLE m = CreateFileMappingW(f, NULL, PAGE_READONLY, 0, 0, NULL);
+    CloseHandle(f);
+    if (!m) {
+        *err = dan_arr_map_error(path, "файл нельзя отобразить в память");
+        return NULL;
+    }
+    void *v = MapViewOfFile(m, FILE_MAP_READ, (DWORD)((uint64_t)base >> 32), (DWORD)((uint64_t)base & 0xFFFFFFFFu),
+                            (SIZE_T)(off - base) + n);
+    CloseHandle(m);                         /* the view keeps the mapping */
+    if (!v) {
+        *err = dan_arr_map_error(path, "файл нельзя отобразить в память");
+        return NULL;
+    }
+    *start = (uint8_t *)v + (off - base);
+    return v;
+}
+#elif defined(__wasi__)
+/* WebAssembly has no mapping of files: the part of the file is read into memory */
+static void *dan_arr_map_view(dan_str path, int64_t only_size, int64_t off, size_t n, uint8_t **start, int64_t *size,
+                              dan_str *err) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        *err = dan_arr_map_error(path, "файла нет или его нельзя открыть для чтения");
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (*size = ftell(f)) < 0) {
+        fclose(f);
+        *err = dan_arr_map_error(path, "нельзя узнать размер файла");
+        return NULL;
+    }
+    if (only_size) {
+        fclose(f);
+        return (void *)1;
+    }
+    void *block = NULL;
+    uint8_t *p = dan_arr_block(DAN_AU8, (int64_t)n, &block, 0);
+    if (fseek(f, (long)off, SEEK_SET) != 0 || fread(p, 1, n, f) != n) {
+        fclose(f);
+        free(block);
+        *err = dan_arr_map_error(path, "ошибка чтения");
+        return NULL;
+    }
+    fclose(f);
+    *start = p;
+    return block;
+}
+#else
+static void *dan_arr_map_view(dan_str path, int64_t only_size, int64_t off, size_t n, uint8_t **start, int64_t *size,
+                              dan_str *err) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        *err = dan_arr_map_error(path, errno == ENOENT ? "файла нет" : "файл нельзя открыть для чтения");
+        return NULL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        *err = dan_arr_map_error(path, "это не обычный файл");
+        return NULL;
+    }
+    *size = (int64_t)st.st_size;
+    if (only_size) {
+        close(fd);
+        return (void *)1;
+    }
+    int64_t page = (int64_t)sysconf(_SC_PAGESIZE), base = off / page * page;
+    void *v = mmap(NULL, (size_t)(off - base) + n, PROT_READ, MAP_PRIVATE, fd, (off_t)base);
+    close(fd);                              /* the mapping keeps the file */
+    if (v == MAP_FAILED) {
+        *err = dan_arr_map_error(path, "файл нельзя отобразить в память");
+        return NULL;
+    }
+    *start = (uint8_t *)v + (off - base);
+    return v;
+}
 #endif
