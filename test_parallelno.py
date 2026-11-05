@@ -106,6 +106,23 @@ class ТестыВыполнения(unittest.TestCase):
                 self.assertEqual(р.returncode, 0, р.stderr)
                 self.assertEqual(р.stdout.split(), [ожидается])
 
+    def test_побитно_как_последовательно(self):
+        # приёмка: дробные результаты каждого шага побитно совпадают с обычным циклом при любом числе потоков
+        тело = ("пусть н = 3000\nперем а: [дроб] = []\nперем р: [дроб] = []\nперем ц: [цел] = []\n"
+                "для к в 0..н - 1 {\n    а.добавить(1.0 / (к + 3))\n    р.добавить(0.0)\n    ц.добавить(0)\n}\n"
+                "ЦИКЛ к в 0..н - 1 {\n    перем с = 0.0\n    для ј в 1..200 {\n        с += а[к] * ј / (ј + к * 0.5)\n    }\n"
+                "    р[к] = с + корень(а[к])\n    ц[к] = к * к % 1009\n}\nдля х в р {\n    вывод(х)\n}\nвывод(сумма(ц))\n")
+        код, эталон, ошибки = выполнить(тело.replace("ЦИКЛ", "для"))
+        self.assertEqual(код, 0, ошибки)
+        код_c = sam_kompilyator.перевести(тело.replace("ЦИКЛ", "параллельно для"))
+        with tempfile.TemporaryDirectory() as папка:
+            исполняемый = dan.собрать_код(код_c, os.path.join(папка, "программа"), папка, выпуск=True)
+            for потоков in (1, 2, 3, 4, 8, 16):
+                р = subprocess.run([исполняемый], capture_output=True, text=True, encoding="utf-8", timeout=60,
+                                   env=dict(os.environ, DAN_POTOKI=str(потоков)))
+                self.assertEqual(р.returncode, 0, р.stderr)
+                self.assertEqual(р.stdout, эталон, f"потоков: {потоков}")
+
     def test_ошибка_шага(self):
         код, _, ошибки = выполнить("перем р = [0, 0]\nпараллельно для к в 0..2 {\n    р[к] = к\n}\n")
         self.assertEqual(код, 1)
