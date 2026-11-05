@@ -1346,9 +1346,14 @@ static void dan_vk_q8_quantize(const float *x, uint8_t *out, int64_t n) {
         float amax = 0.0f;
         for (int i = 0; i < DAN_Q8_BLOCK; i++) { float a = fabsf(v[i]); if (a > amax) amax = a; }
         float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+        if (!isfinite(id) || !isfinite(d)) { d = 0.0f; id = 0.0f; }   /* scale below or above the range */
         uint16_t h = dan_f32_to_f16(d);
         memcpy(o, &h, 2);
-        for (int i = 0; i < DAN_Q8_BLOCK; i++) o[2 + i] = (uint8_t)(int8_t)lrintf(v[i] * id);
+        for (int i = 0; i < DAN_Q8_BLOCK; i++) {
+            float q = v[i] * id;
+            /* NaN and anything outside -127..127 (only with a bad scale) become 0 */
+            o[2 + i] = (uint8_t)(int8_t)(q >= -127.5f && q <= 127.5f ? lrintf(q) : 0);
+        }
     }
 }
 
@@ -1422,6 +1427,9 @@ static void dan_k_mm_dims(const dan_arr *a, const dan_arr *b, int64_t k, int64_t
     if (b->len % k != 0) dan_k_error("матмат: длина второй матрицы (%lld) не делится на %lld", b->len, k, line);
     *m = a->len / k;
     *n = b->len / k;
+    int64_t mn;
+    if (__builtin_mul_overflow(*m, *n, &mn))
+        dan_k_error("матмат: результат из %lld строк по %lld чисел слишком велик", *m, *n, line);
 }
 
 static dan_arr *dan_k_matmat_f32(const dan_arr *a, const dan_arr *b, int64_t k, int line) {
@@ -1511,8 +1519,18 @@ static void dan_k_q8_len(const char *what, int64_t n, int line) {
     if (n % DAN_Q8_BLOCK != 0) dan_k_error(what, n, DAN_Q8_BLOCK, line);
 }
 
+#define DAN_Q8_MAX (127.0f * 65504.0f)   /* the scale still fits half precision */
+
 static dan_arr *dan_k_q8_quantize(const dan_arr *x, int line) {
     dan_k_q8_len("квантовать_q8: длина массива (%lld) должна делиться на %lld", x->len, line);
+    const float *v = (const float *)x->data;
+    for (int64_t i = 0; i < x->len; i++)
+        if (!(fabsf(v[i]) <= DAN_Q8_MAX)) {   /* also NaN */
+            char buf[300];
+            snprintf(buf, sizeof buf, "квантовать_q8: элемент %lld равен %g, а в весах в 8 битах могут быть только "
+                     "конечные числа не больше 8319008 по модулю", (long long)i, (double)v[i]);
+            dan_error(buf, line);
+        }
     dan_arr *q = dan_arr_new(DAN_AU8, x->len / DAN_Q8_BLOCK * DAN_Q8_BYTES, line);
     dan_vk_q8_quantize((const float *)x->data, q->data, x->len);
     return q;
@@ -1529,6 +1547,13 @@ static dan_arr *dan_k_q8_dequantize(const dan_arr *q, int line) {
 
 static dan_arr *dan_k_matvec_q8(const dan_arr *w, const dan_arr *x, int line) {
     dan_k_q8_len("матвек_q8: длина вектора (%lld) должна делиться на %lld", x->len, line);
+    for (int64_t i = 0; i < x->len; i++)
+        if (!(fabsf(((const float *)x->data)[i]) <= DAN_Q8_MAX)) {
+            char buf[300];
+            snprintf(buf, sizeof buf, "матвек_q8: элемент вектора %lld равен %g, а вектор переводится в 8 бит: нужны "
+                     "конечные числа не больше 8319008 по модулю", (long long)i, (double)((const float *)x->data)[i]);
+            dan_error(buf, line);
+        }
     int64_t row_bytes = x->len / DAN_Q8_BLOCK * DAN_Q8_BYTES;
     if (row_bytes == 0 || w->len % row_bytes != 0)
         dan_k_error("матвек_q8: длина весов в байтах (%lld) должна делиться на длину строки (%lld)", w->len, row_bytes, line);
