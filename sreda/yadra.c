@@ -970,3 +970,171 @@ static void dan_vk_matvec_q8(const uint8_t *w, const uint8_t *xq, float *y, int6
     dan_vk_q8mv_job j = {w, xq, y, cols / DAN_Q8_BLOCK};
     dan_pool_run(rows, dan_vk_min_rows(cols), dan_vk_q8mv_part, &j);
 }
+
+/* ---- functions of the program over dense arrays (sreda/massivy.c) ---- */
+#ifdef DAN_ARR_ALIGN
+
+static void dan_k_error(const char *what, int64_t a, int64_t b, int line) {
+    char buf[300];
+    snprintf(buf, sizeof buf, what, (long long)a, (long long)b);
+    dan_error(buf, line);
+}
+
+static double dan_k_dot_f32(const dan_arr *a, const dan_arr *b, int line) {
+    if (a->len != b->len) dan_k_error("скаляр: массивы разной длины (%lld и %lld)", a->len, b->len, line);
+    return dan_vk_dot_f32((const float *)a->data, (const float *)b->data, a->len);
+}
+static double dan_k_dot_f64(const dan_arr *a, const dan_arr *b, int line) {
+    if (a->len != b->len) dan_k_error("скаляр: массивы разной длины (%lld и %lld)", a->len, b->len, line);
+    return dan_vk_dot_f64((const double *)a->data, (const double *)b->data, a->len);
+}
+
+static int64_t dan_k_rows(const dan_arr *w, const dan_arr *x, int line) {
+    if (x->len == 0 || w->len % x->len != 0)
+        dan_k_error("матвек: длина матрицы (%lld) должна делиться на длину вектора (%lld)", w->len, x->len, line);
+    return w->len / x->len;
+}
+
+static dan_arr *dan_k_matvec_f32(const dan_arr *w, const dan_arr *x, int line) {
+    int64_t rows = dan_k_rows(w, x, line);
+    dan_arr *y = dan_arr_new(DAN_AF32, rows, line);
+    dan_vk_matvec_f32((const float *)w->data, (const float *)x->data, (float *)y->data, rows, x->len);
+    return y;
+}
+static dan_arr *dan_k_matvec_f64(const dan_arr *w, const dan_arr *x, int line) {
+    int64_t rows = dan_k_rows(w, x, line);
+    dan_arr *y = dan_arr_new(DAN_AF64, rows, line);
+    dan_vk_matvec_f64((const double *)w->data, (const double *)x->data, (double *)y->data, rows, x->len);
+    return y;
+}
+
+/* a: m x k, b: k x n */
+static void dan_k_mm_dims(const dan_arr *a, const dan_arr *b, int64_t k, int64_t *m, int64_t *n, int line) {
+    if (k <= 0) dan_k_error("матмат: число столбцов первой матрицы должно быть положительным, а здесь %lld (длина первой матрицы %lld)", k, a->len, line);
+    if (a->len % k != 0) dan_k_error("матмат: длина первой матрицы (%lld) не делится на %lld", a->len, k, line);
+    if (b->len % k != 0) dan_k_error("матмат: длина второй матрицы (%lld) не делится на %lld", b->len, k, line);
+    *m = a->len / k;
+    *n = b->len / k;
+}
+
+static dan_arr *dan_k_matmat_f32(const dan_arr *a, const dan_arr *b, int64_t k, int line) {
+    int64_t m, n;
+    dan_k_mm_dims(a, b, k, &m, &n, line);
+    dan_arr *c = dan_arr_new(DAN_AF32, m * n, line);
+    dan_vk_matmat_f32((const float *)a->data, (const float *)b->data, (float *)c->data, m, n, k);
+    return c;
+}
+static dan_arr *dan_k_matmat_f64(const dan_arr *a, const dan_arr *b, int64_t k, int line) {
+    int64_t m, n;
+    dan_k_mm_dims(a, b, k, &m, &n, line);
+    dan_arr *c = dan_arr_new(DAN_AF64, m * n, line);
+    dan_vk_matmat_f64((const double *)a->data, (const double *)b->data, (double *)c->data, m, n, k);
+    return c;
+}
+
+static dan_arr *dan_k_softmax_f32(const dan_arr *x) {
+    dan_arr *y = dan_arr_new(DAN_AF32, x->len, 0);
+    memcpy(y->data, x->data, (size_t)x->len * 4);
+    dan_vk_softmax_f32((float *)y->data, x->len);
+    return y;
+}
+static dan_arr *dan_k_softmax_f64(const dan_arr *x) {
+    dan_arr *y = dan_arr_new(DAN_AF64, x->len, 0);
+    memcpy(y->data, x->data, (size_t)x->len * 8);
+    dan_vk_softmax_f64((double *)y->data, x->len);
+    return y;
+}
+
+/* weights: empty or of the length of x */
+static void dan_k_same_or_empty(const char *what, const dan_arr *x, const dan_arr *w, int line) {
+    if (w->len != 0 && w->len != x->len) {
+        char buf[300];
+        snprintf(buf, sizeof buf, "%s: длина весов или сдвигов (%lld) должна быть 0 или длиной массива (%lld)", what,
+                 (long long)w->len, (long long)x->len);
+        dan_error(buf, line);
+    }
+}
+
+static dan_arr *dan_k_rmsnorm_f32(const dan_arr *x, const dan_arr *w, double eps, int line) {
+    dan_k_same_or_empty("нормировать_скв", x, w, line);
+    dan_arr *y = dan_arr_new(DAN_AF32, x->len, line);
+    dan_vk_rmsnorm_f32((float *)y->data, (const float *)x->data, w->len ? (const float *)w->data : NULL, x->len, (float)eps);
+    return y;
+}
+static dan_arr *dan_k_rmsnorm_f64(const dan_arr *x, const dan_arr *w, double eps, int line) {
+    dan_k_same_or_empty("нормировать_скв", x, w, line);
+    dan_arr *y = dan_arr_new(DAN_AF64, x->len, line);
+    dan_vk_rmsnorm_f64((double *)y->data, (const double *)x->data, w->len ? (const double *)w->data : NULL, x->len, eps);
+    return y;
+}
+
+static dan_arr *dan_k_layernorm_f32(const dan_arr *x, const dan_arr *w, const dan_arr *b, double eps, int line) {
+    dan_k_same_or_empty("нормировать_слой", x, w, line);
+    dan_k_same_or_empty("нормировать_слой", x, b, line);
+    dan_arr *y = dan_arr_new(DAN_AF32, x->len, line);
+    dan_vk_layernorm_f32((float *)y->data, (const float *)x->data, w->len ? (const float *)w->data : NULL,
+                         b->len ? (const float *)b->data : NULL, x->len, (float)eps);
+    return y;
+}
+static dan_arr *dan_k_layernorm_f64(const dan_arr *x, const dan_arr *w, const dan_arr *b, double eps, int line) {
+    dan_k_same_or_empty("нормировать_слой", x, w, line);
+    dan_k_same_or_empty("нормировать_слой", x, b, line);
+    dan_arr *y = dan_arr_new(DAN_AF64, x->len, line);
+    dan_vk_layernorm_f64((double *)y->data, (const double *)x->data, w->len ? (const double *)w->data : NULL,
+                         b->len ? (const double *)b->data : NULL, x->len, eps);
+    return y;
+}
+
+static dan_arr *dan_k_axpy_f32(const dan_arr *y, double a, const dan_arr *x, int line) {
+    if (y->len != x->len) dan_k_error("прибавить_кратное: массивы разной длины (%lld и %lld)", y->len, x->len, line);
+    dan_arr *r = dan_arr_new(DAN_AF32, y->len, line);
+    memcpy(r->data, y->data, (size_t)y->len * 4);
+    dan_vk_axpy_f32((float *)r->data, (float)a, (const float *)x->data, x->len);
+    return r;
+}
+static dan_arr *dan_k_axpy_f64(const dan_arr *y, double a, const dan_arr *x, int line) {
+    if (y->len != x->len) dan_k_error("прибавить_кратное: массивы разной длины (%lld и %lld)", y->len, x->len, line);
+    dan_arr *r = dan_arr_new(DAN_AF64, y->len, line);
+    memcpy(r->data, y->data, (size_t)y->len * 8);
+    dan_vk_axpy_f64((double *)r->data, a, (const double *)x->data, x->len);
+    return r;
+}
+
+static void dan_k_q8_len(const char *what, int64_t n, int line) {
+    if (n % DAN_Q8_BLOCK != 0) dan_k_error(what, n, DAN_Q8_BLOCK, line);
+}
+
+static dan_arr *dan_k_q8_quantize(const dan_arr *x, int line) {
+    dan_k_q8_len("квантовать_q8: длина массива (%lld) должна делиться на %lld", x->len, line);
+    dan_arr *q = dan_arr_new(DAN_AU8, x->len / DAN_Q8_BLOCK * DAN_Q8_BYTES, line);
+    dan_vk_q8_quantize((const float *)x->data, q->data, x->len);
+    return q;
+}
+
+static dan_arr *dan_k_q8_dequantize(const dan_arr *q, int line) {
+    if (q->len % DAN_Q8_BYTES != 0)
+        dan_k_error("из_q8: длина массива байтов (%lld) должна делиться на %lld (размер блока)", q->len, DAN_Q8_BYTES, line);
+    int64_t n = q->len / DAN_Q8_BYTES * DAN_Q8_BLOCK;
+    dan_arr *x = dan_arr_new(DAN_AF32, n, line);
+    dan_vk_q8_dequantize(q->data, (float *)x->data, n);
+    return x;
+}
+
+static dan_arr *dan_k_matvec_q8(const dan_arr *w, const dan_arr *x, int line) {
+    dan_k_q8_len("матвек_q8: длина вектора (%lld) должна делиться на %lld", x->len, line);
+    int64_t row_bytes = x->len / DAN_Q8_BLOCK * DAN_Q8_BYTES;
+    if (row_bytes == 0 || w->len % row_bytes != 0)
+        dan_k_error("матвек_q8: длина весов в байтах (%lld) должна делиться на длину строки (%lld)", w->len, row_bytes, line);
+    int64_t rows = w->len / row_bytes;
+    uint8_t *xq = malloc((size_t)row_bytes);
+    if (!xq) dan_error(DAN_MSG_NO_MEMORY, line);
+    dan_vk_q8_quantize((const float *)x->data, xq, x->len);
+    dan_arr *y = dan_arr_new(DAN_AF32, rows, line);
+    dan_vk_matvec_q8(w->data, xq, (float *)y->data, rows, x->len);
+    free(xq);
+    return y;
+}
+
+static dan_str dan_k_variant(void) { return dan_vk_name(); }
+static int64_t dan_k_threads(void) { return dan_pool_threads(); }
+#endif
