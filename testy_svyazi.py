@@ -56,7 +56,7 @@ import re
     (["matematika.py", "vysshaya.py"], ТАБЛИЦЫ + ["test_chisla", "test_vysshaya", "test_sverka"]),
     (["dannye.py"], ТАБЛИЦЫ + ДАННЫЕ),
     (["sistema.py"], ТАБЛИЦЫ + ["test_sistema", "test_http", "test_pochta", "test_sqlite", "test_okna", "test_paketi"]),
-    (["versiya.py"], ["test_sovmestimost", "test_obnovlenie", "test_sam.ТестыТаблицСреды", "test_sam.ТестыСамосборки"]),
+    (["versiya.py"], ["test_llama", "test_sovmestimost", "test_obnovlenie", "test_sam.ТестыТаблицСреды", "test_sam.ТестыСамосборки"]),
     (["sreda/dannye.c"], ДАННЫЕ + ["test_katalog", "test_sam.ТестыТаблицСреды"]),
     # плотные массивы: среда на C и их проверка и порождение в компиляторе на Дане
     (["sreda/massivy.c", "сам/типы.dan", "сам/проверка.dan", "сам/порождение.dan"], ["test_massivy"]),
@@ -99,6 +99,8 @@ import re
     (["testy.py", "testy_svyazi.py", "testy_vremya.json"], ["test_testy_svyazi"]),
     (["semya/*", ".gitattributes"], ["test_semya", "test_testy_svyazi"]),
     (["библиотека/*"], ["test_katalog", "test_okna"]),
+    # библиотека llama.cpp для модуля «модели»: сборка, команды «дан модели»
+    (["поставка/собрать_llama.py", ".github/workflows/llama.yml", "сам/модели_поставка.dan"], ["test_llama"]),
     # файлы, которые тесты не проверяют (проверяют задания CI «Установка» и «Поставка»)
     (["LICENSE", ".gitignore", ".github/*", "поставка/*", "редактор/*", "установить_windows.ps1", "исследование.md",
       "принципы.md"], []),
