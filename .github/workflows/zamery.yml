@@ -40,12 +40,12 @@ jobs:
       - name: Машина
         shell: bash
         run: |
-          if [ -r /proc/cpuinfo ]; then cpu=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^ //'); fi
-          if [ -z "$cpu" ] && [ "$RUNNER_OS" = "macOS" ]; then cpu=$(sysctl -n machdep.cpu.brand_string); fi
+          if [ -r /proc/cpuinfo ]; then cpu=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^ //' || true); fi
+          if [ -z "$cpu" ] && [ "$RUNNER_OS" = "macOS" ]; then cpu=$(sysctl -n machdep.cpu.brand_string || true); fi
           if [ -z "$cpu" ] && [ "$RUNNER_OS" = "Windows" ]; then
-            cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name")
+            cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" || true)
           fi
-          if [ -z "$cpu" ]; then cpu=$(lscpu 2>/dev/null | grep -m1 "Model name" | cut -d: -f2 | sed 's/^ *//'); fi
+          if [ -z "$cpu" ]; then cpu=$(lscpu 2>/dev/null | grep -m1 "Model name" | cut -d: -f2 | sed 's/^ *//' || true); fi
           {
             echo "ОС: $RUNNER_OS $RUNNER_ARCH ($ImageOS $ImageVersion)"
             echo "ядер: $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
