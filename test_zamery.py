@@ -143,14 +143,16 @@ class ТестыЭталонаПамяти(unittest.TestCase):
         файл = os.path.join(self.п, "веса.bin")
         with open(файл, "wb") as ф:
             ф.write(bytes(3 * 16384 + 100))
-        for аргументы, строк in ((["0.001", "2", "3"], 61), (["1", "4.1", "3", файл], 3)):
+        for аргументы, строк, счёт in ((["0.001", "2", "3"], 61, "приближённо (FMA)"),
+                                     (["1", "4.1", "3", файл], 3, "приближённо (FMA)"),
+                                     (["0.001", "2", "3", "-", "точно"], 61, "точно")):
             р = subprocess.run([sam_kompilyator.исполняемый(), "запустить", программа, *аргументы],
                                capture_output=True, env=dict(sam_kompilyator.среда(), DAN_POTOKI="2"),
                                timeout=600, cwd=self.п)
             вывод_ = р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace")
             self.assertEqual(р.returncode, 0, вывод_)
             self.assertIn(f"{строк} строк по 4096 чисел дроб32", вывод_)
-            self.assertIn("потоков: 2", вывод_)
+            self.assertIn("потоков: 2, счёт: " + счёт, вывод_)
             self.проверить_вывод(вывод_, аргументы[1])
         р = subprocess.run([sam_kompilyator.исполняемый(), "запустить", программа, "0"],
                            capture_output=True, env=sam_kompilyator.среда(), timeout=600, cwd=self.п)
