@@ -212,6 +212,12 @@ static bool dan_is_dir(dan_str path) {
 #endif
 }
 
+/* glibc hides lstat under -std=c11 without _DEFAULT_SOURCE; clang and gcc 14
+   reject a call to an undeclared function, so it is declared here */
+#if defined(__GLIBC__) && !defined(__USE_XOPEN_EXTENDED) && !defined(__USE_XOPEN2K)
+extern int lstat(const char *__restrict path, struct stat *__restrict st);
+#endif
+
 /* Is the path a symbolic link (on Windows: any reparse point, also a junction). */
 static bool dan_is_link(dan_str path) {
 #ifdef _WIN32
