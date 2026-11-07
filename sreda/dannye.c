@@ -212,6 +212,12 @@ static bool dan_is_dir(dan_str path) {
 #endif
 }
 
+/* glibc hides lstat under -std=c11 without _DEFAULT_SOURCE; clang and gcc 14
+   reject a call to an undeclared function, so it is declared here */
+#if defined(__GLIBC__) && !defined(__USE_XOPEN_EXTENDED) && !defined(__USE_XOPEN2K)
+extern int lstat(const char *__restrict path, struct stat *__restrict st);
+#endif
+
 /* Is the path a symbolic link (on Windows: any reparse point, also a junction). */
 static bool dan_is_link(dan_str path) {
 #ifdef _WIN32
@@ -647,28 +653,124 @@ static dan_str dan_sha256_hex(const uint8_t *p, size_t n) {
 static dan_str dan_hash_bytes(dan_bytes b) { return dan_sha256_hex(b->data, (size_t)b->len); }
 static dan_str dan_hash_str(dan_str s) { return dan_sha256_hex((const uint8_t *)s, strlen(s)); }
 
-/* ---- AES (encryption direction only: CTR mode needs no decryption) ---- */
+/* ---- AES (encryption direction only: CTR mode needs no decryption)
 
-static const uint8_t dan_aes_sbox[256] = {
-    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
-    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
-    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
-    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
-    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
-    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
-    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
-    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
-    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
-    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
-    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
-    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
-    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
-    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
-};
+   No table is indexed by the key or the data: such a lookup leaves the index
+   in the processor cache, and another program on the same machine can learn
+   the key from the time of its own memory accesses. Three variants give the
+   same bytes and are chosen when the program runs:
+   - "aesni": the AES instructions of x86-64 processors (checked with cpuid);
+   - "armv8": the AES instructions of ARMv8 (always present on Apple
+     processors; on Linux and Windows the operating system is asked);
+   - "c": plain C without branches or memory accesses that depend on secret
+     data; SubBytes is the circuit of J. Boyar and R. Peralta ("A depth-16
+     circuit for the AES S-box", 2011) of 113 logic operations, applied to the
+     bit planes of 64 bytes (four blocks) at once.
+   DAN_AES=c (or aesni, armv8) chooses a variant if the processor has it. ---- */
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define DAN_AES_X86 1
+#include <emmintrin.h>
+#include <wmmintrin.h>
+#include <cpuid.h>
+#define DAN_AES_NI __attribute__((target("aes,sse2")))
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#define DAN_AES_ARM 1
+#include <arm_neon.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#ifndef HWCAP_AES
+#define HWCAP_AES (1 << 3)
+#endif
+#endif
+#if defined(__clang__)
+#define DAN_AES_V8 __attribute__((target("aes")))
+#else
+#define DAN_AES_V8 __attribute__((target("+crypto")))
+#endif
+#endif
 
 typedef struct { uint8_t rk[240]; int rounds; } dan_aes;
+
+/* 8x8 bit matrix in a word, byte j is row j: bit k of byte j moves to bit j of byte k */
+static uint64_t dan_aes_tr8(uint64_t x) {
+    uint64_t t;
+    t = (x ^ (x >> 7)) & 0x00AA00AA00AA00AAull; x ^= t ^ (t << 7);
+    t = (x ^ (x >> 14)) & 0x0000CCCC0000CCCCull; x ^= t ^ (t << 14);
+    t = (x ^ (x >> 28)) & 0x00000000F0F0F0F0ull; x ^= t ^ (t << 28);
+    return x;
+}
+
+/* 8x8 byte matrix in eight words: byte k of word g moves to byte g of word k */
+static void dan_aes_tr64(uint64_t w[8]) {
+    static const uint64_t m[3] = { 0x00000000FFFFFFFFull, 0x0000FFFF0000FFFFull, 0x00FF00FF00FF00FFull };
+    for (int s = 0, j = 4; j > 0; s++, j >>= 1)
+        for (int i = 0; i < 8; i++) {
+            if (i & j) continue;
+            uint64_t a = w[i], c = w[i + j];
+            int sh = 8 * j;
+            w[i] = (a & m[s]) | ((c & m[s]) << sh);
+            w[i + j] = ((a >> sh) & m[s]) | (c & ~m[s]);
+        }
+}
+
+/* the S-box on bit planes: w[k] holds bit k of 64 bytes (U0 of the circuit is bit 7) */
+static void dan_aes_sbox_planes(uint64_t w[8]) {
+    uint64_t U0 = w[7], U1 = w[6], U2 = w[5], U3 = w[4], U4 = w[3], U5 = w[2], U6 = w[1], U7 = w[0];
+    /* top linear part */
+    uint64_t T1 = U0 ^ U3, T2 = U0 ^ U5, T3 = U0 ^ U6, T4 = U3 ^ U5, T5 = U4 ^ U6;
+    uint64_t T6 = T1 ^ T5, T7 = U1 ^ U2, T8 = U7 ^ T6, T9 = U7 ^ T7, T10 = T6 ^ T7;
+    uint64_t T11 = U1 ^ U5, T12 = U2 ^ U5, T13 = T3 ^ T4, T14 = T6 ^ T11, T15 = T5 ^ T11;
+    uint64_t T16 = T5 ^ T12, T17 = T9 ^ T16, T18 = U3 ^ U7, T19 = T7 ^ T18, T20 = T1 ^ T19;
+    uint64_t T21 = U6 ^ U7, T22 = T7 ^ T21, T23 = T2 ^ T22, T24 = T2 ^ T10, T25 = T20 ^ T17;
+    uint64_t T26 = T3 ^ T16, T27 = T1 ^ T12, D = U7;
+    /* nonlinear middle part */
+    uint64_t M1 = T13 & T6, M2 = T23 & T8, M3 = T14 ^ M1, M4 = T19 & D, M5 = M4 ^ M1;
+    uint64_t M6 = T3 & T16, M7 = T22 & T9, M8 = T26 ^ M6, M9 = T20 & T17, M10 = M9 ^ M6;
+    uint64_t M11 = T1 & T15, M12 = T4 & T27, M13 = M12 ^ M11, M14 = T2 & T10, M15 = M14 ^ M11;
+    uint64_t M16 = M3 ^ M2, M17 = M5 ^ T24, M18 = M8 ^ M7, M19 = M10 ^ M15, M20 = M16 ^ M13;
+    uint64_t M21 = M17 ^ M15, M22 = M18 ^ M13, M23 = M19 ^ T25, M24 = M22 ^ M23, M25 = M22 & M20;
+    uint64_t M26 = M21 ^ M25, M27 = M20 ^ M21, M28 = M23 ^ M25, M29 = M28 & M27, M30 = M26 & M24;
+    uint64_t M31 = M20 & M23, M32 = M27 & M31, M33 = M27 ^ M25, M34 = M21 & M22, M35 = M24 & M34;
+    uint64_t M36 = M24 ^ M25, M37 = M21 ^ M29, M38 = M32 ^ M33, M39 = M23 ^ M30, M40 = M35 ^ M36;
+    uint64_t M41 = M38 ^ M40, M42 = M37 ^ M39, M43 = M37 ^ M38, M44 = M39 ^ M40, M45 = M42 ^ M41;
+    uint64_t M46 = M44 & T6, M47 = M40 & T8, M48 = M39 & D, M49 = M43 & T16, M50 = M38 & T9;
+    uint64_t M51 = M37 & T17, M52 = M42 & T15, M53 = M45 & T27, M54 = M41 & T10, M55 = M44 & T13;
+    uint64_t M56 = M40 & T23, M57 = M39 & T19, M58 = M43 & T3, M59 = M38 & T22, M60 = M37 & T20;
+    uint64_t M61 = M42 & T1, M62 = M45 & T4, M63 = M41 & T2;
+    /* bottom linear part */
+    uint64_t L0 = M61 ^ M62, L1 = M50 ^ M56, L2 = M46 ^ M48, L3 = M47 ^ M55, L4 = M54 ^ M58;
+    uint64_t L5 = M49 ^ M61, L6 = M62 ^ L5, L7 = M46 ^ L3, L8 = M51 ^ M59, L9 = M52 ^ M53;
+    uint64_t L10 = M53 ^ L4, L11 = M60 ^ L2, L12 = M48 ^ M51, L13 = M50 ^ L0, L14 = M52 ^ M61;
+    uint64_t L15 = M55 ^ L1, L16 = M56 ^ L0, L17 = M57 ^ L1, L18 = M58 ^ L8, L19 = M63 ^ L4;
+    uint64_t L20 = L0 ^ L1, L21 = L1 ^ L7, L22 = L3 ^ L12, L23 = L18 ^ L2, L24 = L15 ^ L9;
+    uint64_t L25 = L6 ^ L10, L26 = L7 ^ L9, L27 = L8 ^ L10, L28 = L11 ^ L14, L29 = L11 ^ L17;
+    w[7] = L6 ^ L24;
+    w[6] = ~(L16 ^ L26);
+    w[5] = ~(L19 ^ L28);
+    w[4] = L6 ^ L21;
+    w[3] = L20 ^ L22;
+    w[2] = L25 ^ L29;
+    w[1] = ~(L13 ^ L27);
+    w[0] = ~(L6 ^ L23);
+}
+
+/* SubBytes of 64 bytes */
+static void dan_aes_sub64(uint8_t b[64]) {
+    uint64_t w[8];
+    for (int g = 0; g < 8; g++) {
+        uint64_t x;
+        memcpy(&x, b + 8 * g, 8);   /* any byte order: unpacking below is the exact inverse */
+        w[g] = dan_aes_tr8(x);
+    }
+    dan_aes_tr64(w);
+    dan_aes_sbox_planes(w);
+    dan_aes_tr64(w);
+    for (int g = 0; g < 8; g++) {
+        uint64_t x = dan_aes_tr8(w[g]);
+        memcpy(b + 8 * g, &x, 8);
+    }
+}
 
 static void dan_aes_init(dan_aes *a, const uint8_t *key, int keylen) {
     int nk = keylen / 4;
@@ -677,55 +779,176 @@ static void dan_aes_init(dan_aes *a, const uint8_t *key, int keylen) {
     uint8_t rcon = 1;
     memcpy(a->rk, key, (size_t)keylen);
     for (int i = nk; i < total; i++) {
-        uint8_t t[4];
+        uint8_t t[64] = { 0 };
         memcpy(t, a->rk + 4 * (i - 1), 4);
         if (i % nk == 0) {
+            dan_aes_sub64(t);
             uint8_t x = t[0];
-            t[0] = dan_aes_sbox[t[1]] ^ rcon; t[1] = dan_aes_sbox[t[2]];
-            t[2] = dan_aes_sbox[t[3]]; t[3] = dan_aes_sbox[x];
+            t[0] = t[1] ^ rcon; t[1] = t[2]; t[2] = t[3]; t[3] = x;
             rcon = (uint8_t)((rcon << 1) ^ ((rcon & 0x80) ? 0x1b : 0));
         } else if (nk > 6 && i % nk == 4) {
-            for (int j = 0; j < 4; j++) t[j] = dan_aes_sbox[t[j]];
+            dan_aes_sub64(t);
         }
         for (int j = 0; j < 4; j++) a->rk[4 * i + j] = a->rk[4 * (i - nk) + j] ^ t[j];
     }
 }
 
-static uint8_t dan_xtime(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) ? 0x1b : 0)); }
+static uint8_t dan_xtime(uint8_t x) { return (uint8_t)((x << 1) ^ (0x1b & -(x >> 7))); }
 
-static void dan_aes_encrypt(const dan_aes *a, const uint8_t in[16], uint8_t out[16]) {
-    uint8_t s[16];
-    for (int i = 0; i < 16; i++) s[i] = in[i] ^ a->rk[i];
-    for (int r = 1; r <= a->rounds; r++) {
-        uint8_t t[16];
-        for (int i = 0; i < 16; i++) t[i] = dan_aes_sbox[s[i]];
-        /* ShiftRows: the state is stored column by column */
-        for (int c = 0; c < 4; c++)
-            for (int row = 0; row < 4; row++) s[4 * c + row] = t[4 * ((c + row) % 4) + row];
-        if (r != a->rounds) {
-            for (int c = 0; c < 4; c++) {
-                uint8_t *col = s + 4 * c;
-                uint8_t a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3], all = a0 ^ a1 ^ a2 ^ a3;
-                col[0] ^= all ^ dan_xtime(a0 ^ a1);
-                col[1] ^= all ^ dan_xtime(a1 ^ a2);
-                col[2] ^= all ^ dan_xtime(a2 ^ a3);
-                col[3] ^= all ^ dan_xtime(a3 ^ a0);
+/* plain C: four blocks at a time */
+static void dan_aes_blocks_c(const dan_aes *a, const uint8_t *in, uint8_t *out, size_t blocks) {
+    uint8_t s[64], t[16];
+    while (blocks > 0) {
+        size_t k = blocks < 4 ? blocks : 4;
+        memset(s, 0, sizeof s);
+        memcpy(s, in, 16 * k);
+        for (int i = 0; i < 64; i++) s[i] ^= a->rk[i & 15];
+        for (int r = 1; r <= a->rounds; r++) {
+            dan_aes_sub64(s);
+            for (int b = 0; b < 4; b++) {
+                uint8_t *q = s + 16 * b;
+                memcpy(t, q, 16);
+                /* ShiftRows: the state is stored column by column */
+                for (int c = 0; c < 4; c++)
+                    for (int row = 0; row < 4; row++) q[4 * c + row] = t[4 * ((c + row) & 3) + row];
+                if (r == a->rounds) continue;
+                for (int c = 0; c < 4; c++) {
+                    uint8_t *col = q + 4 * c;
+                    uint8_t a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3], all = a0 ^ a1 ^ a2 ^ a3;
+                    col[0] ^= all ^ dan_xtime(a0 ^ a1);
+                    col[1] ^= all ^ dan_xtime(a1 ^ a2);
+                    col[2] ^= all ^ dan_xtime(a2 ^ a3);
+                    col[3] ^= all ^ dan_xtime(a3 ^ a0);
+                }
             }
+            for (int i = 0; i < 64; i++) s[i] ^= a->rk[16 * r + (i & 15)];
         }
-        for (int i = 0; i < 16; i++) s[i] ^= a->rk[16 * r + i];
+        memcpy(out, s, 16 * k);
+        in += 16 * k; out += 16 * k; blocks -= k;
     }
-    memcpy(out, s, 16);
+}
+
+#ifdef DAN_AES_X86
+DAN_AES_NI static void dan_aes_blocks_ni(const dan_aes *a, const uint8_t *in, uint8_t *out, size_t blocks) {
+    __m128i k[15];
+    int nr = a->rounds;
+    for (int r = 0; r <= nr; r++) k[r] = _mm_loadu_si128((const __m128i *)(a->rk + 16 * r));
+    for (; blocks >= 4; blocks -= 4, in += 64, out += 64) {
+        __m128i b0 = _mm_xor_si128(_mm_loadu_si128((const __m128i *)in), k[0]);
+        __m128i b1 = _mm_xor_si128(_mm_loadu_si128((const __m128i *)(in + 16)), k[0]);
+        __m128i b2 = _mm_xor_si128(_mm_loadu_si128((const __m128i *)(in + 32)), k[0]);
+        __m128i b3 = _mm_xor_si128(_mm_loadu_si128((const __m128i *)(in + 48)), k[0]);
+        for (int r = 1; r < nr; r++) {
+            b0 = _mm_aesenc_si128(b0, k[r]); b1 = _mm_aesenc_si128(b1, k[r]);
+            b2 = _mm_aesenc_si128(b2, k[r]); b3 = _mm_aesenc_si128(b3, k[r]);
+        }
+        _mm_storeu_si128((__m128i *)out, _mm_aesenclast_si128(b0, k[nr]));
+        _mm_storeu_si128((__m128i *)(out + 16), _mm_aesenclast_si128(b1, k[nr]));
+        _mm_storeu_si128((__m128i *)(out + 32), _mm_aesenclast_si128(b2, k[nr]));
+        _mm_storeu_si128((__m128i *)(out + 48), _mm_aesenclast_si128(b3, k[nr]));
+    }
+    for (; blocks > 0; blocks--, in += 16, out += 16) {
+        __m128i b = _mm_xor_si128(_mm_loadu_si128((const __m128i *)in), k[0]);
+        for (int r = 1; r < nr; r++) b = _mm_aesenc_si128(b, k[r]);
+        _mm_storeu_si128((__m128i *)out, _mm_aesenclast_si128(b, k[nr]));
+    }
+}
+#endif
+
+#ifdef DAN_AES_ARM
+DAN_AES_V8 static void dan_aes_blocks_v8(const dan_aes *a, const uint8_t *in, uint8_t *out, size_t blocks) {
+    uint8x16_t k[15];
+    int nr = a->rounds;
+    for (int r = 0; r <= nr; r++) k[r] = vld1q_u8(a->rk + 16 * r);
+    for (; blocks >= 4; blocks -= 4, in += 64, out += 64) {
+        uint8x16_t b0 = vld1q_u8(in), b1 = vld1q_u8(in + 16), b2 = vld1q_u8(in + 32), b3 = vld1q_u8(in + 48);
+        for (int r = 0; r < nr - 1; r++) {
+            b0 = vaesmcq_u8(vaeseq_u8(b0, k[r])); b1 = vaesmcq_u8(vaeseq_u8(b1, k[r]));
+            b2 = vaesmcq_u8(vaeseq_u8(b2, k[r])); b3 = vaesmcq_u8(vaeseq_u8(b3, k[r]));
+        }
+        vst1q_u8(out, veorq_u8(vaeseq_u8(b0, k[nr - 1]), k[nr]));
+        vst1q_u8(out + 16, veorq_u8(vaeseq_u8(b1, k[nr - 1]), k[nr]));
+        vst1q_u8(out + 32, veorq_u8(vaeseq_u8(b2, k[nr - 1]), k[nr]));
+        vst1q_u8(out + 48, veorq_u8(vaeseq_u8(b3, k[nr - 1]), k[nr]));
+    }
+    for (; blocks > 0; blocks--, in += 16, out += 16) {
+        uint8x16_t b = vld1q_u8(in);
+        for (int r = 0; r < nr - 1; r++) b = vaesmcq_u8(vaeseq_u8(b, k[r]));
+        vst1q_u8(out, veorq_u8(vaeseq_u8(b, k[nr - 1]), k[nr]));
+    }
+}
+#endif
+
+static const char *const dan_aes_names[3] = { "c", "aesni", "armv8" };
+
+/* 1 if the processor can run the variant (0 - c, 1 - aesni, 2 - armv8) */
+static int dan_aes_supported(int v) {
+    if (v == 0) return 1;
+#ifdef DAN_AES_X86
+    if (v == 1) {
+        unsigned int ea, eb, ec, ed;
+        return __get_cpuid(1, &ea, &eb, &ec, &ed) && (ec & (1u << 25)) != 0;
+    }
+#endif
+#ifdef DAN_AES_ARM
+    if (v == 2) {
+#if defined(__APPLE__)
+        return 1;
+#elif defined(__linux__)
+        return (getauxval(AT_HWCAP) & HWCAP_AES) != 0;
+#elif defined(_WIN32)
+        return IsProcessorFeaturePresent(30) != 0;   /* PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE */
+#else
+        return 0;
+#endif
+    }
+#endif
+    return 0;
+}
+
+static int dan_aes_cur = -1;
+
+static int dan_aes_variant(void) {
+    int v = __atomic_load_n(&dan_aes_cur, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    const char *want = getenv("DAN_AES");
+    if (want)
+        for (int i = 0; i < 3; i++)
+            if (strcmp(want, dan_aes_names[i]) == 0 && dan_aes_supported(i)) v = i;
+    if (v < 0) v = dan_aes_supported(1) ? 1 : dan_aes_supported(2) ? 2 : 0;
+    /* two threads may choose at once: both find the same variant */
+    __atomic_store_n(&dan_aes_cur, v, __ATOMIC_RELAXED);
+    return v;
+}
+
+/* independent blocks (ECB) with the given variant; the caller checks dan_aes_supported */
+static void dan_aes_blocks(const dan_aes *a, int variant, const uint8_t *in, uint8_t *out, size_t blocks) {
+#ifdef DAN_AES_X86
+    if (variant == 1) { dan_aes_blocks_ni(a, in, out, blocks); return; }
+#endif
+#ifdef DAN_AES_ARM
+    if (variant == 2) { dan_aes_blocks_v8(a, in, out, blocks); return; }
+#endif
+    (void)variant;
+    dan_aes_blocks_c(a, in, out, blocks);
 }
 
 /* WinZip AES: CTR mode with a little-endian counter starting at 1. */
-static void dan_aes_ctr_winzip(const dan_aes *a, uint8_t *data, size_t n) {
-    uint8_t ctr[16] = { 0 }, ks[16];
-    for (size_t off = 0; off < n; off += 16) {
-        for (int i = 0; i < 16; i++) if (++ctr[i] != 0) break;
-        dan_aes_encrypt(a, ctr, ks);
-        size_t k = n - off < 16 ? n - off : 16;
+static void dan_aes_ctr_winzip_v(const dan_aes *a, int variant, uint8_t *data, size_t n) {
+    uint8_t ctr[16] = { 0 }, buf[256], ks[256];
+    for (size_t off = 0; off < n; off += sizeof buf) {
+        size_t k = n - off < sizeof buf ? n - off : sizeof buf, blocks = (k + 15) / 16;
+        for (size_t b = 0; b < blocks; b++) {
+            for (int i = 0; i < 16; i++) if (++ctr[i] != 0) break;
+            memcpy(buf + 16 * b, ctr, 16);
+        }
+        dan_aes_blocks(a, variant, buf, ks, blocks);
         for (size_t i = 0; i < k; i++) data[off + i] ^= ks[i];
     }
+}
+
+static void dan_aes_ctr_winzip(const dan_aes *a, uint8_t *data, size_t n) {
+    dan_aes_ctr_winzip_v(a, dan_aes_variant(), data, n);
 }
 
 /* ---- ChaCha20 and Poly1305 (RFC 8439) ---- */
@@ -750,15 +973,20 @@ static void dan_chacha20_block(const uint8_t key[32], uint32_t counter, const ui
     for (int i = 0; i < 16; i++) dan_put_le32(out + 4 * i, x[i] + s[i]);
 }
 
-static void dan_chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce[12], uint8_t *data, size_t n) {
+/* false (data unchanged) if the 32-bit block counter would wrap around: the key stream
+   would repeat (RFC 8439 limits a message to 2^32 blocks of 64 bytes) */
+static bool dan_chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce[12], uint8_t *data, size_t n) {
+    if (n > 0 && (uint64_t)counter + (uint64_t)((n - 1) / 64) > 0xFFFFFFFFull) return false;
     uint8_t ks[64];
     for (size_t off = 0; off < n; off += 64, counter++) {
         dan_chacha20_block(key, counter, nonce, ks);
         size_t k = n - off < 64 ? n - off : 64;
         for (size_t i = 0; i < k; i++) data[off + i] ^= ks[i];
     }
+    return true;
 }
 
+/* Poly1305 with 26-bit limbs after poly1305-donna-32.h by Andrew Moon (public domain or MIT) */
 typedef struct { uint32_t r[5], h[5], pad[4]; size_t left; uint8_t buf[16]; int final; } dan_poly1305;
 
 static void dan_poly1305_init(dan_poly1305 *p, const uint8_t key[32]) {
@@ -873,6 +1101,33 @@ static bool dan_equal_ct(const uint8_t *a, const uint8_t *b, size_t n) {
     return d == 0;
 }
 
+/* ChaCha20-Poly1305 (RFC 8439): out gets the ciphertext (out may be msg) and the 16-byte tag
+   after it; false for a nonce that is not 12 bytes or a message longer than 2^32 - 1 blocks */
+static bool dan_aead_seal(const uint8_t key[32], const uint8_t *nonce, size_t nlen, const uint8_t *aad, size_t alen,
+                          const uint8_t *msg, size_t n, uint8_t *out) {
+    if (nlen != 12) return false;
+    if (n > 0 && (uint64_t)((n - 1) / 64) >= 0xFFFFFFFFull) return false;
+    memmove(out, msg, n);
+    dan_chacha20_xor(key, 1, nonce, out, n);
+    dan_aead_tag(key, nonce, aad, alen, out, n, out + n);
+    return true;
+}
+
+/* checks the tag in constant time, then decrypts into out (out may be ct); false and out
+   untouched for a wrong tag, a nonce that is not 12 bytes, a tag that is not 16 bytes
+   or a ciphertext longer than the counter allows */
+static bool dan_aead_open(const uint8_t key[32], const uint8_t *nonce, size_t nlen, const uint8_t *aad, size_t alen,
+                          const uint8_t *ct, size_t n, const uint8_t *tag, size_t tlen, uint8_t *out) {
+    if (nlen != 12 || tlen != 16) return false;
+    if (n > 0 && (uint64_t)((n - 1) / 64) >= 0xFFFFFFFFull) return false;
+    uint8_t t[16];
+    dan_aead_tag(key, nonce, aad, alen, ct, n, t);
+    if (!dan_equal_ct(t, tag, 16)) return false;
+    memmove(out, ct, n);
+    dan_chacha20_xor(key, 1, nonce, out, n);
+    return true;
+}
+
 /* ---- random bytes from the operating system ---- */
 
 #ifdef _WIN32
@@ -907,9 +1162,10 @@ static dan_bytes dan_encrypt_raw(const uint8_t *data, size_t n, dan_str password
     dan_random(out + 9, 28, line);                         /* salt and nonce */
     uint8_t key[32];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), out + 9, 16, DAN_ENC_ITER, key, 32);
-    memcpy(out + DAN_ENC_HEADER, data, n);
-    dan_chacha20_xor(key, 1, out + 25, out + DAN_ENC_HEADER, n);
-    dan_aead_tag(key, out + 25, out, DAN_ENC_HEADER, out + DAN_ENC_HEADER, n, out + DAN_ENC_HEADER + n);
+    if (!dan_aead_seal(key, out + 25, 12, out, DAN_ENC_HEADER, data, n, out + DAN_ENC_HEADER)) {
+        dan_free(out);
+        dan_error(DAN_MSG_ENC_TOO_BIG, line);
+    }
     return dan_bytes_wrap(out, (int64_t)(DAN_ENC_HEADER + n + 16));
 }
 
@@ -930,13 +1186,13 @@ static dan_bytes dan_decrypt(dan_bytes data, dan_str password, int line) {
        must not make the program work for seconds before reporting a wrong password */
     if (iter == 0 || iter > DAN_ENC_ITER) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
     size_t n = (size_t)data->len - DAN_ENC_HEADER - 16;
-    uint8_t key[32], tag[16];
+    uint8_t key[32];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), in + 9, 16, iter, key, 32);
-    dan_aead_tag(key, in + 25, in, DAN_ENC_HEADER, in + DAN_ENC_HEADER, n, tag);
-    if (!dan_equal_ct(tag, in + DAN_ENC_HEADER + n, 16)) dan_error(DAN_MSG_BAD_PASSWORD, line);
     uint8_t *out = dan_alloc(n + 1);
-    memcpy(out, in + DAN_ENC_HEADER, n);
-    dan_chacha20_xor(key, 1, in + 25, out, n);
+    if (!dan_aead_open(key, in + 25, 12, in, DAN_ENC_HEADER, in + DAN_ENC_HEADER, n, in + DAN_ENC_HEADER + n, 16, out)) {
+        dan_free(out);
+        dan_error(DAN_MSG_BAD_PASSWORD, line);
+    }
     return dan_bytes_wrap(out, (int64_t)n);
 }
 
@@ -1292,7 +1548,37 @@ static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
     return w.d;
 }
 
-/* ---- inflate ---- */
+/* ---- inflate ----
+
+   The decoder below (dan_inf_bits, dan_huff_build, the bit-by-bit part of
+   dan_huff_decode and dan_inflate_into) is an altered version of puff.c by
+   Mark Adler (zlib, contrib/puff, version 2.3): its functions bits(),
+   construct(), decode(), stored(), fixed() and dynamic(), rewritten for this
+   runtime (no longjmp, a growing output buffer, a table of codes up to
+   DAN_FAST_BITS long, the soft mode for damaged data, the limit against
+   "bombs"). The notice of puff.h, kept as its license requires:
+
+   Copyright (C) 2002-2013 Mark Adler, all rights reserved
+   version 2.3, 21 Jan 2013
+
+   This software is provided 'as-is', without any express or implied
+   warranty.  In no event will the author be held liable for any damages
+   arising from the use of this software.
+
+   Permission is granted to anyone to use this software for any purpose,
+   including commercial applications, and to alter it and redistribute it
+   freely, subject to the following restrictions:
+
+   1. The origin of this software must not be misrepresented; you must not
+      claim that you wrote the original software. If you use this software
+      in a product, an acknowledgment in the product documentation would be
+      appreciated but is not required.
+   2. Altered source versions must be plainly marked as such, and must not be
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+
+   Mark Adler    madler@alumni.caltech.edu
+*/
 
 typedef struct {
     const uint8_t *in; size_t inlen, pos;
@@ -2442,7 +2728,10 @@ static dan_bytes dan_xz_raw(const uint8_t *d, size_t n) {
     return dan_bytes_wrap(x.d, (int64_t)x.len);
 }
 
-/* ---- LZMA2 / xz decoder ---- */
+/* ---- LZMA2 / xz decoder: the LZMA part follows the reference decoder
+   LzmaSpec.cpp of the LZMA SDK by Igor Pavlov (public domain); the shift of
+   the range encoder above (dan_rce_shift) is the one of the LZMA SDK and
+   liblzma (public domain, 0BSD) ---- */
 
 typedef struct { const uint8_t *in; size_t pos, end; uint32_t range, code; int line; } dan_rcd;
 

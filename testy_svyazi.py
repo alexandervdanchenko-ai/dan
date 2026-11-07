@@ -58,6 +58,7 @@ import re
     (["sistema.py"], ТАБЛИЦЫ + ["test_sistema", "test_http", "test_pochta", "test_sqlite", "test_okna", "test_paketi"]),
     (["versiya.py"], ["test_llama", "test_sovmestimost", "test_obnovlenie", "test_sam.ТестыТаблицСреды", "test_sam.ТестыСамосборки"]),
     (["sreda/dannye.c"], ДАННЫЕ + ["test_katalog", "test_sam.ТестыТаблицСреды"]),
+    (["тесты_данные/*"], ["test_dannye"]),
     # плотные массивы: среда на C и их проверка и порождение в компиляторе на Дане
     (["sreda/massivy.c", "сам/типы.dan", "сам/проверка.dan", "сам/порождение.dan"], ["test_massivy"]),
     (["sreda/sistema.c"], ["test_sistema", "test_paketi", "test_katalog", "test_zadachi", "test_sam.ТестыТаблицСреды",
