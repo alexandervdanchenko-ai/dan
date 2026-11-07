@@ -479,7 +479,14 @@ class ТестыПорожденияТекста(unittest.TestCase):
             simple = os.path.join(место, "llama-simple" + (".exe" if os.name == "nt" else ""))
         if not simple or not os.path.isfile(simple):
             self.skipTest("нет llama-simple (переменная DAN_LLAMA_SIMPLE)")
-        р = subprocess.run([simple, "-m", Общее.модель, "-n", "24", ЗАПРОС], capture_output=True, timeout=300)
+        # библиотеки llama.cpp лежат рядом с llama-simple; путь сборки, записанный в нём, после
+        # переноса из кэша не существует, поэтому папка добавляется в пути поиска библиотек
+        папка = os.path.dirname(os.path.abspath(simple))
+        окружение = dict(os.environ)
+        for имя in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "PATH"):
+            окружение[имя] = папка + (os.pathsep + окружение[имя] if окружение.get(имя) else "")
+        р = subprocess.run([simple, "-m", Общее.модель, "-n", "24", ЗАПРОС], capture_output=True, timeout=300,
+                           env=окружение)
         self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
         вывод_ = р.stdout.decode("utf-8", "replace")
         начало = вывод_.index(ЗАПРОС) + len(ЗАПРОС)
