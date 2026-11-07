@@ -11,6 +11,9 @@
    Файл назван не «память.c»: «dan собрать память.dan» пишет рядом код C
    программы под этим именем. */
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE   /* sysconf(_SC_NPROCESSORS_ONLN) */
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
