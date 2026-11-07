@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -108,6 +110,66 @@ class ТестыЗамеров(unittest.TestCase):
             "  в: 1,5 мкс (разброс ±1,0%, выполнено раз: 100); в прошлый раз 1,5 мкс, разница 0,7% в пределах разброса",
         ])
         self.assertEqual(json.loads(json.dumps(новые))["а"], [1000.0, 1.0])
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыЭталонаПамяти(unittest.TestCase):
+    """Эталон скорости чтения памяти (замеры/память): программа на Дане и сверка на C.
+
+    Массивы появились после заморозки, поэтому программу переводит компилятор на Дане."""
+
+    ПАПКА = os.path.join(ПАПКА_ДАНА, "замеры", "память")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.п = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def проверить_вывод(self, вывод_, гб_весов):
+        self.assertRegex(вывод_, r"проходов: 3, ГБ/с: наименьшая [\d.]+, медиана [\d.]+, наибольшая [\d.]+")
+        скорость = float(re.search(r"скорость чтения: ([\d.]+) ГБ/с", вывод_).group(1))
+        вес, предел = re.search(r"предел для ([\d.]+) ГБ весов: ([\d.]+) слов/с", вывод_).groups()
+        self.assertEqual(float(вес), float(гб_весов))
+        предел = float(предел)
+        self.assertGreater(скорость, 0)
+        self.assertAlmostEqual(предел, скорость / float(гб_весов), delta=0.1)
+
+    def test_программа_на_дане(self):
+        import sam_kompilyator
+        программа = os.path.join(self.п, "память.dan")
+        shutil.copy(os.path.join(self.ПАПКА, "память.dan"), программа)
+        файл = os.path.join(self.п, "веса.bin")
+        with open(файл, "wb") as ф:
+            ф.write(bytes(3 * 16384 + 100))
+        for аргументы, строк in ((["0.001", "2", "3"], 61), (["1", "4.1", "3", файл], 3)):
+            р = subprocess.run([sam_kompilyator.исполняемый(), "запустить", программа, *аргументы],
+                               capture_output=True, env=dict(sam_kompilyator.среда(), DAN_POTOKI="2"),
+                               timeout=600, cwd=self.п)
+            вывод_ = р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace")
+            self.assertEqual(р.returncode, 0, вывод_)
+            self.assertIn(f"{строк} строк по 4096 чисел дроб32", вывод_)
+            self.assertIn("потоков: 2", вывод_)
+            self.проверить_вывод(вывод_, аргументы[1])
+        р = subprocess.run([sam_kompilyator.исполняемый(), "запустить", программа, "0"],
+                           capture_output=True, env=sam_kompilyator.среда(), timeout=600, cwd=self.п)
+        self.assertEqual(р.returncode, 2)
+        self.assertIn("нужны буфер не меньше 16 КБ", р.stderr.decode("utf-8", "replace"))
+
+    def test_сверка_на_c(self):
+        команда = dan.команда_компилятора()
+        исполняемый = os.path.join(self.п, "чтение_си.exe")
+        потоки = [] if os.name == "nt" else ["-pthread"]
+        р = subprocess.run([*команда, "-std=c11", "-O3", os.path.join(self.ПАПКА, "чтение_си.c"), "-o", исполняемый,
+                            *потоки], capture_output=True, text=True, timeout=300)
+        self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
+        р = subprocess.run([исполняемый, "0.001", "2", "3"], capture_output=True, timeout=300,
+                           env=dict(os.environ, DAN_POTOKI="2"))
+        вывод_ = р.stdout.decode("utf-8", "replace")
+        self.assertEqual(р.returncode, 0, вывод_)
+        self.assertIn("потоков: 2", вывод_)
+        self.проверить_вывод(вывод_, "2")
 
 
 if __name__ == "__main__":
