@@ -7,6 +7,10 @@
 системные папки: gcc, clang и Python из системы ему не видны, программы
 собираются компилятором zig из поставки. Сама проверка написана на Python, но
 dan.exe его не использует.
+
+Рядом с dan.exe должна лежать библиотека llama.cpp для модуля «модели»: проверка
+загружает llama.dll, варианты для процессора ggml-cpu-*.dll и печатает возможности
+процессора (llama_print_system_info).
 """
 
 import glob
@@ -37,6 +41,45 @@ def среда(dan):
     return с
 
 
+# Загрузка библиотеки llama.cpp в отдельном процессе: сбой загрузки не останавливает проверку.
+ПРОБА_LLAMA = r"""
+import ctypes, os, sys
+папка = sys.argv[1]
+llama = ctypes.CDLL(os.path.join(папка, "llama.dll"))
+ggml = ctypes.CDLL(os.path.join(папка, "ggml.dll"))
+ggml.ggml_backend_load_all_from_path.argtypes = [ctypes.c_char_p]
+ggml.ggml_backend_load_all_from_path(папка.encode("utf-8"))
+ggml.ggml_backend_dev_count.restype = ctypes.c_size_t
+llama.llama_print_system_info.restype = ctypes.c_char_p
+print("устройств:", ggml.ggml_backend_dev_count())
+print(llama.llama_print_system_info().decode("utf-8", "replace"))
+sys.exit(0 if ggml.ggml_backend_dev_count() > 0 else 1)
+"""
+
+
+def проверить_llama(dan, с):
+    """Сообщение об ошибке или None: библиотека llama.cpp рядом с dan загружается."""
+    import versiya
+    папка = os.path.dirname(os.path.abspath(dan))
+    имя = "llama.dll" if os.name == "nt" else "libllama.so"
+    if not os.path.isfile(os.path.join(папка, имя)):
+        return f"рядом с {dan} нет библиотеки llama.cpp ({имя})"
+    варианты = glob.glob(os.path.join(папка, "ggml-cpu-*.dll" if os.name == "nt" else "libggml-cpu-*.so"))
+    if not варианты:
+        return "рядом с dan нет вариантов для процессора ggml-cpu-*"
+    with open(os.path.join(папка, "version.txt"), encoding="utf-8") as ф:
+        метка = ф.readline().strip()
+    if метка != versiya.LLAMA_CPP:
+        return f"библиотека llama.cpp {метка}, а нужна {versiya.LLAMA_CPP}"
+    р = subprocess.run([sys.executable, "-c", ПРОБА_LLAMA, папка], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=с, timeout=300)
+    print(f"llama.cpp {метка}, вариантов для процессора: {len(варианты)}")
+    print(р.stdout.strip())
+    if р.returncode != 0:
+        return f"библиотека llama.cpp не загрузилась (код {р.returncode}):\n{р.stdout}{р.stderr}"
+    return None
+
+
 def main(аргументы):
     if len(аргументы) != 1:
         print(__doc__.strip())
@@ -50,6 +93,11 @@ def main(аргументы):
                 return 2
     ошибки = []
     проверено = 0
+    if os.name == "nt":
+        о = проверить_llama(dan, с)
+        if о:
+            ошибки.append(о)
+        проверено += 1
     with tempfile.TemporaryDirectory(prefix="dan_postavka_") as папка:
         def запустить(*команда, ввод="", cwd=папка):
             return subprocess.run(list(команда), capture_output=True, text=True, encoding="utf-8",
