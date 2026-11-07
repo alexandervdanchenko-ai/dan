@@ -288,9 +288,9 @@ class ТестыОшибокМоделей(unittest.TestCase):
         компилятор = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
         if not компилятор:
             self.skipTest("нет компилятора C для пробной библиотеки")
-        папка = os.path.join(Общее.папка, имя)
+        папка = os.path.join(Общее.папка, имя)          # латиницей: MinGW не пишет файлы с русскими именами
         os.makedirs(папка, exist_ok=True)
-        исходник = os.path.join(папка, "ложная.c")
+        исходник = os.path.join(папка, "lozhnaya.c")
         with open(исходник, "w", encoding="utf-8") as ф:
             ф.write(текст)
         выход = os.path.join(папка, ИМЯ_БИБЛИОТЕКИ)
@@ -299,7 +299,7 @@ class ТестыОшибокМоделей(unittest.TestCase):
         return выход
 
     def test_библиотека_без_функций(self):
-        путь = self.собрать_библиотеку("int nichego_net(void) { return 1; }\n", "пустая")
+        путь = self.собрать_библиотеку("int nichego_net(void) { return 1; }\n", "pustaya")
         код, итог, весь = выполнить(["загрузка", Общее.модель], {"DAN_LLAMA": путь})
         self.assertEqual(код, 0, весь)
         self.assertIn("несовместима", итог.get("ошибка", ""), весь)
@@ -320,7 +320,7 @@ class ТестыОшибокМоделей(unittest.TestCase):
                  "llama_vocab_is_eog", "llama_chat_apply_template", "llama_model_chat_template", "llama_n_ctx",
                  "llama_n_batch", "llama_log_set"]
         текст += ["void *%s(void) { return 0; }" % и for и in имена]
-        путь = self.собрать_библиотеку("\n".join(текст) + "\n", "другая")
+        путь = self.собрать_библиотеку("\n".join(текст) + "\n", "drugaya")
         код, итог, весь = выполнить(["загрузка", Общее.модель], {"DAN_LLAMA": путь})
         self.assertEqual(код, 0, весь)
         self.assertIn("другое устройство структур", итог.get("ошибка", ""), весь)
