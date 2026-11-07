@@ -21,6 +21,10 @@ class ТестыРазбора(unittest.TestCase):
         self.assertEqual(са.предупреждения(ВЫВОД), {("-Wanalyzer-null-dereference", "dan_zct_push"),
                                                      ("-Wanalyzer-malloc-leak", "dan_sb_region")})
 
+    def test_типографские_кавычки(self):
+        вывод_ = "п.c: In function ‘dan_kill’:\nп.c:1:2: warning: dereference of NULL ‘p’ [CWE-476] [-Wanalyzer-null-dereference]\n"
+        self.assertEqual(са.предупреждения(вывод_), {("-Wanalyzer-null-dereference", "dan_kill")})
+
     def test_обычные_предупреждения_не_считаются(self):
         self.assertEqual(са.предупреждения("а.c:1:1: warning: unused [-Wunused-variable]\n"), set())
 

@@ -26,7 +26,8 @@ import tempfile
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
 ИЗВЕСТНЫЕ = os.path.join(ПАПКА, "анализ", "известные_предупреждения.txt")
 
-_ФУНКЦИЯ = re.compile(r"In function '([^']+)'")
+# gcc берёт кавычки по настройке языка: прямые 'f' или типографские ‘f’
+_ФУНКЦИЯ = re.compile(r"In function ['‘]([^'’]+)['’]")
 _ПРЕДУПРЕЖДЕНИЕ = re.compile(r"^.*?:\d+:\d+: warning: .*\[(-Wanalyzer[a-z-]*)\]\s*$")
 
 
@@ -115,7 +116,7 @@ def main(аргументы):
         путь, вывод_ = найдено[(вид, функция)]
         print(f"\nНОВОЕ: {вид} в функции {функция} (программа {os.path.relpath(путь, ПАПКА)})")
         for строка in вывод_.splitlines():
-            if f"In function '{функция}'" in строка:
+            if _ФУНКЦИЯ.search(строка) and _ФУНКЦИЯ.search(строка).group(1) == функция:
                 начало = вывод_.splitlines().index(строка)
                 print("\n".join(вывод_.splitlines()[начало:начало + 40]))
                 break
