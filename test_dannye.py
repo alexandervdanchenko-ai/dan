@@ -247,6 +247,18 @@ class ТестыДанных(unittest.TestCase):
         self.вывод('вывод(извлечь_архив("py.zip", "из_py"))\nвывод(прочитать("из_py/папка/внутри.txt"))',
                    ['["папка/внутри.txt", "корень.txt"]', "вложенный файл"])
 
+    def test_среда_данных_без_неявных_объявлений(self):
+        # clang и gcc 14 не собирают вызов необъявленной функции (так было с lstat в Linux)
+        код = dan.перевести('создать_архив("а.zip", ["а"], "б")\nвывод(извлечь_архив("а.zip", "в", "б"))')
+        путь_c = self.путь("p.c")
+        with open(путь_c, "w", encoding="utf-8") as ф:
+            ф.write(код)
+        сборка = subprocess.run([*dan.команда_компилятора(), *[ф for ф in dan.ФЛАГИ_ОБЩИЕ if ф != "-w"],
+                                 "-Werror=implicit-function-declaration",
+                                 "-c", путь_c, "-o", self.путь("p.o")],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+        self.assertEqual(сборка.returncode, 0, сборка.stderr)
+
     def test_опасные_имена_в_архиве(self):
         with zipfile.ZipFile(self.путь("злой.zip"), "w") as з:
             з.writestr("../вне.txt", "плохо")
