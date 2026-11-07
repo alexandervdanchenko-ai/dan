@@ -1,7 +1,8 @@
 ﻿# Установка языка Дан на компьютер с Windows.
 # Создаёт папку D:\проекты\Дан (если диска D нет - папку «проекты\Дан» в папке
 # пользователя), устанавливает Python, компилятор C (WinLibs), упаковщик UPX и
-# Git, загружает проект из GitHub и проверяет его тестами.
+# Git, загружает проект из GitHub, библиотеку llama.cpp для модуля «модели» и
+# проверяет проект тестами.
 # Другую папку можно задать переменной окружения DAN_FOLDER.
 #
 # Запуск (в обычном окне PowerShell):
@@ -91,6 +92,41 @@ if (Test-Path (Join-Path $Папка ".git")) {
 $код = Выполнить python -m pip install --upgrade --quiet ziglang wasmtime
 if ($код -ne 0) {
     Write-Host "Не удалось установить zig и wasmtime: сборка для браузера и других систем будет недоступна, остальное работает." -ForegroundColor Yellow
+}
+
+Шаг "Загружаю библиотеку llama.cpp для модуля «модели»"
+# Архив llama-<метка>-windows-x64.zip из выпуска Дана этой версии, со сверкой SHA-256 по
+# SHA256SUMS.txt выпуска, - в папку пользователя %LOCALAPPDATA%\Dan\llama, где её находят
+# программы на Дане. Без неё работает всё, кроме модуля «модели».
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $env:PYTHONUTF8 = "1"
+    $версияДана = (& python -c "import sys; sys.path.insert(0, sys.argv[1]); import versiya; print(versiya.ВЕРСИЯ)" $Папка | Out-String).Trim()
+    $метка = (& python -c "import sys; sys.path.insert(0, sys.argv[1]); import versiya; print(versiya.LLAMA_CPP)" $Папка | Out-String).Trim()
+    if (-not $метка) { throw "в versiya.py нет метки llama.cpp" }
+    $архив = "llama-$метка-windows-x64.zip"
+    $адрес = "https://github.com/alexandervdanchenko-ai/dan/releases/download/v$версияДана"
+    $временная = Join-Path $env:TEMP "dan-llama"
+    if (Test-Path $временная) { Remove-Item -Recurse -Force $временная }
+    New-Item -ItemType Directory -Force -Path $временная | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri "$адрес/SHA256SUMS.txt" -OutFile (Join-Path $временная "SHA256SUMS.txt")
+    $ожидается = ""
+    foreach ($строка in Get-Content (Join-Path $временная "SHA256SUMS.txt")) {
+        $части = $строка.Trim() -split "\s+"
+        if ($части.Count -eq 2 -and $части[1].TrimStart("*") -eq $архив) { $ожидается = $части[0].ToLower() }
+    }
+    if (-not $ожидается) { throw "в выпуске Дана $версияДана нет архива $архив" }
+    Invoke-WebRequest -UseBasicParsing -Uri "$адрес/$архив" -OutFile (Join-Path $временная $архив)
+    $получено = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $временная $архив)).Hash.ToLower()
+    if ($получено -ne $ожидается) { throw "контрольная сумма $архив не совпадает с SHA256SUMS.txt" }
+    $llama = Join-Path $env:LOCALAPPDATA "Dan\llama"
+    if (Test-Path $llama) { Remove-Item -Recurse -Force $llama }
+    Expand-Archive -Path (Join-Path $временная $архив) -DestinationPath $llama
+    Remove-Item -Recurse -Force $временная
+    Write-Host "Библиотека llama.cpp $метка установлена в $llama"
+} catch {
+    Write-Host "Библиотека llama.cpp не загружена: $($_.Exception.Message)." -ForegroundColor Yellow
+    Write-Host "Модуль «модели» будет недоступен, остальное работает. Библиотеку можно собрать сценарием поставка\собрать_llama.py." -ForegroundColor Yellow
 }
 
 Шаг "Проверяю работу языка"

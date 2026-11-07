@@ -1,9 +1,14 @@
 """Сборка поставки Дана для Windows: dan.exe без Python, компилятор zig рядом,
-установщик и переносной архив.
+библиотека llama.cpp для модуля «модели», установщик и переносной архив.
 
 Запускается в Windows (на GitHub - задачей «Поставка»):
 
-    python поставка/собрать.py
+    python поставка/собрать.py [--llama=llama-<метка>-windows-x64.zip]
+
+Архив библиотеки llama.cpp собирает сценарий поставка/собрать_llama.py (на GitHub - задание
+«Библиотека llama.cpp»); без --llama=... он запускается отсюда. Её файлы (llama.dll, ggml*.dll,
+version.txt, лицензия) кладутся рядом с dan.exe: установщик добавляет эту папку в PATH, и
+программы на Дане находят llama.dll системным поиском библиотек.
 
 Результат в папке «поставка/готово»:
     dan/                              - готовая папка Дана (dan.exe, zig, примеры, справочник);
@@ -124,6 +129,30 @@ def добавить_учебник_и_редактор():
         shutil.copy(готовый, os.path.join(ПАПКА, os.path.basename(готовый)))
 
 
+def добавить_llama(архив):
+    шаг("библиотека llama.cpp")
+    import versiya
+    import zipfile
+    if архив is None:
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("sobrat_llama", os.path.join(КОРЕНЬ, "поставка", "собрать_llama.py"))
+        сборка = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(сборка)
+        работа = tempfile.mkdtemp(prefix="dan_llama_")
+        if сборка.main(["--в=" + работа]) != 0:
+            raise SystemExit("не удалось собрать библиотеку llama.cpp")
+        архив = os.path.join(работа, f"llama-{versiya.LLAMA_CPP}-{сборка.платформа()}.zip")
+    имя = os.path.basename(архив)
+    if not имя.startswith(f"llama-{versiya.LLAMA_CPP}-windows-"):
+        raise SystemExit(f"архив {имя} - не llama.cpp {versiya.LLAMA_CPP} для Windows")
+    with zipfile.ZipFile(архив) as з:
+        имена = з.namelist()
+        if "llama.dll" not in имена or any("/" in и or "\\" in и or и.startswith(".") for и in имена):
+            raise SystemExit(f"в архиве {имя} нет llama.dll или есть вложенные папки")
+        з.extractall(ПАПКА)
+    print(", ".join(sorted(имена)))
+
+
 def найти_iscc():
     for путь in (shutil.which("iscc"), r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
                  r"C:\Program Files\Inno Setup 6\ISCC.exe"):
@@ -145,12 +174,20 @@ def собрать_установщик(версия):
     return os.path.join(ГОТОВО, f"dan-{версия}-setup.exe")
 
 
-def main():
+def main(аргументы):
     import versiya
     версия = versiya.ВЕРСИЯ
+    архив_llama = None
+    for а in аргументы:
+        if а.startswith("--llama="):
+            архив_llama = os.path.abspath(а[len("--llama="):])
+        else:
+            print(__doc__.strip())
+            return 2
     shutil.rmtree(ГОТОВО, ignore_errors=True)
     os.makedirs(ГОТОВО)
     собрать_dan_exe()
+    добавить_llama(архив_llama)
     добавить_zig()
     добавить_файлы()
     добавить_учебник_и_редактор()
@@ -164,4 +201,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

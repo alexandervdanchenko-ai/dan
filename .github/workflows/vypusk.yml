@@ -1,7 +1,9 @@
 # Выпуск версии. Запускается кнопкой «Run workflow» на странице Actions -> «Выпуск»
 # (или отправкой метки вида v1.2). Номер версии берётся из versiya.py, описание -
 # из файла «выпуски/v<номер>.md». Собираются установщик и переносной архив для
-# Windows; создаются метка версии и страница выпуска с файлами для скачивания.
+# Windows и архивы библиотеки llama.cpp для модуля «модели» (llama-<метка>-<система>.zip,
+# их скачивает «dan модели установить»); создаются метка версии и страница выпуска с файлами
+# для скачивания.
 # Если выпуск уже есть, его описание и файлы обновляются.
 name: Выпуск
 
@@ -14,8 +16,13 @@ permissions:
   contents: write
 
 jobs:
+  llama:
+    name: Библиотека llama.cpp
+    uses: ./.github/workflows/llama.yml
+
   vypusk:
     name: Страница выпуска
+    needs: llama
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -25,8 +32,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: llama-*
+          path: llama-vypusk
+          merge-multiple: true
       - name: Сборка поставки
-        run: python поставка/собрать.py
+        shell: bash
+        run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
       - name: Создать или обновить выпуск
         shell: python
         env:
@@ -48,6 +61,12 @@ jobs:
           файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-setup.exe"))
           файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-windows.zip"))
           файлы += glob.glob(os.path.join("редактор", "*.vsix"))
+          # библиотека llama.cpp для четырёх систем: её берут «dan модели установить» и установщик
+          llama = sorted(glob.glob(os.path.join("llama-vypusk", f"llama-{versiya.LLAMA_CPP}-*.zip")))
+          if len(llama) != 4:
+              print(f"::error title=Нет архивов llama.cpp::нужны 4 архива llama-{versiya.LLAMA_CPP}-*.zip, есть: {llama}")
+              raise SystemExit(1)
+          файлы += llama
           # контрольные суммы: файл SHA256SUMS.txt и таблица в описании выпуска
           import hashlib
           суммы = []

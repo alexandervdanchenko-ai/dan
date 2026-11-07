@@ -274,8 +274,66 @@ jobs:
                          cwd=папка, check=True)
           subprocess.run([os.path.join(папка, "примеры", "факториал.exe")], cwd=папка, check=True)
 
+  llama:
+    # библиотека llama.cpp для модуля «модели» на четырёх системах (из кэша, если версия не менялась)
+    name: Библиотека llama.cpp
+    uses: ./.github/workflows/llama.yml
+
+  llama-proverka:
+    # «dan модели установить» ставит библиотеку из архива так же, как из выпуска (адрес выпуска
+    # заменяет DAN_VYPUSKI), «dan модели проверить» находит её, загружает и выбирает вариант для процессора
+    name: Модели - установка и проверка llama.cpp (${{ matrix.platforma }})
+    needs: llama
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platforma: linux-x64
+          - os: ubuntu-24.04-arm
+            platforma: linux-arm64
+          - os: macos-latest
+            platforma: macos-arm64
+          - os: windows-latest
+            platforma: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-${{ matrix.platforma }}
+          path: llama-vypusk
+      - name: Контрольные суммы, как в выпуске
+        shell: bash
+        run: |
+          cd llama-vypusk
+          (sha256sum *.zip || shasum -a 256 *.zip) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Сборка из семени (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: sh semya/sobrat.sh
+      - name: Сборка из семени (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: semya\sobrat.cmd
+      - name: dan модели установить, dan модели проверить
+        shell: bash
+        run: |
+          papka="$PWD/llama-vypusk"
+          if [ "$RUNNER_OS" = "Windows" ]; then papka="$(cygpath -m "$papka")"; fi
+          export DAN_VYPUSKI="file:///${papka#/}"
+          semya/dan модели проверить && { echo "библиотека найдена до установки"; exit 1; } || true
+          semya/dan модели установить
+          semya/dan модели проверить | tee proverka.txt
+          grep -q "Вариант для процессора: .*ggml-cpu-" proverka.txt
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat proverka.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
   postavka:
     name: Поставка для Windows (установщик без Python)
+    needs: llama
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -285,8 +343,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-windows-x64
+          path: llama-vypusk
       - name: Сборка поставки
-        run: python поставка/собрать.py
+        # DLL библиотеки llama.cpp из задания «Библиотека llama.cpp» кладутся рядом с dan.exe
+        shell: bash
+        run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
       - name: Установка без окон и проверка установленного Дана
         shell: python
         run: |
