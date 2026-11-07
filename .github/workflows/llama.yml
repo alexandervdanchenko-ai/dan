@@ -17,11 +17,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux - на старой Ubuntu: библиотека, собранная с glibc 22.04, работает и на новых системах
+          # Linux x86-64 - на старой Ubuntu: библиотека, собранная с glibc 22.04, работает и на новых
+          # системах. ARM - на 24.04 с gcc 14 (как в выпусках llama.cpp): gcc 11 из 22.04 не знает
+          # наборов команд armv9.2 (SME), под которые собираются варианты для процессора
           - os: ubuntu-22.04
             platforma: linux-x64
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             platforma: linux-arm64
+            gcc14: true
           - os: macos-latest
             platforma: macos-arm64
           - os: windows-latest
@@ -45,6 +48,13 @@ jobs:
         with:
           path: llama-gotovo
           key: llama-${{ steps.versiya.outputs.metka }}-${{ matrix.platforma }}-${{ hashFiles('поставка/собрать_llama.py') }}
+      - name: gcc 14 (Linux ARM)
+        if: steps.kesh.outputs.cache-hit != 'true' && matrix.gcc14
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
       - name: Сборка (если нет в кэше)
         if: steps.kesh.outputs.cache-hit != 'true'
         shell: bash
