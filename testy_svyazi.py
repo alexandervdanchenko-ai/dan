@@ -82,6 +82,7 @@ import re
     (["zadachnik.py", "uchebnik.py", "учебник/*"], ["test_uchebnik", "test_sam.ТестыСамосборки"]),
     (["fazzing.py", "фаззинг/*"], ["test_fazzing", "test_sverka_sborok"]),
     (["sverka_sborok.py"], ["test_sverka_sborok"]),
+    (["staticheskiy_analiz.py", "анализ/*"], ["test_staticheskiy_analiz"]),
     (["sverka_vychisleniy.py"], ["test_sverka"]),
     (["ustoychivost.py"], ["test_ustoychivost", "test_formatirovanie"]),
     (["zamery.py", "замеры/*"], ["test_zamery"]),

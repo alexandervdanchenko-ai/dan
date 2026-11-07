@@ -1,0 +1,27 @@
+# Статический анализ кода C, который создаёт Дан (среда выполнения и порождённый код):
+# анализатор gcc (-fanalyzer) на программах каталога и примерах. Проверка падает только
+# на предупреждении, которого нет в анализ/известные_предупреждения.txt.
+name: Статический анализ
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  analiz:
+    name: Статический анализ кода C (gcc -fanalyzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Версия gcc
+        run: gcc --version | head -1
+      - name: Анализ
+        run: python staticheskiy_analiz.py
