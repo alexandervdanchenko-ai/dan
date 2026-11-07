@@ -22,6 +22,7 @@ import tempfile
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 КАТАЛОГ = os.path.join(КОРЕНЬ, "каталог")
+sys.path.insert(0, КОРЕНЬ)   # modeli.py (версия llama.cpp) - в корне проекта
 
 
 def прочитать(путь):
