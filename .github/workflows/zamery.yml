@@ -85,6 +85,9 @@ jobs:
             echo "== си $t" >> pamyat.txt
             DAN_POTOKI=$t ./chtenie_si "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
           done
+          # матвек в точном порядке сложения языка (без «приближённо»), все потоки
+          echo "== дан-точно" >> pamyat.txt
+          замеры/память/память "$GB" "$GB_VESOV" 9 - точно | tee -a pamyat.txt
       - name: Таблицы в итог задания
         shell: bash
         run: |
@@ -124,7 +127,8 @@ jobs:
           kto = ""
           for s in open("pamyat.txt", encoding="utf-8").read().splitlines():
               if s.startswith("== "):
-                  kto = "Дан (память.dan)" if s.split()[1] == "дан" else "C (чтение_си.c)"
+                  kto = {"дан": "Дан, приближённо (память.dan)", "дан-точно": "Дан, точно (память.dan)",
+                         "си": "C, простое чтение (чтение_си.c)"}[s.split()[1]]
               m = re.match(r"буфер: ([\d.]+) ГБ", s)
               if m:
                   buf = m.group(1)
