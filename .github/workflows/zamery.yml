@@ -79,12 +79,18 @@ jobs:
           # латинское имя: gcc в Windows не всегда открывает файлы с русскими именами
           cp замеры/память/чтение_си.c chtenie_si.c
           gcc -std=c11 -O3 chtenie_si.c -o chtenie_si $P || clang -std=c11 -O3 chtenie_si.c -o chtenie_si $P
-          for t in 1 ""; do
-            echo "== дан $t" >> pamyat.txt
-            DAN_POTOKI=$t замеры/память/память "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
-            echo "== си $t" >> pamyat.txt
-            DAN_POTOKI=$t ./chtenie_si "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
-          done
+          for i in 1 2; do
+          for y in "" c; do
+          for m in "" точно; do
+            echo "== си" >> pamyat.txt
+            ./chtenie_si "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
+            echo "== дан $y $m" | tee -a pamyat.txt
+            DAN_YADRA=$y замеры/память/память "$GB" "$GB_VESOV" 9 - $m | tee -a pamyat.txt
+          done; done; done
+          DAN_POTOKI=1 ./b zamer
+          DAN_YADRA=c DAN_POTOKI=1 замеры/память/память 0.064 1 9 - точно
+          DAN_POTOKI=1 замеры/память/память 0.064 1 9 - точно
+          DAN_POTOKI=1 ./chtenie_si 0.064 1 9
       - name: Таблицы в итог задания
         shell: bash
         run: |
@@ -124,7 +130,7 @@ jobs:
           kto = ""
           for s in open("pamyat.txt", encoding="utf-8").read().splitlines():
               if s.startswith("== "):
-                  kto = "Дан (память.dan)" if s.split()[1] == "дан" else "C (чтение_си.c)"
+                  kto = s[3:]
               m = re.match(r"буфер: ([\d.]+) ГБ", s)
               if m:
                   buf = m.group(1)
