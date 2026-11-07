@@ -1,0 +1,21 @@
+# Известные предупреждения анализатора gcc (-fanalyzer) на коде C, который создаёт Дан.
+# Проверка: python staticheskiy_analiz.py. Строка: вид функция # почему это не ошибка.
+# Разобраны 07.11.2026 на программах каталога и примерах (76 программ, 9 разных мест).
+
+# Область для мелких блоков выделяется один раз и намеренно не возвращается системе (её память
+# используется снова); анализатор видит только выровненный указатель и считает исходный потерянным.
+-Wanalyzer-malloc-leak dan_sb_region # область мелких блоков живёт до конца программы
+
+# Анализатор не знает, что при нехватке памяти dan_realloc вызывает dan_error, а она не возвращается
+# (exit или longjmp), и что у нулевого указателя нет класса мелких блоков (dan_sb_class(NULL) = 0).
+-Wanalyzer-malloc-leak dan_buf_add # прежний блок освобождает dan_realloc; при нехватке памяти - dan_error
+-Wanalyzer-null-dereference dan_zct_push # dan_realloc не возвращает NULL: при нехватке памяти - dan_error
+-Wanalyzer-null-dereference dan_kill # dan_realloc не возвращает NULL: при нехватке памяти - dan_error
+-Wanalyzer-null-dereference dan_buf_add # dan_realloc не возвращает NULL: при нехватке памяти - dan_error
+-Wanalyzer-null-dereference dan_free # путь через dan_realloc с нулевым результатом невозможен (dan_error)
+-Wanalyzer-null-dereference dan_inf_put # dan_realloc не возвращает NULL: при нехватке памяти - dan_error
+-Wanalyzer-null-dereference dan_inf_codes # буфер вывода растёт через dan_realloc, который не возвращает NULL
+
+# Все 64 слова расписания SHA-256 заполняются до чтения (16 из блока, 48 из предыдущих);
+# анализатор не прослеживает границы цикла.
+-Wanalyzer-use-of-uninitialized-value dan_sha256_block # w[0..63] заполняется до чтения
