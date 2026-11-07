@@ -18,6 +18,7 @@ import unittest
 import zipfile
 
 import sam_kompilyator
+import modeli
 import versiya
 
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
@@ -39,16 +40,16 @@ def имя_библиотеки():
 class ТестыВерсии(unittest.TestCase):
 
     def test_метка_в_одном_месте(self):
-        self.assertRegex(versiya.LLAMA_CPP, r"^b\d+$")
+        self.assertRegex(modeli.ВЕРСИЯ_LLAMA, r"^b\d+$")
         with open(os.path.join(ПАПКА, "сам", "среда.dan"), encoding="utf-8") as ф:
-            self.assertIn(f'общий функ версия_llama() -> стр {{ вернуть "{versiya.LLAMA_CPP}" }}', ф.read())
+            self.assertIn(f'общий функ версия_llama() -> стр {{ вернуть "{modeli.ВЕРСИЯ_LLAMA}" }}', ф.read())
         # больше нигде метка не записана: сценарии и CI берут её из versiya.py
         for путь in (os.path.join(ПАПКА, "поставка", "собрать_llama.py"),
                      os.path.join(ПАПКА, ".github", "workflows", "llama.yml"),
                      os.path.join(ПАПКА, ".github", "workflows", "vypusk.yml"),
                      os.path.join(ПАПКА, "сам", "модели_поставка.dan")):
             with open(путь, encoding="utf-8") as ф:
-                self.assertNotIn(versiya.LLAMA_CPP, ф.read(), путь)
+                self.assertNotIn(modeli.ВЕРСИЯ_LLAMA, ф.read(), путь)
 
     def test_сборка_только_для_процессора(self):
         import importlib.util
@@ -96,7 +97,7 @@ class ТестыКоманд(unittest.TestCase):
         """Папка «выпуска» (имя латиницей: curl в Windows получает адрес в кодировке системы) с архивом llama-<метка>-<система>.zip и SHA256SUMS.txt; адрес file:///."""
         выпуск = os.path.join(self.п, "vypusk")
         os.makedirs(выпуск, exist_ok=True)
-        имя = f"llama-{versiya.LLAMA_CPP}-{платформа()}.zip"
+        имя = f"llama-{modeli.ВЕРСИЯ_LLAMA}-{платформа()}.zip"
         путь = os.path.join(выпуск, имя)
         with zipfile.ZipFile(путь, "w") as з:
             for и, содержимое in файлы.items():
@@ -118,7 +119,7 @@ class ТестыКоманд(unittest.TestCase):
         self.assertEqual(код, 2)
         self.assertIn("дан модели установить", вывод)
         self.assertIn("DAN_LLAMA", вывод)
-        self.assertIn(versiya.LLAMA_CPP, вывод)
+        self.assertIn(modeli.ВЕРСИЯ_LLAMA, вывод)
 
     def test_неверный_путь_в_DAN_LLAMA(self):
         код, вывод = self.дан_("проверить", DAN_LLAMA=os.path.join(self.п, "нет", имя_библиотеки()))
@@ -136,7 +137,7 @@ class ТестыКоманд(unittest.TestCase):
 
     def test_установка_и_проверка_поддельной_библиотеки(self):
         self.нужен_curl()
-        адрес = self.выпуск({имя_библиотеки(): b"not a library", "version.txt": f"{versiya.LLAMA_CPP}\nabc\n",
+        адрес = self.выпуск({имя_библиотеки(): b"not a library", "version.txt": f"{modeli.ВЕРСИЯ_LLAMA}\nabc\n",
                              "LICENSE-llama.cpp.txt": "MIT"})
         код, вывод = self.дан_("установить", DAN_VYPUSKI=адрес)
         self.assertEqual(код, 0, вывод)
@@ -146,10 +147,10 @@ class ТестыКоманд(unittest.TestCase):
         # библиотека найдена в папке пользователя, но поддельная не загружается
         код, вывод = self.дан_("проверить")
         self.assertEqual(код, 1, вывод)
-        self.assertIn("Библиотека llama.cpp найдена (папка пользователя", вывод)
+        self.assertIn("Библиотека llama.cpp найдена (папка данных пользователя", вывод)
         self.assertIn("но не загружается", вывод)
         # повторная установка заменяет папку целиком
-        адрес = self.выпуск({имя_библиотеки(): b"second", "version.txt": versiya.LLAMA_CPP})
+        адрес = self.выпуск({имя_библиотеки(): b"second", "version.txt": modeli.ВЕРСИЯ_LLAMA})
         код, вывод = self.дан_("установить", DAN_VYPUSKI=адрес)
         self.assertEqual(код, 0, вывод)
         self.assertEqual(sorted(os.listdir(self.папка_llama)), sorted([имя_библиотеки(), "version.txt"]))
@@ -170,7 +171,7 @@ class ТестыКоманд(unittest.TestCase):
             ф.write("0" * 64 + "  dan-setup.exe\n")
         код, вывод = self.дан_("установить", DAN_VYPUSKI=адрес)
         self.assertEqual(код, 1, вывод)
-        self.assertIn(f"нет архива llama-{versiya.LLAMA_CPP}-{платформа()}.zip", вывод)
+        self.assertIn(f"нет архива llama-{modeli.ВЕРСИЯ_LLAMA}-{платформа()}.zip", вывод)
 
     def test_архив_без_библиотеки(self):
         self.нужен_curl()

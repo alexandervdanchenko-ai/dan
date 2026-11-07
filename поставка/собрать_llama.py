@@ -1,8 +1,8 @@
 """Сборка библиотеки llama.cpp закреплённой версии для модуля «модели» - только для процессора.
 
-    python поставка/собрать_llama.py [--исходники=папка] [--в=папка]
+    python поставка/собрать_llama.py [--исходники=папка] [--в=папка] [--llama-simple]
 
-Версия llama.cpp - метка выпуска versiya.LLAMA_CPP (одно место для всего Дана). Сценарий
+Версия llama.cpp - метка выпуска modeli.ВЕРСИЯ_LLAMA (одно место для всего Дана). Сценарий
 загружает исходники этой метки (git clone), собирает их CMake и складывает в папку
 «поставка/готово» (или в папку --в=...):
 
@@ -19,6 +19,9 @@ Vulkan) выключены. Сборка не подстраивается по�
 (GGML_BACKEND_DL и GGML_CPU_ALL_VARIANTS). Рядом кладутся лицензия llama.cpp и файл
 version.txt (первая строка - метка, вторая - коммит).
 
+С --llama-simple рядом кладётся и пример llama.cpp llama-simple-<метка>-<система>[.exe]: тесты
+модуля «модели» сверяют с ним ответ Дана (в архив выпуска он не входит).
+
 Нужны: git, CMake 3.21 и новее, компилятор C++ (Linux - gcc или clang, macOS - Xcode,
 Windows - Visual Studio 2022 с компонентом «Сборка C++» и clang; окружение Visual Studio
 сценарий находит сам через vswhere). Ninja необязателен, в Windows ставится сам (pip).
@@ -34,7 +37,7 @@ import zipfile
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, КОРЕНЬ)
-import versiya  # noqa: E402
+import modeli  # noqa: E402
 
 АДРЕС = "https://github.com/ggml-org/llama.cpp"
 
@@ -187,6 +190,21 @@ def собрать(исходники, сборка):
     выполнить(["cmake", "--build", сборка, "--config", "Release", "-j", str(os.cpu_count() or 2)], env=среда)
 
 
+def собрать_пример(исходники, сборка):
+    """Пример llama-simple той же сборкой: настройки дополняются примерами, библиотеки не пересобираются."""
+    сис = система()
+    среда = среда_visual_studio() if сис == "windows" else dict(os.environ)
+    шаг("пример llama-simple")
+    выполнить(["cmake", "-S", исходники, "-B", сборка, "-DLLAMA_BUILD_COMMON=ON", "-DLLAMA_BUILD_EXAMPLES=ON"], env=среда)
+    выполнить(["cmake", "--build", сборка, "--config", "Release", "-j", str(os.cpu_count() or 2),
+               "--target", "llama-simple"], env=среда)
+    имя = "llama-simple" + (".exe" if сис == "windows" else "")
+    путь = os.path.join(папка_результата(сборка), имя)
+    if not os.path.isfile(путь):
+        raise SystemExit(f"Сборка не создала {имя}")
+    return путь
+
+
 def папка_результата(сборка):
     for п in (os.path.join(сборка, "bin", "Release"), os.path.join(сборка, "bin")):
         if os.path.isdir(п):
@@ -224,10 +242,14 @@ def упаковать(папка, архив):
 
 
 def main(аргументы):
-    метка = versiya.LLAMA_CPP
+    метка = modeli.ВЕРСИЯ_LLAMA
     в = os.path.join(КОРЕНЬ, "поставка", "готово")
     исходники = None
+    пример = False
     for а in аргументы:
+        if а == "--llama-simple":
+            пример = True
+            continue
         if а.startswith("--в="):
             в = os.path.abspath(а[len("--в="):])
         elif а.startswith("--исходники="):
@@ -251,6 +273,9 @@ def main(аргументы):
     варианты = сложить(исходники, сборка, цель, метка)
     архив = os.path.join(в, имя + ".zip")
     упаковать(цель, архив)
+    if пример:
+        simple = собрать_пример(исходники, сборка)
+        shutil.copy2(simple, os.path.join(в, f"llama-simple-{метка}-{плат}" + os.path.splitext(simple)[1]))
     шаг("готово")
     print(f"варианты для процессора: {', '.join(варианты)}")
     print(f"{архив}: {os.path.getsize(архив) / (1024 * 1024):.1f} МБ")

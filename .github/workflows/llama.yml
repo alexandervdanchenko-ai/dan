@@ -1,4 +1,4 @@
-# Библиотека llama.cpp для модуля «модели»: сборка закреплённой версии (versiya.LLAMA_CPP)
+# Библиотека llama.cpp для модуля «модели»: сборка закреплённой версии (modeli.ВЕРСИЯ_LLAMA)
 # только для процессора на четырёх системах (поставка/собрать_llama.py). Сборка долгая, поэтому
 # готовый архив хранится в кэше по метке llama.cpp и тексту сценария сборки: новая сборка
 # бывает только при смене версии или сценария. Архивы llama-<метка>-<система>.zip передаются
@@ -22,6 +22,8 @@ jobs:
           # наборов команд armv9.2 (SME), под которые собираются варианты для процессора
           - os: ubuntu-22.04
             platforma: linux-x64
+            # пример llama.cpp llama-simple: с ним тесты модуля «модели» сверяют ответ Дана
+            simple: true
           - os: ubuntu-24.04-arm
             platforma: linux-arm64
             gcc14: true
@@ -41,7 +43,7 @@ jobs:
       - name: Версия llama.cpp
         id: versiya
         shell: bash
-        run: echo "metka=$(python -c 'import versiya; print(versiya.LLAMA_CPP)')" >> "$GITHUB_OUTPUT"
+        run: echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_OUTPUT"
       - name: Кэш готовой библиотеки
         id: kesh
         uses: actions/cache@v5
@@ -59,18 +61,25 @@ jobs:
         if: steps.kesh.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          python поставка/собрать_llama.py --в=llama-sborka
+          python поставка/собрать_llama.py --в=llama-sborka ${{ matrix.simple && '--llama-simple' || '' }}
           mkdir -p llama-gotovo
           cp llama-sborka/llama-*.zip llama-gotovo/
+          if ls llama-sborka/llama-simple-* >/dev/null 2>&1; then cp llama-sborka/llama-simple-* llama-gotovo/; fi
       - name: Архив
         shell: bash
         run: |
           ls -l llama-gotovo
-          for f in llama-gotovo/*.zip; do
+          for f in llama-gotovo/*; do
             echo "$(basename "$f"): $(( $(wc -c < "$f") / 1024 )) КБ" >> "$GITHUB_STEP_SUMMARY"
           done
       - uses: actions/upload-artifact@v7
         with:
           name: llama-${{ matrix.platforma }}
           path: llama-gotovo/*.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: matrix.simple
+        with:
+          name: llama-simple-${{ matrix.platforma }}
+          path: llama-gotovo/llama-simple-*
           if-no-files-found: error
