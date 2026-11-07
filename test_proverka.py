@@ -35,7 +35,17 @@ class ТестыКорректныхПрограмм(unittest.TestCase):
             with self.subTest(путь=путь), open(путь, encoding="utf-8") as ф:
                 # примеры с подключениями проверяются вместе с подключёнными модулями
                 from moduli import загрузить
-                проверить(загрузить(ф.read(), путь))
+                try:
+                    проверить(загрузить(ф.read(), путь))
+                except ОшибкаПроверки:
+                    # пример с возможностью после заморозки компилятора на Python (например, модуль
+                    # «модели») проверяет компилятор на Дане
+                    import subprocess
+                    if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), "zamorozka.json")):
+                        raise
+                    р = subprocess.run([sam_kompilyator.исполняемый(), "проверить", путь], capture_output=True,
+                                       env=sam_kompilyator.среда(), timeout=600)
+                    self.assertEqual(р.returncode, 0, р.stdout.decode("utf-8", "replace"))
 
     def test_вывод_типов(self):
         п = ок("пусть а = 1\nпусть б = 2.0\nпусть в_ = а + б\nпусть г = \"х\" + \"у\"\nпусть д = а < б")

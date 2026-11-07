@@ -253,7 +253,10 @@ static int dan_ll_exists(const char *p) {
 static void *dan_ll_open(const char *where, int full) {
 #if defined(_WIN32)
     wchar_t *w = dan_wide(where);
+    /* a file that is not a library must give an error value, not a message box of the system */
+    UINT mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
     void *lib = (void *)(full ? LoadLibraryExW(w, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) : LoadLibraryW(w));
+    SetErrorMode(mode);
     dan_free(w);
     return lib;
 #elif defined(__wasi__)
