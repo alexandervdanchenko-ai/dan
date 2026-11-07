@@ -159,10 +159,13 @@ class ТестыЭталонаПамяти(unittest.TestCase):
 
     def test_сверка_на_c(self):
         команда = dan.команда_компилятора()
-        исполняемый = os.path.join(self.п, "чтение_си.exe")
+        # латинские имена: gcc в Windows не открывает файлы с русскими именами
+        исходник = os.path.join(self.п, "chtenie_si.c")
+        shutil.copy(os.path.join(self.ПАПКА, "чтение_си.c"), исходник)
+        исполняемый = os.path.join(self.п, "chtenie_si.exe")
         потоки = [] if os.name == "nt" else ["-pthread"]
-        р = subprocess.run([*команда, "-std=c11", "-O3", os.path.join(self.ПАПКА, "чтение_си.c"), "-o", исполняемый,
-                            *потоки], capture_output=True, text=True, timeout=300)
+        р = subprocess.run([*команда, "-std=c11", "-O3", исходник, "-o", исполняемый, *потоки],
+                           capture_output=True, text=True, timeout=300)
         self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
         р = subprocess.run([исполняемый, "0.001", "2", "3"], capture_output=True, timeout=300,
                            env=dict(os.environ, DAN_POTOKI="2"))
