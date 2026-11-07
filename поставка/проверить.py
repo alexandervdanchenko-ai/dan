@@ -59,7 +59,7 @@ sys.exit(0 if ggml.ggml_backend_dev_count() > 0 else 1)
 
 def проверить_llama(dan, с):
     """Сообщение об ошибке или None: библиотека llama.cpp рядом с dan загружается."""
-    import versiya
+    import modeli
     папка = os.path.dirname(os.path.abspath(dan))
     имя = "llama.dll" if os.name == "nt" else "libllama.so"
     if not os.path.isfile(os.path.join(папка, имя)):
@@ -69,8 +69,8 @@ def проверить_llama(dan, с):
         return "рядом с dan нет вариантов для процессора ggml-cpu-*"
     with open(os.path.join(папка, "version.txt"), encoding="utf-8") as ф:
         метка = ф.readline().strip()
-    if метка != versiya.LLAMA_CPP:
-        return f"библиотека llama.cpp {метка}, а нужна {versiya.LLAMA_CPP}"
+    if метка != modeli.ВЕРСИЯ_LLAMA:
+        return f"библиотека llama.cpp {метка}, а нужна {modeli.ВЕРСИЯ_LLAMA}"
     р = subprocess.run([sys.executable, "-c", ПРОБА_LLAMA, папка], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=с, timeout=300)
     print(f"llama.cpp {метка}, вариантов для процессора: {len(варианты)}")

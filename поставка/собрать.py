@@ -131,7 +131,7 @@ def добавить_учебник_и_редактор():
 
 def добавить_llama(архив):
     шаг("библиотека llama.cpp")
-    import versiya
+    import modeli
     import zipfile
     if архив is None:
         import importlib.util
@@ -141,10 +141,10 @@ def добавить_llama(архив):
         работа = tempfile.mkdtemp(prefix="dan_llama_")
         if сборка.main(["--в=" + работа]) != 0:
             raise SystemExit("не удалось собрать библиотеку llama.cpp")
-        архив = os.path.join(работа, f"llama-{versiya.LLAMA_CPP}-{сборка.платформа()}.zip")
+        архив = os.path.join(работа, f"llama-{modeli.ВЕРСИЯ_LLAMA}-{сборка.платформа()}.zip")
     имя = os.path.basename(архив)
-    if not имя.startswith(f"llama-{versiya.LLAMA_CPP}-windows-"):
-        raise SystemExit(f"архив {имя} - не llama.cpp {versiya.LLAMA_CPP} для Windows")
+    if not имя.startswith(f"llama-{modeli.ВЕРСИЯ_LLAMA}-windows-"):
+        raise SystemExit(f"архив {имя} - не llama.cpp {modeli.ВЕРСИЯ_LLAMA} для Windows")
     with zipfile.ZipFile(архив) as з:
         имена = з.namelist()
         if "llama.dll" not in имена or any("/" in и or "\\" in и or и.startswith(".") for и in имена):

@@ -48,6 +48,7 @@ jobs:
           import glob, os, shutil, subprocess, sys, tempfile
           sys.path.insert(0, os.getcwd())   # сценарий выполняется из временной папки, versiya.py - в корне проекта
           import versiya
+          import modeli
           версия = versiya.ВЕРСИЯ
           метка = "v" + версия
           описание = os.path.join("выпуски", метка + ".md")
@@ -62,9 +63,9 @@ jobs:
           файлы += glob.glob(os.path.join("поставка", "готово", "dan-*-windows.zip"))
           файлы += glob.glob(os.path.join("редактор", "*.vsix"))
           # библиотека llama.cpp для четырёх систем: её берут «dan модели установить» и установщик
-          llama = sorted(glob.glob(os.path.join("llama-vypusk", f"llama-{versiya.LLAMA_CPP}-*.zip")))
+          llama = sorted(glob.glob(os.path.join("llama-vypusk", f"llama-{modeli.ВЕРСИЯ_LLAMA}-*.zip")))
           if len(llama) != 4:
-              print(f"::error title=Нет архивов llama.cpp::нужны 4 архива llama-{versiya.LLAMA_CPP}-*.zip, есть: {llama}")
+              print(f"::error title=Нет архивов llama.cpp::нужны 4 архива llama-{modeli.ВЕРСИЯ_LLAMA}-*.zip, есть: {llama}")
               raise SystemExit(1)
           файлы += llama
           # контрольные суммы: файл SHA256SUMS.txt и таблица в описании выпуска

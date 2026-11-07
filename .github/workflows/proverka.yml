@@ -126,6 +126,7 @@ jobs:
     # тот же набор тестов, но программы переводит компилятор на Дане (sam_kompilyator.py): после
     # заморозки компилятора на Python новые возможности языка есть только в нём
     name: Тесты на компиляторе на Дане (Linux)
+    needs: llama
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -146,29 +147,22 @@ jobs:
           sudo apt-get install -y qpdf poppler-utils fonts-dejavu-core libcurl4 libsqlite3-0 clang
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
           python -m pip install pypdf reportlab openpyxl python-docx markdown
-      - name: Версия llama.cpp для модуля «модели»
-        # закреплённая версия записана в modeli.py (ВЕРСИЯ_LLAMA) и sreda/modeli.c
-        id: llama
-        run: echo "versiya=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_OUTPUT"
-      - name: Кэш библиотеки llama.cpp
-        id: kesh-llama
-        uses: actions/cache@v5
+      - uses: actions/download-artifact@v8
         with:
-          path: ${{ runner.temp }}/llama
-          key: llama-${{ steps.llama.outputs.versiya }}-ubuntu-latest-x64-1
-      - name: Сборка библиотеки llama.cpp (если её нет в кэше)
-        # пока поставку llama.cpp не делает установщик, библиотека для тестов порождения текста
-        # (test_modeli) собирается здесь: только процессор, разделяемые библиотеки и пример llama-simple
-        if: steps.kesh-llama.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 --branch "${{ steps.llama.outputs.versiya }}" https://github.com/ggml-org/llama.cpp "$RUNNER_TEMP/llama-src"
-          cmake -S "$RUNNER_TEMP/llama-src" -B "$RUNNER_TEMP/llama-build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-            -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF
-          cmake --build "$RUNNER_TEMP/llama-build" -j 4 --target llama llama-simple
-          mkdir -p "$RUNNER_TEMP/llama"
-          cp -a "$RUNNER_TEMP/llama-build/bin/"*.so* "$RUNNER_TEMP/llama-build/bin/llama-simple" "$RUNNER_TEMP/llama/"
+          name: llama-linux-x64
+          path: ${{ runner.temp }}/llama-arhiv
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-simple-linux-x64
+          path: ${{ runner.temp }}/llama-arhiv
       - name: Библиотека llama.cpp для тестов
+        # та же библиотека, что в выпуске (задание «Библиотека llama.cpp»); рядом - пример llama-simple,
+        # с которым test_modeli сверяет ответ Дана
         run: |
+          mkdir -p "$RUNNER_TEMP/llama"
+          unzip -q "$RUNNER_TEMP"/llama-arhiv/llama-*-linux-x64.zip -d "$RUNNER_TEMP/llama"
+          cp "$RUNNER_TEMP"/llama-arhiv/llama-simple-*-linux-x64 "$RUNNER_TEMP/llama/llama-simple"
+          chmod +x "$RUNNER_TEMP/llama/llama-simple"
           ls -la "$RUNNER_TEMP/llama"
           echo "DAN_LLAMA=$RUNNER_TEMP/llama" >> "$GITHUB_ENV"
       - name: Сборка компилятора на Дане

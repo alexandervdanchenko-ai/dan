@@ -130,6 +130,9 @@ static struct {
     uint32_t (*n_batch)(const void *);
     void (*log_set)(void (*)(int, const char *, void *), void *);
     void (*load_all)(void);         /* ggml_backend_load_all: only in builds with backends as separate files */
+    /* ggml_backend_load_all_from_path: the variants for the processor (ggml-cpu-*) of the build that Dan
+       ships lie next to the library, not next to the program, so they are loaded from its folder */
+    void (*load_all_from_path)(const char *);
     void *(*set_abort)(void (*)(const char *));   /* ggml_set_abort_callback */
 } dan_ll;
 
@@ -396,6 +399,7 @@ static int dan_ll_take(void *lib, const char *path) {
         }
     }
     *(void **)(void *)&dan_ll.load_all = dan_ll_sym(lib, "ggml_backend_load_all");
+    *(void **)(void *)&dan_ll.load_all_from_path = dan_ll_sym(lib, "ggml_backend_load_all_from_path");
     *(void **)(void *)&dan_ll.set_abort = dan_ll_sym(lib, "ggml_set_abort_callback");
 #if defined(_WIN32)
     /* GetProcAddress looks only in the library itself: the functions of ggml are in ggml-base.dll */
@@ -404,6 +408,8 @@ static int dan_ll_take(void *lib, const char *path) {
     if (!dan_ll.set_abort && base) *(void **)(void *)&dan_ll.set_abort = (void *)GetProcAddress(base, "ggml_set_abort_callback");
     HMODULE all = GetModuleHandleW(L"ggml.dll");
     if (!dan_ll.load_all && all) *(void **)(void *)&dan_ll.load_all = (void *)GetProcAddress(all, "ggml_backend_load_all");
+    if (!dan_ll.load_all_from_path && all)
+        *(void **)(void *)&dan_ll.load_all_from_path = (void *)GetProcAddress(all, "ggml_backend_load_all_from_path");
 #endif
     if (!dan_ll_layout_ok()) {
         dan_ll_why("библиотека llama.cpp несовместима с Даном: «", path,
@@ -498,7 +504,21 @@ static int dan_ll_load(void) {
 #ifndef __wasi__
             if (dan_ll.set_abort) dan_ll.set_abort(dan_ll_abort);
 #endif
-            if (dan_ll.load_all) dan_ll.load_all();
+            /* the folder of the found library (a path with a folder; a library found by its bare name
+               in the system places loads its parts from where its build put them) */
+            char folder[4096];
+            folder[0] = 0;
+            const char *cut = NULL;
+            for (const char *c = found; *c; c++) {
+                if (*c == '/' || *c == '\\') cut = c;
+            }
+            if (cut && (size_t)(cut - found) < sizeof folder) {
+                memcpy(folder, found, (size_t)(cut - found));
+                folder[cut - found] = 0;
+                if (!folder[0]) strcpy(folder, "/");
+            }
+            if (folder[0] && dan_ll.load_all_from_path) dan_ll.load_all_from_path(folder);
+            else if (dan_ll.load_all) dan_ll.load_all();
             dan_ll.backend_init();
             dan_ll.state = 1;
         }
