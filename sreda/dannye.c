@@ -973,13 +973,17 @@ static void dan_chacha20_block(const uint8_t key[32], uint32_t counter, const ui
     for (int i = 0; i < 16; i++) dan_put_le32(out + 4 * i, x[i] + s[i]);
 }
 
-static void dan_chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce[12], uint8_t *data, size_t n) {
+/* false (data unchanged) if the 32-bit block counter would wrap around: the key stream
+   would repeat (RFC 8439 limits a message to 2^32 blocks of 64 bytes) */
+static bool dan_chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce[12], uint8_t *data, size_t n) {
+    if (n > 0 && (uint64_t)counter + (uint64_t)((n - 1) / 64) > 0xFFFFFFFFull) return false;
     uint8_t ks[64];
     for (size_t off = 0; off < n; off += 64, counter++) {
         dan_chacha20_block(key, counter, nonce, ks);
         size_t k = n - off < 64 ? n - off : 64;
         for (size_t i = 0; i < k; i++) data[off + i] ^= ks[i];
     }
+    return true;
 }
 
 typedef struct { uint32_t r[5], h[5], pad[4]; size_t left; uint8_t buf[16]; int final; } dan_poly1305;
@@ -1096,6 +1100,33 @@ static bool dan_equal_ct(const uint8_t *a, const uint8_t *b, size_t n) {
     return d == 0;
 }
 
+/* ChaCha20-Poly1305 (RFC 8439): out gets the ciphertext (out may be msg) and the 16-byte tag
+   after it; false for a nonce that is not 12 bytes or a message longer than 2^32 - 1 blocks */
+static bool dan_aead_seal(const uint8_t key[32], const uint8_t *nonce, size_t nlen, const uint8_t *aad, size_t alen,
+                          const uint8_t *msg, size_t n, uint8_t *out) {
+    if (nlen != 12) return false;
+    if (n > 0 && (uint64_t)((n - 1) / 64) >= 0xFFFFFFFFull) return false;
+    memmove(out, msg, n);
+    dan_chacha20_xor(key, 1, nonce, out, n);
+    dan_aead_tag(key, nonce, aad, alen, out, n, out + n);
+    return true;
+}
+
+/* checks the tag in constant time, then decrypts into out (out may be ct); false and out
+   untouched for a wrong tag, a nonce that is not 12 bytes, a tag that is not 16 bytes
+   or a ciphertext longer than the counter allows */
+static bool dan_aead_open(const uint8_t key[32], const uint8_t *nonce, size_t nlen, const uint8_t *aad, size_t alen,
+                          const uint8_t *ct, size_t n, const uint8_t *tag, size_t tlen, uint8_t *out) {
+    if (nlen != 12 || tlen != 16) return false;
+    if (n > 0 && (uint64_t)((n - 1) / 64) >= 0xFFFFFFFFull) return false;
+    uint8_t t[16];
+    dan_aead_tag(key, nonce, aad, alen, ct, n, t);
+    if (!dan_equal_ct(t, tag, 16)) return false;
+    memmove(out, ct, n);
+    dan_chacha20_xor(key, 1, nonce, out, n);
+    return true;
+}
+
 /* ---- random bytes from the operating system ---- */
 
 #ifdef _WIN32
@@ -1130,9 +1161,10 @@ static dan_bytes dan_encrypt_raw(const uint8_t *data, size_t n, dan_str password
     dan_random(out + 9, 28, line);                         /* salt and nonce */
     uint8_t key[32];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), out + 9, 16, DAN_ENC_ITER, key, 32);
-    memcpy(out + DAN_ENC_HEADER, data, n);
-    dan_chacha20_xor(key, 1, out + 25, out + DAN_ENC_HEADER, n);
-    dan_aead_tag(key, out + 25, out, DAN_ENC_HEADER, out + DAN_ENC_HEADER, n, out + DAN_ENC_HEADER + n);
+    if (!dan_aead_seal(key, out + 25, 12, out, DAN_ENC_HEADER, data, n, out + DAN_ENC_HEADER)) {
+        dan_free(out);
+        dan_error(DAN_MSG_ENC_TOO_BIG, line);
+    }
     return dan_bytes_wrap(out, (int64_t)(DAN_ENC_HEADER + n + 16));
 }
 
@@ -1153,13 +1185,13 @@ static dan_bytes dan_decrypt(dan_bytes data, dan_str password, int line) {
        must not make the program work for seconds before reporting a wrong password */
     if (iter == 0 || iter > DAN_ENC_ITER) dan_error(DAN_MSG_NOT_ENCRYPTED, line);
     size_t n = (size_t)data->len - DAN_ENC_HEADER - 16;
-    uint8_t key[32], tag[16];
+    uint8_t key[32];
     dan_pbkdf2_sha256((const uint8_t *)password, strlen(password), in + 9, 16, iter, key, 32);
-    dan_aead_tag(key, in + 25, in, DAN_ENC_HEADER, in + DAN_ENC_HEADER, n, tag);
-    if (!dan_equal_ct(tag, in + DAN_ENC_HEADER + n, 16)) dan_error(DAN_MSG_BAD_PASSWORD, line);
     uint8_t *out = dan_alloc(n + 1);
-    memcpy(out, in + DAN_ENC_HEADER, n);
-    dan_chacha20_xor(key, 1, in + 25, out, n);
+    if (!dan_aead_open(key, in + 25, 12, in, DAN_ENC_HEADER, in + DAN_ENC_HEADER, n, in + DAN_ENC_HEADER + n, 16, out)) {
+        dan_free(out);
+        dan_error(DAN_MSG_BAD_PASSWORD, line);
+    }
     return dan_bytes_wrap(out, (int64_t)n);
 }
 

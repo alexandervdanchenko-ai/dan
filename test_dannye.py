@@ -7,6 +7,7 @@
 
 import gzip
 import hashlib
+import json
 import lzma
 import os
 import random
@@ -622,6 +623,217 @@ int main(int argc, char **argv) {
                     self.assertEqual(р.stdout.splitlines(), [f"{и} {х}" for и, х in WINZIP_AES.items()])
                 finally:
                     shutil.rmtree(папка, ignore_errors=True)
+
+
+# Обвязка для векторов Wycheproof: читает команды из стандартного ввода (поля - шестнадцатеричные
+# байты, «-» - пусто) и на каждую печатает строку «ok <байты...>» или «отказ».
+WYCHEPROOF_C = r"""
+#include <stdlib.h>
+static size_t из_hex(const char *h, uint8_t *д) {
+    if (strcmp(h, "-") == 0) return 0;
+    size_t n = strlen(h) / 2;
+    for (size_t i = 0; i < n; i++) {
+        unsigned v;
+        sscanf(h + 2 * i, "%2x", &v);
+        д[i] = (uint8_t)v;
+    }
+    return n;
+}
+static void в_hex(const uint8_t *д, size_t n) {
+    printf(" ");
+    if (n == 0) printf("-");
+    for (size_t i = 0; i < n; i++) printf("%02x", д[i]);
+}
+int main(void) {
+    size_t ёмкость = 1 << 20, длина = 0, k;
+    char *весь = malloc(ёмкость + 1);
+    while ((k = fread(весь + длина, 1, ёмкость - длина, stdin)) > 0) {
+        длина += k;
+        if (длина == ёмкость) { ёмкость *= 2; весь = realloc(весь, ёмкость + 1); }
+    }
+    весь[длина] = 0;
+    static uint8_t п[8][70000], выход[70000];
+    size_t н[8];
+    char *поле[10];
+    for (char *строка = strtok(весь, "\r\n"); строка; строка = strtok(NULL, "\r\n")) {
+        int полей = 0;
+        for (char *с = строка; *с && полей < 10;) {
+            поле[полей++] = с;
+            while (*с && *с != ' ') с++;
+            if (*с) *с++ = 0;
+        }
+        for (int i = 1; i < полей && i < 9; i++) н[i - 1] = из_hex(поле[i], п[i - 1]);
+        const char *к = поле[0];
+        bool ок = true;
+        if (strcmp(к, "aead_open") == 0) {          /* ключ nonce доп шифр код */
+            ок = н[0] == 32 && dan_aead_open(п[0], п[1], н[1], п[2], н[2], п[3], н[3], п[4], н[4], выход);
+            if (ок) { printf("ok"); в_hex(выход, н[3]); }
+        } else if (strcmp(к, "aead_seal") == 0) {   /* ключ nonce доп текст */
+            ок = н[0] == 32 && dan_aead_seal(п[0], п[1], н[1], п[2], н[2], п[3], н[3], выход);
+            if (ок) { printf("ok"); в_hex(выход, н[3]); в_hex(выход + н[3], 16); }
+        } else if (strcmp(к, "chacha") == 0) {      /* ключ nonce счётчик(4 байта, младший первым) текст */
+            uint32_t сч = dan_le32(п[2]);
+            ок = н[0] == 32 && н[1] == 12 && н[2] == 4 && dan_chacha20_xor(п[0], сч, п[1], п[3], н[3]);
+            if (ок) { printf("ok"); в_hex(п[3], н[3]); }
+        } else if (strcmp(к, "cbc") == 0) {         /* вариант ключ iv текст: CBC с дополнением PKCS#5 */
+            int v = п[0][0];
+            ок = dan_aes_supported(v) && (н[1] == 16 || н[1] == 24 || н[1] == 32) && н[2] == 16;
+            if (ок) {
+                dan_aes a;
+                size_t всего = (н[3] / 16 + 1) * 16;
+                uint8_t пред[16], блок[16];
+                dan_aes_init(&a, п[1], (int)н[1]);
+                memcpy(пред, п[2], 16);
+                for (size_t i = н[3]; i < всего; i++) п[3][i] = (uint8_t)(всего - н[3]);
+                for (size_t off = 0; off < всего; off += 16) {
+                    for (int i = 0; i < 16; i++) блок[i] = п[3][off + i] ^ пред[i];
+                    dan_aes_blocks(&a, v, блок, выход + off, 1);
+                    memcpy(пред, выход + off, 16);
+                }
+                printf("ok");
+                в_hex(выход, всего);
+            }
+        } else if (strcmp(к, "hmac256") == 0 || strcmp(к, "hmac1") == 0) {   /* ключ текст код */
+            uint8_t код[32];
+            size_t полный = к[4] == '2' ? 32 : 20;
+            if (полный == 32) { dan_hmac256_ctx м; dan_hmac256_init(&м, п[0], н[0]); dan_hmac256(&м, п[1], н[1], код); }
+            else { dan_hmac1_ctx м; dan_hmac1_init(&м, п[0], н[0]); dan_hmac1(&м, п[1], н[1], код); }
+            ок = н[2] > 0 && н[2] <= полный && dan_equal_ct(код, п[2], н[2]);
+            if (ок) printf("ok");
+        } else if (strcmp(к, "pbkdf256") == 0 || strcmp(к, "pbkdf1") == 0) {  /* пароль соль повторы(4) длина(4) */
+            uint32_t повторы = (uint32_t)п[2][0] << 24 | (uint32_t)п[2][1] << 16 | (uint32_t)п[2][2] << 8 | п[2][3];
+            uint32_t нужно = (uint32_t)п[3][0] << 24 | (uint32_t)п[3][1] << 16 | (uint32_t)п[3][2] << 8 | п[3][3];
+            if (к[5] == '2') dan_pbkdf2_sha256(п[0], н[0], п[1], н[1], повторы, выход, нужно);
+            else dan_pbkdf2_sha1(п[0], н[0], п[1], н[1], повторы, выход, нужно);
+            printf("ok");
+            в_hex(выход, нужно);
+        } else ок = false;
+        if (!ок) printf("отказ");
+        printf("\n");
+    }
+    return 0;
+}
+"""
+
+ПАПКА_WYCHEPROOF = os.path.join(ПАПКА_ДАННЫХ, "wycheproof")
+
+
+def векторы_wycheproof(имя):
+    with open(os.path.join(ПАПКА_WYCHEPROOF, имя + "_test.json"), encoding="utf-8") as ф:
+        данные = json.load(ф)
+    for группа in данные["testGroups"]:
+        for вектор in группа["tests"]:
+            yield группа, вектор
+
+
+def поле(шестн):
+    return шестн or "-"
+
+
+@unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
+class ТестыWycheproof(unittest.TestCase):
+    """Векторы Wycheproof (тесты_данные/wycheproof, README там): функции среды вызываются напрямую.
+    Допустимые векторы (valid) должны дать записанный результат, недопустимые (invalid) - отказ."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.папка = tempfile.mkdtemp()
+        cls.программа = собрать_обвязку(cls.папка, [WYCHEPROOF_C])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.папка, ignore_errors=True)
+
+    def выполнить(self, команды):
+        р = subprocess.run([self.программа], input="\n".join(команды) + "\n", capture_output=True,
+                           text=True, encoding="utf-8", timeout=600)
+        self.assertEqual(р.returncode, 0, р.stderr)
+        ответы = р.stdout.splitlines()
+        self.assertEqual(len(ответы), len(команды))
+        return ответы
+
+    def сверить(self, имя, векторы, ответы, ожидается):
+        """ожидается(вектор) - ответ для допустимого вектора; недопустимый должен дать «отказ»
+        (или, для только шифрующих функций, ответ, отличный от записанного)."""
+        проверено = 0
+        for (группа, вектор), ответ in zip(векторы, ответы):
+            with self.subTest(набор=имя, tcId=вектор["tcId"], comment=вектор["comment"]):
+                if вектор["result"] == "valid":
+                    self.assertEqual(ответ, ожидается(группа, вектор))
+                elif вектор["result"] == "invalid":
+                    self.assertNotEqual(ответ, ожидается(группа, вектор))
+                else:
+                    self.fail("неизвестный результат " + вектор["result"])
+                проверено += 1
+        return проверено
+
+    def test_chacha20_poly1305(self):
+        векторы = list(векторы_wycheproof("chacha20_poly1305"))
+        открыть = [f"aead_open {в['key']} {поле(в['iv'])} {поле(в['aad'])} {поле(в['ct'])} {поле(в['tag'])}"
+                   for _, в in векторы]
+        закрыть = [f"aead_seal {в['key']} {поле(в['iv'])} {поле(в['aad'])} {поле(в['msg'])}" for _, в in векторы]
+        ответы = self.выполнить(открыть + закрыть)
+        н = len(векторы)
+        # расшифровка: допустимый - исходный текст, недопустимый (изменённый код, длина nonce) - отказ
+        for (_, в), ответ in zip(векторы, ответы[:н]):
+            with self.subTest(действие="открыть", tcId=в["tcId"], comment=в["comment"]):
+                if в["result"] == "valid":
+                    self.assertEqual(ответ, "ok " + поле(в["msg"]))
+                else:
+                    self.assertEqual(ответ, "отказ")
+        # шифрование: допустимый - записанные шифр и код; nonce неверной длины - отказ
+        for (_, в), ответ in zip(векторы, ответы[н:]):
+            with self.subTest(действие="зашифровать", tcId=в["tcId"], comment=в["comment"]):
+                if в["result"] == "valid":
+                    self.assertEqual(ответ, f"ok {поле(в['ct'])} {в['tag']}")
+                elif "InvalidNonceSize" in в["flags"]:
+                    self.assertEqual(ответ, "отказ")
+                else:
+                    self.assertNotEqual(ответ, f"ok {поле(в['ct'])} {в['tag']}")
+        self.assertEqual(н, 325)
+
+    def test_chacha20_счётчик(self):
+        # XChaCha20 (nonce 24 байта) в среде нет: такие векторы проверяют только отказ
+        векторы = list(векторы_wycheproof("chacha20_counter"))
+        команды = [f"chacha {в['key']} {поле(в['iv'])} {в['initialCounter']} {поле(в['msg'])}" for _, в in векторы]
+        ответы = self.выполнить(команды)
+        ietf = 0
+        for (группа, в), ответ in zip(векторы, ответы):
+            with self.subTest(tcId=в["tcId"], comment=в["comment"]):
+                if группа["ivSize"] != 96:
+                    self.assertEqual(ответ, "отказ")
+                    continue
+                ietf += 1
+                if в["result"] == "valid":
+                    self.assertEqual(ответ, "ok " + поле(в["ct"]))
+                else:
+                    self.assertEqual(ответ, "отказ")
+        self.assertEqual((len(векторы), ietf), (42, 14))
+
+    def test_aes_cbc_каждым_вариантом(self):
+        векторы = list(векторы_wycheproof("aes_cbc_pkcs5"))
+        for номер, вариант in enumerate(("c", "aesni", "armv8")):
+            команды = [f"cbc {номер:02x} {в['key']} {в['iv']} {поле(в['msg'])}" for _, в in векторы]
+            ответы = self.выполнить(команды)
+            if ответы[0] == "отказ":
+                self.assertNotEqual(вариант, "c")      # процессор без этих команд
+                continue
+            self.assertEqual(self.сверить(f"aes_cbc {вариант}", векторы, ответы,
+                                          lambda г, в: "ok " + поле(в["ct"])), 216)
+
+    def test_hmac(self):
+        for набор, команда, всего in (("hmac_sha256", "hmac256", 174), ("hmac_sha1", "hmac1", 170)):
+            векторы = list(векторы_wycheproof(набор))
+            ответы = self.выполнить([f"{команда} {поле(в['key'])} {поле(в['msg'])} {поле(в['tag'])}"
+                                     for _, в in векторы])
+            self.assertEqual(self.сверить(набор, векторы, ответы, lambda г, в: "ok"), всего)
+
+    def test_pbkdf2(self):
+        for набор, команда, всего in (("pbkdf2_hmacsha256", "pbkdf256", 60), ("pbkdf2_hmacsha1", "pbkdf1", 64)):
+            векторы = list(векторы_wycheproof(набор))
+            ответы = self.выполнить([f"{команда} {поле(в['password'])} {поле(в['salt'])} "
+                                     f"{в['iterationCount']:08x} {в['dkLen']:08x}" for _, в in векторы])
+            self.assertEqual(self.сверить(набор, векторы, ответы, lambda г, в: "ok " + поле(в["dk"])), всего)
 
 
 if __name__ == "__main__":
