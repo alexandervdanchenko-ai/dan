@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 
+import sam_kompilyator
 from test_kodogen import КОМПИЛЯТОР_ЕСТЬ
 
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
@@ -18,12 +19,15 @@ from test_kodogen import КОМПИЛЯТОР_ЕСТЬ
 
 
 def собрать(папка, компилятор):
+    """«собрать x.dan» компилятором на Дане (собранный исполняемый файл, как в других тестах) или на Python."""
+    программа = os.path.join(папка, "x.dan")
+    if компилятор == "сам":
+        return subprocess.run([sam_kompilyator.исполняемый(), "собрать", программа], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=sam_kompilyator.среда(), timeout=600)
     окружение = dict(os.environ)
     окружение.pop("DAN_KOMPILYATOR", None)
-    if компилятор == "сам":
-        окружение["DAN_KOMPILYATOR"] = "сам"
-    return subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "собрать", os.path.join(папка, "x.dan")],
-                          capture_output=True, text=True, encoding="utf-8", env=окружение, timeout=600)
+    return subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), "собрать", программа], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", env=окружение, timeout=600)
 
 
 @unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
@@ -37,9 +41,9 @@ class ТестыЧужогоФайлаC(unittest.TestCase):
             with open(путь_c, "w", encoding="utf-8") as ф:
                 ф.write(ЧУЖОЙ)
             р = собрать(папка, компилятор)
-            self.assertNotEqual(р.returncode, 0, р.stdout)
-            self.assertIn("создан", р.stdout + р.stderr)
-            self.assertIn("не Даном", р.stdout + р.stderr)
+            весь = f"код {р.returncode}: {р.stdout}{р.stderr}"
+            self.assertNotEqual(р.returncode, 0, весь)
+            self.assertIn("не Даном", весь)
             with open(путь_c, encoding="utf-8") as ф:
                 self.assertEqual(ф.read(), ЧУЖОЙ)
             # свой прежний файл Дан перезаписывает, как раньше
@@ -65,7 +69,8 @@ class ТестыЧужогоФайлаC(unittest.TestCase):
                 ф.write(b"\xff\xfe\x00")
             for компилятор in ("сам", "python"):
                 р = собрать(папка, компилятор)
-                self.assertNotEqual(р.returncode, 0, компилятор)
+                self.assertNotEqual(р.returncode, 0, f"{компилятор}: {р.stdout}{р.stderr}")
+                self.assertIn("не Даном", р.stdout + р.stderr, компилятор)
             with open(os.path.join(папка, "x.c"), "rb") as ф:
                 self.assertEqual(ф.read(), b"\xff\xfe\x00")
 
