@@ -986,6 +986,7 @@ static bool dan_chacha20_xor(const uint8_t key[32], uint32_t counter, const uint
     return true;
 }
 
+/* Poly1305 with 26-bit limbs after poly1305-donna-32.h by Andrew Moon (public domain or MIT) */
 typedef struct { uint32_t r[5], h[5], pad[4]; size_t left; uint8_t buf[16]; int final; } dan_poly1305;
 
 static void dan_poly1305_init(dan_poly1305 *p, const uint8_t key[32]) {
@@ -1547,7 +1548,37 @@ static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
     return w.d;
 }
 
-/* ---- inflate ---- */
+/* ---- inflate ----
+
+   The decoder below (dan_inf_bits, dan_huff_build, the bit-by-bit part of
+   dan_huff_decode and dan_inflate_into) is an altered version of puff.c by
+   Mark Adler (zlib, contrib/puff, version 2.3): its functions bits(),
+   construct(), decode(), stored(), fixed() and dynamic(), rewritten for this
+   runtime (no longjmp, a growing output buffer, a table of codes up to
+   DAN_FAST_BITS long, the soft mode for damaged data, the limit against
+   "bombs"). The notice of puff.h, kept as its license requires:
+
+   Copyright (C) 2002-2013 Mark Adler, all rights reserved
+   version 2.3, 21 Jan 2013
+
+   This software is provided 'as-is', without any express or implied
+   warranty.  In no event will the author be held liable for any damages
+   arising from the use of this software.
+
+   Permission is granted to anyone to use this software for any purpose,
+   including commercial applications, and to alter it and redistribute it
+   freely, subject to the following restrictions:
+
+   1. The origin of this software must not be misrepresented; you must not
+      claim that you wrote the original software. If you use this software
+      in a product, an acknowledgment in the product documentation would be
+      appreciated but is not required.
+   2. Altered source versions must be plainly marked as such, and must not be
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+
+   Mark Adler    madler@alumni.caltech.edu
+*/
 
 typedef struct {
     const uint8_t *in; size_t inlen, pos;
@@ -2697,7 +2728,10 @@ static dan_bytes dan_xz_raw(const uint8_t *d, size_t n) {
     return dan_bytes_wrap(x.d, (int64_t)x.len);
 }
 
-/* ---- LZMA2 / xz decoder ---- */
+/* ---- LZMA2 / xz decoder: the LZMA part follows the reference decoder
+   LzmaSpec.cpp of the LZMA SDK by Igor Pavlov (public domain); the shift of
+   the range encoder above (dan_rce_shift) is the one of the LZMA SDK and
+   liblzma (public domain, 0BSD) ---- */
 
 typedef struct { const uint8_t *in; size_t pos, end; uint32_t range, code; int line; } dan_rcd;
 
