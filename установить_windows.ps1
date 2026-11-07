@@ -100,10 +100,13 @@ if ($код -ne 0) {
 # программы на Дане. Без неё работает всё, кроме модуля «модели».
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $env:PYTHONUTF8 = "1"
-    $версияДана = (& python -c "import sys; sys.path.insert(0, sys.argv[1]); import versiya; print(versiya.ВЕРСИЯ)" $Папка | Out-String).Trim()
-    $метка = (& python -c "import sys; sys.path.insert(0, sys.argv[1]); import versiya; print(versiya.LLAMA_CPP)" $Папка | Out-String).Trim()
-    if (-not $метка) { throw "в versiya.py нет метки llama.cpp" }
+    # версии - из versiya.py без запуска Python: сообщения программ в потоке ошибок Windows
+    # PowerShell 5.1 при перенаправлении вывода считает ошибкой и останавливает сценарий
+    $текстВерсии = Get-Content (Join-Path $Папка "versiya.py") -Raw -Encoding UTF8
+    if ($текстВерсии -notmatch '(?m)^ВЕРСИЯ\s*=\s*"([^"]+)"') { throw "в versiya.py нет номера версии" }
+    $версияДана = $Matches[1]
+    if ($текстВерсии -notmatch '(?m)^LLAMA_CPP\s*=\s*"([^"]+)"') { throw "в versiya.py нет метки llama.cpp" }
+    $метка = $Matches[1]
     $архив = "llama-$метка-windows-x64.zip"
     $адрес = "https://github.com/alexandervdanchenko-ai/dan/releases/download/v$версияДана"
     $временная = Join-Path $env:TEMP "dan-llama"
