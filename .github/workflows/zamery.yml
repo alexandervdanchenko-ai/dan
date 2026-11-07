@@ -1,0 +1,140 @@
+# Замеры скорости на машинах GitHub (необязательный сценарий, не входит в проверку):
+# векторные ядра и пул потоков (sreda/yadra_test.c zamer) и эталон скорости чтения
+# памяти (замеры/память). Таблицы печатаются в итог задания; из них обновляется
+# замеры/результаты.md.
+#
+# Запуск вручную (после слияния в main):
+#   gh api -X POST repos/<владелец>/dan/actions/workflows/zamery.yml/dispatches -f ref=main
+#   (с объёмом буфера: -f "inputs[gb]=2")
+# или отправкой ветки с названием zamer-... (так замеряется ещё не слитое изменение).
+name: Замеры
+
+on:
+  workflow_dispatch:
+    inputs:
+      gb:
+        description: "ГБ буфера эталона памяти (пусто - 4, в macOS 2: там 7 ГБ памяти)"
+        required: false
+        default: ""
+      gb_vesov:
+        description: "ГБ весов для предела слов в секунду (7B Q4_K_M - 4,1)"
+        required: false
+        default: "4.1"
+  push:
+    branches: ["zamer-*"]
+
+jobs:
+  zamer:
+    name: Замер (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      GB: ${{ github.event.inputs.gb }}
+      GB_VESOV: ${{ github.event.inputs.gb_vesov || '4.1' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Машина
+        shell: bash
+        run: |
+          if [ -r /proc/cpuinfo ]; then cpu=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^ //'); fi
+          if [ -z "$cpu" ] && [ "$RUNNER_OS" = "macOS" ]; then cpu=$(sysctl -n machdep.cpu.brand_string); fi
+          if [ -z "$cpu" ] && [ "$RUNNER_OS" = "Windows" ]; then
+            cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name")
+          fi
+          if [ -z "$cpu" ]; then cpu=$(lscpu 2>/dev/null | grep -m1 "Model name" | cut -d: -f2 | sed 's/^ *//'); fi
+          {
+            echo "ОС: $RUNNER_OS $RUNNER_ARCH ($ImageOS $ImageVersion)"
+            echo "ядер: $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS")"
+            echo "процессор: $cpu"
+            echo "компилятор C: $( (gcc --version || clang --version) 2>/dev/null | head -1)"
+            echo "коммит: $GITHUB_SHA"
+          } | tee mashina.txt
+      - name: Векторные ядра
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then P=""; else P="-pthread"; fi
+          gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P \
+            || clang -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o b -lm $P
+          ./b
+          { DAN_POTOKI=1 ./b zamer; ./b zamer; } | tee yadra.txt
+      - name: Компилятор из семени (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: sh semya/sobrat.sh
+      - name: Компилятор из семени (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: semya\sobrat.cmd
+      - name: Эталон скорости чтения памяти
+        shell: bash
+        run: |
+          if [ -z "$GB" ]; then
+            if [ "$RUNNER_OS" = "macOS" ]; then GB=2; else GB=4; fi
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then P=""; else P="-pthread"; fi
+          semya/dan собрать замеры/память/память.dan
+          # латинское имя: gcc в Windows не всегда открывает файлы с русскими именами
+          cp замеры/память/чтение_си.c chtenie_si.c
+          gcc -std=c11 -O3 chtenie_si.c -o chtenie_si $P || clang -std=c11 -O3 chtenie_si.c -o chtenie_si $P
+          for t in 1 ""; do
+            echo "== дан $t" >> pamyat.txt
+            DAN_POTOKI=$t замеры/память/память "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
+            echo "== си $t" >> pamyat.txt
+            DAN_POTOKI=$t ./chtenie_si "$GB" "$GB_VESOV" 9 | tee -a pamyat.txt
+          done
+      - name: Таблицы в итог задания
+        shell: bash
+        run: |
+          (command -v python3 >/dev/null && echo python3 || echo python) > py.txt
+          PYTHONUTF8=1 "$(cat py.txt)" - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re
+          def ch(x):
+              return x.replace(".", ",")
+          print("### " + open("mashina.txt", encoding="utf-8").read().splitlines()[0])
+          print()
+          for s in open("mashina.txt", encoding="utf-8").read().splitlines()[1:]:
+              print("- " + s)
+          print()
+          print("Векторные ядра (sreda/yadra_test.c zamer), ГФлопс, в скобках - чтение весов, ГБ/с:")
+          print()
+          print("| Вариант, потоков | Скалярное | Матрица на вектор | q8 | Матрица на матрицу | Приближённо |")
+          print("|---|---|---|---|---|---|")
+          potokov, bystro = "?", {}
+          for s in open("yadra.txt", encoding="utf-8").read().splitlines():
+              m = re.match(r"потоков: (\d+)", s)
+              if m:
+                  potokov = m.group(1)
+              m = re.match(r"(\S+)\s+приближённо: матрица на матрицу ([\d.]+)", s)
+              if m:
+                  bystro[m.group(1)] = m.group(2)
+              m = re.match(r"(\S+)\s+скалярное ([\d.]+) ГФлопс; матрица на вектор ([\d.]+) ГФлопс \(([\d.]+) ГБ/с\); "
+                           r"q8 ([\d.]+) ГФлопс \(([\d.]+) ГБ/с\); матрица на матрицу ([\d.]+)", s)
+              if m:
+                  v, dot, mv, mvg, q8, q8g, mm = m.groups()
+                  print(f"| {v}, {potokov} | {ch(dot)} | {ch(mv)} ({ch(mvg)} ГБ/с) | {ch(q8)} ({ch(q8g)} ГБ/с) "
+                        f"| {ch(mm)} | {ch(bystro.get(v, '?'))} |")
+          print()
+          print("Эталон скорости чтения памяти (замеры/память), медиана 9 проходов:")
+          print()
+          print("| Программа | Потоков | Буфер, ГБ | Скорость чтения, ГБ/с | Предел, слов/с |")
+          print("|---|---|---|---|---|")
+          kto = ""
+          for s in open("pamyat.txt", encoding="utf-8").read().splitlines():
+              if s.startswith("== "):
+                  kto = "Дан (память.dan)" if s.split()[1] == "дан" else "C (чтение_си.c)"
+              m = re.match(r"буфер: ([\d.]+) ГБ", s)
+              if m:
+                  buf = m.group(1)
+              m = re.search(r"потоков: (\d+)", s)
+              if m:
+                  pot = m.group(1)
+              m = re.match(r"скорость чтения: ([\d.]+)", s)
+              if m:
+                  sk = m.group(1)
+              m = re.match(r"предел для ([\d.]+) ГБ весов: ([\d.]+)", s)
+              if m:
+                  print(f"| {kto} | {pot} | {ch(buf)} | {ch(sk)} | {ch(m.group(2))} (для {ch(m.group(1))} ГБ) |")
+          PY
