@@ -70,6 +70,9 @@ import re
     # примеры документации с записью, которую разбирает только компилятор на Дане
     (["сам/разбор.dan", "сам/лексер.dan"], ["test_dokumentaciya"]),
     (["yadra.py"], ТАБЛИЦЫ + ["test_yadra"]),
+    # локальные языковые модели через llama.cpp (модуль «модели»)
+    (["modeli.py"], ТАБЛИЦЫ + ["test_modeli"]),
+    (["sreda/modeli.c", "gguf_malaya.py", "сам/порождение.dan", "сам/дан.dan"], ["test_modeli"]),
     (["formatirovanie.py"], ["test_formatirovanie", "test_raskladka", "test_ustoychivost",
                              "test_sam.ТестыФорматаНаДане"]),
     (["dokumentaciya.py"], ["test_dokumentaciya", "test_opisaniya", "test_sam.ТестыДокументацииНаДане"]),
@@ -104,7 +107,7 @@ import re
 # модули библиотеки, у которых есть свой файл тестов
 ТЕСТЫ_МОДУЛЕЙ = {"json": "test_json", "csv": "test_excel", "excel": "test_excel", "xml": "test_xml",
                  "word": "test_word", "pdf": "test_pdf", "http": "test_http", "почта": "test_pochta",
-                 "sqlite": "test_sqlite", "окна": "test_okna"}
+                 "sqlite": "test_sqlite", "окна": "test_okna", "модели": "test_modeli"}
 
 
 @functools.lru_cache(maxsize=None)

@@ -130,6 +130,7 @@ static struct {
     uint32_t (*n_batch)(const void *);
     void (*log_set)(void (*)(int, const char *, void *), void *);
     void (*load_all)(void);         /* ggml_backend_load_all: only in builds with backends as separate files */
+    void *(*set_abort)(void (*)(const char *));   /* ggml_set_abort_callback */
 } dan_ll;
 
 #ifndef DAN_LIB_LOCK
@@ -164,14 +165,14 @@ DAN_LIB_LOCK(dan_ll_lock);
 #define DAN_LL_SEP "/"
 #endif
 
-/* the last error that llama.cpp wrote to its log (it explains a failed load) */
+/* the first error that llama.cpp wrote to its log since the last reset (it explains a failed load) */
 static char dan_ll_last[512];
 static int dan_ll_echo;
 
 static void dan_ll_log(int level, const char *text, void *data) {
     (void)data;
     if (dan_ll_echo && text) fputs(text, stderr);
-    if (level == 4 /* GGML_LOG_LEVEL_ERROR */ && text) {
+    if (level == 4 /* GGML_LOG_LEVEL_ERROR */ && text && !dan_ll_last[0]) {
         size_t n = strlen(text);
         while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r')) n--;
         if (n >= sizeof dan_ll_last) n = sizeof dan_ll_last - 1;
@@ -181,6 +182,36 @@ static void dan_ll_log(int level, const char *text, void *data) {
         }
     }
 }
+
+/* A failed check inside llama.cpp (GGML_ASSERT, for example on strange numbers in a
+   damaged model file) calls abort() and would stop the whole program. While the
+   thread of the program is inside a call to llama.cpp, the abort handler of ggml
+   jumps back to it instead: the call gives an error value. The memory that
+   llama.cpp held in that call is lost, and a model after such a failure is not
+   used any more. A failure in another thread (a thread of ggml) still stops the
+   program, with the message. */
+#ifndef __wasi__
+static _Thread_local jmp_buf *dan_ll_jump;
+static _Thread_local char dan_ll_abort_text[512];
+
+static void dan_ll_abort(const char *message) {
+    if (dan_ll_jump) {
+        snprintf(dan_ll_abort_text, sizeof dan_ll_abort_text, "%s", message ? message : "");
+        jmp_buf *j = dan_ll_jump;
+        dan_ll_jump = NULL;
+        longjmp(*j, 1);
+    }
+    fprintf(stderr, "llama.cpp остановила программу: %s\n", message ? message : "");
+}
+#define DAN_LL_GUARD(ok, call) do { \
+        jmp_buf dan_ll_jb; \
+        if (setjmp(dan_ll_jb) == 0) { dan_ll_jump = &dan_ll_jb; call; dan_ll_jump = NULL; (ok) = 1; } \
+        else { (ok) = 0; } \
+    } while (0)
+#else
+static char dan_ll_abort_text[1];
+#define DAN_LL_GUARD(ok, call) do { call; (ok) = 1; } while (0)
+#endif
 
 static void *dan_ll_sym(void *lib, const char *name) {
 #if defined(_WIN32)
@@ -362,6 +393,15 @@ static int dan_ll_take(void *lib, const char *path) {
         }
     }
     *(void **)(void *)&dan_ll.load_all = dan_ll_sym(lib, "ggml_backend_load_all");
+    *(void **)(void *)&dan_ll.set_abort = dan_ll_sym(lib, "ggml_set_abort_callback");
+#if defined(_WIN32)
+    /* GetProcAddress looks only in the library itself: the functions of ggml are in ggml-base.dll */
+    HMODULE base = GetModuleHandleW(L"ggml-base.dll");
+    if (!dan_ll.load_all && base) *(void **)(void *)&dan_ll.load_all = (void *)GetProcAddress(base, "ggml_backend_load_all");
+    if (!dan_ll.set_abort && base) *(void **)(void *)&dan_ll.set_abort = (void *)GetProcAddress(base, "ggml_set_abort_callback");
+    HMODULE all = GetModuleHandleW(L"ggml.dll");
+    if (!dan_ll.load_all && all) *(void **)(void *)&dan_ll.load_all = (void *)GetProcAddress(all, "ggml_backend_load_all");
+#endif
     if (!dan_ll_layout_ok()) {
         dan_ll_why("библиотека llama.cpp несовместима с Даном: «", path,
                    "»: другое устройство структур параметров (другая версия llama.cpp).");
@@ -452,6 +492,9 @@ static int dan_ll_load(void) {
         }
         if (lib && dan_ll_take(lib, found)) {
             dan_ll.log_set(dan_ll_log, NULL);
+#ifndef __wasi__
+            if (dan_ll.set_abort) dan_ll.set_abort(dan_ll_abort);
+#endif
             if (dan_ll.load_all) dan_ll.load_all();
             dan_ll.backend_init();
             dan_ll.state = 1;
@@ -645,6 +688,7 @@ typedef struct {
     int32_t n_cache, cap_cache;
     uint32_t n_ctx, n_batch;
     int busy;
+    int broken;                     /* llama.cpp failed inside a call: the model is not used any more */
     /* generation */
     void *smpl;
     int active;
@@ -694,7 +738,6 @@ static int dan_ll_threads(int64_t asked) {
 }
 
 static dr_i dan_llm_load(dan_str path, int64_t n_ctx, int64_t threads, bool mmap, int64_t limit_mb, int line) {
-    if (!dan_ll_load()) return dr_i_err(dan_strdup(dan_ll.why), line);
     if (n_ctx < 0 || n_ctx > 1048576) return dr_i_err(dan_strdup("размер контекста должен быть от 0 (как в модели) до 1048576 токенов"), line);
     if (limit_mb < 0) return dr_i_err(dan_strdup("предел памяти не может быть отрицательным"), line);
     uint64_t size = 0;
@@ -707,6 +750,7 @@ static dr_i dan_llm_load(dan_str path, int64_t n_ctx, int64_t threads, bool mmap
         dan_buf_add(&m, bad);
         return dr_i_err(dan_buf_str(&m), line);
     }
+    if (!dan_ll_load()) return dr_i_err(dan_strdup(dan_ll.why), line);
     if (limit_mb > 0 && size / 1048576 >= (uint64_t)limit_mb) {
         char m[300];
         snprintf(m, sizeof m, "» занимает %llu МБ, а предел памяти - %lld МБ",
@@ -717,7 +761,18 @@ static dr_i dan_llm_load(dan_str path, int64_t n_ctx, int64_t threads, bool mmap
     mp.load_mode = mmap ? 1 : 0;         /* LLAMA_LOAD_MODE_MMAP or LLAMA_LOAD_MODE_NONE */
     mp.n_gpu_layers = 0;                 /* the processor: the same results on every computer */
     dan_ll_last[0] = 0;
-    void *model = dan_ll.model_load(path, mp);
+    void *model = NULL;
+    int ok = 0;
+    DAN_LL_GUARD(ok, model = dan_ll.model_load(path, mp));
+    if (!ok) {
+        dan_buf b = { NULL, 0, 0 };
+        dan_buf_add(&b, "llama.cpp не смогла загрузить модель «");
+        dan_buf_add(&b, path);
+        dan_buf_add(&b, "»: файл повреждён или его значения не подходят этой версии llama.cpp (llama.cpp сообщила: ");
+        dan_buf_add(&b, dan_ll_abort_text);
+        dan_buf_add(&b, ")");
+        return dr_i_err(dan_buf_str(&b), line);
+    }
     if (!model) {
         dan_buf b = { NULL, 0, 0 };
         dan_buf_add(&b, "llama.cpp не смогла загрузить модель «");
@@ -736,7 +791,9 @@ static dr_i dan_llm_load(dan_str path, int64_t n_ctx, int64_t threads, bool mmap
     cp.n_ctx = (uint32_t)n_ctx;
     cp.n_threads = cp.n_threads_batch = dan_ll_threads(threads);
     cp.no_perf = true;
-    void *ctx = dan_ll.init_from_model(model, cp);
+    void *ctx = NULL;
+    DAN_LL_GUARD(ok, ctx = dan_ll.init_from_model(model, cp));
+    if (!ok) return dan_ll_fail_i("llama.cpp не смогла создать контекст для модели: ", dan_ll_abort_text, "", line);
     if (!ctx) {
         dan_ll.model_free(model);
         return dan_ll_fail_i("llama.cpp не смогла создать контекст для модели «", path,
@@ -765,6 +822,7 @@ static dan_ll_m *dan_ll_take_model(int64_t n, const char **why) {
     DAN_LL_LOCK();
     dan_ll_m *m = n >= 1 && n <= dan_ll_count ? dan_ll_models[n - 1] : NULL;
     if (!m) *why = "модель уже освобождена или не загружалась";
+    else if (m->broken) { *why = "после сбоя внутри llama.cpp модель больше не используется: загрузите её заново"; m = NULL; }
     else if (m->busy) { *why = "модель занята: с одной моделью одновременно работает одна задача"; m = NULL; }
     else m->busy = 1;
     DAN_LL_UNLOCK();
@@ -796,9 +854,11 @@ static void dan_llm_free(int64_t n, int line) {
     if (m) dan_ll_models[n - 1] = NULL;
     DAN_LL_UNLOCK();
     if (!m) return;
-    dan_ll_stop_generation(m);
-    dan_ll.ctx_free(m->ctx);
-    dan_ll.model_free(m->model);
+    if (!m->broken) {                    /* after a failure inside llama.cpp its objects are left as they are */
+        dan_ll_stop_generation(m);
+        dan_ll.ctx_free(m->ctx);
+        dan_ll.model_free(m->model);
+    }
     free(m->cache);
     free(m->pending);
     free(m);
@@ -829,7 +889,13 @@ static int dan_ll_decode(dan_ll_m *m, dan_ll_token *t, int32_t n) {
         int32_t k = n - i;
         if ((uint32_t)k > m->n_batch) k = (int32_t)m->n_batch;
         struct dan_ll_batch b = { k, t + i, NULL, NULL, NULL, NULL, NULL };
-        int32_t rc = dan_ll.decode(m->ctx, b);
+        int32_t rc = 0;
+        int ok = 0;
+        DAN_LL_GUARD(ok, rc = dan_ll.decode(m->ctx, b));
+        if (!ok) {
+            m->broken = 1;
+            return INT32_MIN;
+        }
         if (rc != 0) return rc;
         i += k;
     }
@@ -888,6 +954,11 @@ static dr_i dan_llm_start(int64_t n, dan_str prompt, double temp, int64_t top_k,
     }
     m->n_cache = same;
     int rc = dan_ll_decode(m, t + same, nt - same);
+    if (rc == INT32_MIN) {
+        free(t);
+        dan_ll_give_model(m);
+        return dan_ll_fail_i("сбой внутри llama.cpp: ", dan_ll_abort_text, "", line);
+    }
     if (rc != 0 || !dan_ll_cache_add(m, t + same, nt - same)) {
         free(t);
         dan_ll.memory_clear(mem, true);
@@ -1007,7 +1078,14 @@ static dr_s dan_llm_next(int64_t n, int line) {
             return dr_s_some(s);
         }
         if (m->left == 0) { m->active = 0; continue; }
-        dan_ll_token tok = dan_ll.sample(m->smpl, m->ctx, -1);
+        dan_ll_token tok = 0;
+        int ok = 0;
+        DAN_LL_GUARD(ok, tok = dan_ll.sample(m->smpl, m->ctx, -1));
+        if (!ok) {
+            m->broken = 1;
+            dan_ll_give_model(m);
+            return dan_ll_fail_s("сбой внутри llama.cpp: ", dan_ll_abort_text, line);
+        }
         if (dan_ll.is_eog(m->vocab, tok)) { m->active = 0; continue; }
         int32_t k = dan_ll.token_to_piece(m->vocab, tok, piece, (int32_t)sizeof piece, 0, false);
         if (k < 0) k = 0;                /* a part longer than 256 bytes is not in real vocabularies */
@@ -1034,6 +1112,10 @@ static dr_s dan_llm_next(int64_t n, int line) {
                                            "(Настройки.контекст) или ограничьте ответ (Выборка.максимум_токенов)"), line);
             }
             int rc = dan_ll_decode(m, &tok, 1);
+            if (rc == INT32_MIN) {
+                dan_ll_give_model(m);
+                return dan_ll_fail_s("сбой внутри llama.cpp: ", dan_ll_abort_text, line);
+            }
             if (rc != 0 || !dan_ll_cache_add(m, &tok, 1)) {
                 dan_ll_stop_generation(m);
                 dan_ll_give_model(m);
