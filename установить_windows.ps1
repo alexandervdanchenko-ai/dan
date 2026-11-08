@@ -1,6 +1,6 @@
 ﻿# Установка языка Дан на компьютер с Windows.
 # Создаёт папку D:\проекты\Дан (если диска D нет - папку «проекты\Дан» в папке
-# пользователя), устанавливает Python, компилятор C (WinLibs), упаковщик UPX и
+# пользователя), устанавливает Python, компилятор C (WinLibs), упаковщик UPX (необязательно) и
 # Git, загружает проект из GitHub, библиотеку llama.cpp для модуля «модели»,
 # собирает компилятор на Дане из семени (semya\dan.exe) и проверяет проект тестами.
 # Программы собирает и выполняет semya\dan.exe; «python dan.py» - прежний
@@ -49,7 +49,7 @@ function Работает($команда) {
     finally { $ErrorActionPreference = $прежнее }
 }
 
-function Установить($команда, $пакет, $название) {
+function Установить($команда, $пакет, $название, [switch]$Необязательно) {
     if (Работает $команда) {
         Write-Host "$название уже установлен"
         return
@@ -57,6 +57,10 @@ function Установить($команда, $пакет, $название) {
     Write-Host "Устанавливаю $название..."
     $null = Выполнить winget install --id $пакет -e --silent --accept-package-agreements --accept-source-agreements
     ОбновитьPath
+    if ($Необязательно -and -not (Работает $команда)) {
+        Write-Host "Не удалось установить $название. Он нужен только для параметра --сжать; установка продолжается без него (позже: winget install $пакет)." -ForegroundColor Yellow
+        return
+    }
     if (-not (Работает $команда)) {
         Write-Host "$название установлен, но пока не виден. Закройте окно PowerShell, откройте новое и запустите сценарий ещё раз." -ForegroundColor Yellow
         exit 1
@@ -73,7 +77,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 Установить "git" "Git.Git" "Git"
 Установить "python" "Python.Python.3.12" "Python"
 Установить "gcc" "BrechtSanders.WinLibs.POSIX.UCRT" "компилятор C (WinLibs)"
-Установить "upx" "UPX.UPX" "упаковщик UPX"
+Установить "upx" "UPX.UPX" "упаковщик UPX" -Необязательно
 
 Шаг "Создаю папку $Папка"
 New-Item -ItemType Directory -Force -Path (Split-Path $Папка -Parent) | Out-Null
