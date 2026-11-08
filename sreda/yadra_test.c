@@ -529,6 +529,61 @@ static void test_mnogo(void) {
     }
 }
 
+/* small batches: the kernel of a row by 1..8 vectors of every variant - the
+   bits of the row kernel of C (blocks of the tail, a zero block); the
+   matrix by 2..9 vectors - for every row and vector */
+static void test_malye(void) {
+    enum { MAXB = 17, VMAX = 9 };
+    static const int64_t nb[] = {1, 7, 8, 9, 16, 17};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f];
+        int64_t us = dan_vk_rn_units(f, MAXB) * DAN_VK_RN_UNIT, xs = MAXB * dan_vk_fmt_xbytes[f];
+        uint8_t *w = malloc((size_t)(MAXB * bytes)), *xp = malloc((size_t)(VMAX * us));
+        float *x = malloc((size_t)(VMAX * MAXB * n) * 4);
+        kv_blocks(f, w, MAXB, 7070 + (uint64_t)f);
+        for (int64_t i = 0; i < VMAX * MAXB * n; i++) x[i] = (float)(rnd2() * (i % 3 == 0 ? 50.0 : 1.0));
+        for (int64_t i = 0; i < n; i++) x[2 * MAXB * n + 3 * n + i] = 0.0f;   /* a zero block */
+        uint8_t *xq = kv_quantize_x(f, x, VMAX * MAXB * n);
+        for (int v = 0; v < nvariants; v++) {
+            const dan_vk_table *t = variants[v];
+            if (!t->sm || !t->sm(f, 1, NULL, 0, NULL, 0, NULL)) continue;
+            for (size_t s2 = 0; s2 < sizeof nb / sizeof *nb; s2++) {
+                int64_t b = nb[s2];
+                for (int k = 0; k < VMAX; k++) dan_vk_rn_prep(f, xq + k * xs, b, xp + k * us, 0);
+                for (int nv = 1; nv <= DAN_VK_SM_MAX; nv++) {
+                    if (!t->sm(f, nv, NULL, 0, NULL, 0, NULL)) continue;
+                    float out[DAN_VK_SM_MAX];
+                    t->sm(f, nv, w, b, xp + (nv & 1) * us, us, out);
+                    for (int k = 0; k < nv; k++) {
+                        float e = dan_vk_fmt_dot(&dan_vk_plain, f, w, xq + (k + (nv & 1)) * xs, b);
+                        CHECK(same32(out[k], e), "%s %s на %d векторов, вектор %d, %d блоков: %.9g и %.9g", labels[v], kv_names[f], nv, k,
+                              (int)b, out[k], e);
+                    }
+                }
+            }
+        }
+        free(w); free(xp); free(x); free(xq);
+    }
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t n = dan_vk_fmt_n[f], rows = 37, cols = n == 32 ? 11 * 32 : 9 * 256, bytes = dan_vk_fmt_bytes[f];
+        int64_t blocks = rows * cols / n;
+        for (int64_t nv = 2; nv <= 9; nv++) {
+            uint8_t *w = malloc((size_t)(blocks * bytes));
+            float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4);
+            kv_blocks(f, w, blocks, 8080 + (uint64_t)(f * 10 + nv));
+            for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)rnd2();
+            for (int64_t k = 0; k < nv; k++) {
+                void *xk = kv_quantize_x(f, x + k * cols, cols);
+                dan_vk_cur = &dan_vk_plain;
+                dan_vk_matvec_fmt(f, w, xk, ys + k * rows, rows, cols);
+                free(xk);
+            }
+            kv_matmul(f, w, x, rows, cols, nv, ys);
+            free(w); free(x); free(ys);
+        }
+    }
+}
+
 static void test_matvec(void) {
     int64_t rows = 517, cols = 300;
     float *w = malloc(rows * cols * 4), *x = malloc(cols * 4), *y1 = malloc(rows * 4), *y2 = malloc(rows * 4);
@@ -881,6 +936,56 @@ static void bench_batch(void) {
     free(x); free(y);
 }
 
+/* small batches: a matrix of DAN_ZAMER_MB megabytes (256 by default: more
+   than the caches) with rows of 4096 numbers by 1..9 vectors - the time
+   divided by the time of the matrix by one vector (matvec), the best of 5;
+   «zamer_malye» as the first argument */
+static void bench_small(void) {
+    const char *e = getenv("DAN_ZAMER_MB");
+    long mb = e ? strtol(e, NULL, 10) : 0;
+    if (mb <= 0) mb = 256;
+    enum { COLS = 4096, NV = 9 };
+    static const int fmts[] = {DAN_FMT_Q4K, DAN_FMT_Q6K, DAN_FMT_Q80};
+    float *x = malloc((size_t)COLS * NV * 4);
+    for (int64_t i = 0; i < (int64_t)COLS * NV; i++) x[i] = (float)rnd();
+    printf("потоков: %d\n", dan_pool_threads());
+    for (size_t fi = 0; fi < sizeof fmts / sizeof *fmts; fi++) {
+        int f = fmts[fi];
+        int64_t bytes = dan_vk_fmt_bytes[f], rb = COLS / dan_vk_fmt_n[f] * bytes, rows = ((int64_t)mb << 20) / rb;
+        int64_t blocks = rows * COLS / dan_vk_fmt_n[f];
+        uint8_t *w = malloc((size_t)(blocks * bytes));
+        float *y = malloc((size_t)(rows * NV) * 4);
+        kv_blocks(f, w, blocks, 131 + (uint64_t)f);
+        uint16_t hd = dan_f32_to_f16(0.01f);
+        for (int64_t b = 0; b < blocks; b++) {
+            memcpy(w + b * bytes + (f == DAN_FMT_Q6K ? 208 : 0), &hd, 2);
+            if (f == DAN_FMT_Q4K || f == DAN_FMT_Q5K) memcpy(w + b * bytes + 2, &hd, 2);
+        }
+        uint8_t *xq = kv_quantize_x(f, x, (int64_t)COLS * NV);
+        for (int v = 0; v < nvariants; v++) {
+            if (strcmp(labels[v], "c") == 0) continue;
+            dan_vk_cur = variants[v];
+            double t1 = 0;
+            printf("%-10s малые пакеты %s (%ld МБ), проходов по одному вектору:", labels[v], kv_names[f], mb);
+            for (int nv = 1; nv <= NV; nv++) {
+                double best = 1e30;
+                for (int pass = 0; pass < 5; pass++) {
+                    double t0 = now();
+                    if (nv == 1) dan_vk_matvec_fmt(f, w, xq, y, rows, COLS);
+                    else dan_vk_matmul_fmt(f, w, xq, y, rows, COLS, nv);
+                    double t = now() - t0;
+                    if (t < best) best = t;
+                }
+                if (nv == 1) { t1 = best; printf(" (%.1f ГБ/с)", (double)blocks * bytes / best * 1e-9); }
+                else printf(" %.2f", best / t1);
+            }
+            printf("\n");
+        }
+        free(w); free(y); free(xq);
+    }
+    free(x);
+}
+
 /* measurements: GFLOP/s by variant; «замер» or «zamer» (Windows) as the first argument */
 static void bench(void) {
     enum { DN = 4096, MV = 4096, MM = 1024 };
@@ -950,6 +1055,7 @@ int main(int argc, char **argv) {
     check_subnormals();
     if (argc > 1 && (strcmp(argv[1], "замер") == 0 || strcmp(argv[1], "zamer") == 0)) { bench(); return 0; }
     if (argc > 1 && (strcmp(argv[1], "замер_пакет") == 0 || strcmp(argv[1], "zamer_paket") == 0)) { bench_batch(); return 0; }
+    if (argc > 1 && (strcmp(argv[1], "замер_малые") == 0 || strcmp(argv[1], "zamer_malye") == 0)) { bench_small(); return 0; }
     test_f16();
     test_dot();
     test_mm();
@@ -963,6 +1069,7 @@ int main(int argc, char **argv) {
     test_kvanty();
     test_rn();
     test_mnogo();
+    test_malye();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;
