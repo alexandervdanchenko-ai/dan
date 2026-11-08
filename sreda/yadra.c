@@ -2305,25 +2305,50 @@ DAN_VK_KDOT2_AVX2(dan_vk_q3k_dot_avx2, dan_vk_q3k_parts_avx2, DAN_Q3K_BYTES, 108
 DAN_VK_KDOT2_AVX2(dan_vk_iq4xs_dot_avx2, dan_vk_iq4xs_parts_avx2, DAN_IQ4XS_BYTES, 0, 0, 0, dan_vk_iq4xs_p)
 
 /* строки на векторы Q2_K (единицы - dan_vk_rn_lowbit_c): T - части с масштабами, M - наименьшие на
-   суммы частей вектора; Q3_K и IQ4_XS считают ядра Q6_K (тот же вид единиц и сдвиг в суммах вектора) */
+   суммы частей вектора; IQ4_XS считают ядра Q6_K (тот же вид единиц и сдвиг в суммах вектора).
+   Суммы части Q2_K (16 чисел до 3 на числа вектора) и Q3_K без сдвига (до 4 по модулю) помещаются в
+   16 бит: суммы двух половин сжимаются в один регистр (vpackssdw) и умножаются на масштабы, также
+   сжатые, одной vpmaddwd вместо vpmulld на каждую половину; наименьшие Q2_K - vpmaddwd 16 байтов
+   наименьших строки на 16 сумм частей вектора. Порядок 16-битных чисел после vpackssdw двух
+   регистров по 8: половина 0 дорожки 0-3, половина 1 дорожки 0-3, затем то же для дорожек 4-7. */
+#define DAN_VK_PK_ORDER _mm_setr_epi8(0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15)
+/* 16 наименьших строки (байты после d и dmin единицы) в порядке vpackssdw как 16-битные числа */
+DAN_VK_AVX2 static inline __m256i dan_vk_q2k_mins16_avx2(const uint8_t *u) {
+    return _mm256_cvtepu8_epi16(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(const void *)(u + DAN_VK_RN_D + 8)), DAN_VK_PK_ORDER));
+}
+/* 32-битные числа двух половин (масштабы строки или суммы вектора) как 16-битные в порядке vpackssdw */
+DAN_VK_AVX2 static inline __m256i dan_vk_pk16_avx2(const uint8_t *p) {
+    return _mm256_packs_epi32(DAN_VK_LD(p), DAN_VK_LD(p + 32));
+}
 DAN_VK_VNNI static inline void dan_vk_rn_q2k_vnni(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
-    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
-    for (int n = 0; n < 2; n++) {
-        DAN_VK_RNV_STEPS(128 * n, 4)
-        for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) {
-            __m256i sc = DAN_VK_LD(wb[r] + DAN_VK_RN_SC + 32 * n);
-            for (int k = 0; k < DAN_VK_RN_V; k++) {
-                __m256i t = _mm256_mullo_epi32(acc[r][k], sc);
-                T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], t) : t;
-            }
+    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V], h0[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
+    DAN_VK_RNV_STEPS(0, 4)
+    for (int r = 0; r < DAN_VK_RN_R_VNNI; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) h0[r][k] = acc[r][k];
+    DAN_VK_RNV_STEPS(128, 4)
+    __m256i bs[DAN_VK_RN_V];
+    for (int k = 0; k < DAN_VK_RN_V; k++) bs[k] = dan_vk_pk16_avx2(xb[k] + DAN_VK_RN_SC);
+    for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) {
+        __m256i sc = dan_vk_pk16_avx2(wb[r] + DAN_VK_RN_SC), mn = dan_vk_q2k_mins16_avx2(wb[r]);
+        for (int k = 0; k < DAN_VK_RN_V; k++) {
+            T[r * DAN_VK_RN_V + k] = _mm256_madd_epi16(_mm256_packs_epi32(h0[r][k], acc[r][k]), sc);
+            M[r * DAN_VK_RN_V + k] = _mm256_madd_epi16(mn, bs[k]);
         }
     }
+}
+DAN_VK_VNNI static inline void dan_vk_rn_q3k_vnni(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
+    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V], h0[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
+    (void)M;
+    DAN_VK_RNV_STEPS(0, 4)
+    for (int r = 0; r < DAN_VK_RN_R_VNNI; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) h0[r][k] = _mm256_sub_epi32(acc[r][k], DAN_VK_LD(xb[k] + DAN_VK_RN_SC));
+    DAN_VK_RNV_STEPS(128, 4)
     for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) {
-        __m256i m0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(wb[r] + DAN_VK_RN_D + 8)));
-        __m256i m1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(wb[r] + DAN_VK_RN_D + 16)));
-        for (int k = 0; k < DAN_VK_RN_V; k++)
-            M[r * DAN_VK_RN_V + k] = _mm256_add_epi32(_mm256_mullo_epi32(m0, DAN_VK_LD(xb[k] + DAN_VK_RN_SC)),
-                                                      _mm256_mullo_epi32(m1, DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32)));
+        __m256i sc = dan_vk_pk16_avx2(wb[r] + DAN_VK_RN_SC);
+        for (int k = 0; k < DAN_VK_RN_V; k++) {
+            __m256i h1 = _mm256_sub_epi32(acc[r][k], DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32));
+            T[r * DAN_VK_RN_V + k] = _mm256_madd_epi16(_mm256_packs_epi32(h0[r][k], h1), sc);
+        }
     }
 }
 DAN_VK_AVX2 static inline void dan_vk_rn_q2k_avx2(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
@@ -2335,16 +2360,16 @@ DAN_VK_AVX2 static inline void dan_vk_rn_q2k_avx2(const uint8_t *const *wb, cons
             for (int k = 0; k < DAN_VK_RN_V; k++)
                 T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], acc[r][k]) : acc[r][k];
     }
+    __m256i bs[DAN_VK_RN_V];
+    for (int k = 0; k < DAN_VK_RN_V; k++) bs[k] = dan_vk_pk16_avx2(xb[k] + DAN_VK_RN_SC);
     for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
-        __m256i m0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(wb[r] + DAN_VK_RN_D + 8)));
-        __m256i m1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(const void *)(wb[r] + DAN_VK_RN_D + 16)));
-        for (int k = 0; k < DAN_VK_RN_V; k++)
-            M[r * DAN_VK_RN_V + k] = _mm256_add_epi32(_mm256_mullo_epi32(m0, DAN_VK_LD(xb[k] + DAN_VK_RN_SC)),
-                                                      _mm256_mullo_epi32(m1, DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32)));
+        __m256i mn = dan_vk_q2k_mins16_avx2(wb[r]);
+        for (int k = 0; k < DAN_VK_RN_V; k++) M[r * DAN_VK_RN_V + k] = _mm256_madd_epi16(mn, bs[k]);
     }
 }
 DAN_VK_RNK_X86(dan_vk_rn_q2k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1, dan_vk_rn_q2k_vnni)
 DAN_VK_RNK_X86(dan_vk_rn_q2k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 1, dan_vk_rn_q2k_avx2)
+DAN_VK_RNK_X86(dan_vk_rn_q3k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_q3k_vnni)
 
 /* Q3_K на AVX2: числа q + 4 не больше 7, 16-битные суммы всех 4 шагов половины не больше
    4 * 2 * 7 * 128 - одно умножение на масштабы на половину (у ядра Q6_K - на 2 шага) */
@@ -2354,13 +2379,17 @@ DAN_VK_AVX2 static inline void dan_vk_rn_q3k_avx2(const uint8_t *const *wb, cons
     for (int n = 0; n < 2; n++) {
         for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) s16[r] = dan_vk_sc16_avx2(wb[r] + DAN_VK_RN_SC + 32 * n);
         DAN_VK_RNA_STEPS(128 * n, 4, 4, s16[r])
-        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
-            __m256i sc = DAN_VK_LD(wb[r] + DAN_VK_RN_SC + 32 * n);
-            for (int k = 0; k < DAN_VK_RN_V; k++) {
-                __m256i t = _mm256_sub_epi32(acc[r][k], _mm256_mullo_epi32(DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32 * n), sc));
-                T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], t) : t;
-            }
-        }
+        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+            for (int k = 0; k < DAN_VK_RN_V; k++)
+                T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], acc[r][k]) : acc[r][k];
+    }
+    /* сдвиг 4 * сумма частей вектора на масштабы: суммы и масштабы в 16 битах, одна vpmaddwd */
+    __m256i xs[DAN_VK_RN_V];
+    for (int k = 0; k < DAN_VK_RN_V; k++) xs[k] = dan_vk_pk16_avx2(xb[k] + DAN_VK_RN_SC);
+    for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
+        __m256i sc = dan_vk_pk16_avx2(wb[r] + DAN_VK_RN_SC);
+        for (int k = 0; k < DAN_VK_RN_V; k++)
+            T[r * DAN_VK_RN_V + k] = _mm256_sub_epi32(T[r * DAN_VK_RN_V + k], _mm256_madd_epi16(sc, xs[k]));
     }
 }
 DAN_VK_RNK_X86(dan_vk_rn_q3k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_q3k_avx2)
@@ -2400,10 +2429,10 @@ DAN_VK_RNK_X86(dan_vk_rn_iq4xs_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_R
      dan_vk_rn_q2k_avx2f, dan_vk_rn_q3k_avx2f, dan_vk_rn_iq4xs_avx2f}
 #define DAN_VK_RN_VNNI_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_b32_vnni_f, dan_vk_rn_q4k_vnni, dan_vk_rn_q4k_vnni, dan_vk_rn_q6k_vnni_f, dan_vk_rn_b32_vnni_f, NULL, NULL, dan_vk_rn_b32_vnni_f, \
-     dan_vk_rn_q2k_vnni_f, dan_vk_rn_q6k_vnni_f, dan_vk_rn_q6k_vnni_f}
+     dan_vk_rn_q2k_vnni_f, dan_vk_rn_q3k_vnni_f, dan_vk_rn_q6k_vnni_f}
 #define DAN_VK_RN_VNNIZ_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_b32_vnniz_f, dan_vk_rn_q4k_vnniz, dan_vk_rn_q4k_vnniz, dan_vk_rn_q6k_vnniz_f, dan_vk_rn_b32_vnniz_f, NULL, NULL, dan_vk_rn_b32_vnniz_f, \
-     dan_vk_rn_q2k_vnni_f, dan_vk_rn_q6k_vnni_f, dan_vk_rn_q6k_vnni_f}
+     dan_vk_rn_q2k_vnni_f, dan_vk_rn_q3k_vnni_f, dan_vk_rn_q6k_vnni_f}
 
 /* ---- AMX: 16 rows by 16 vectors by tiles (Intel Xeon of 2023 and later, Linux) ----
 
