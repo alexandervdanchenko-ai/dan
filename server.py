@@ -15,7 +15,11 @@ LSP: Sublime Text, Kate, Neovim, Emacs) запускает сервер и об�
 - показывает список функций и типов файла;
 - приводит текст к единому виду (formatirovanie.py).
 
-Сервер написан только на стандартной библиотеке Python.
+Сервер написан только на стандартной библиотеке Python. Это прежний сервер: он проверяет программы
+компилятором на Python, который не знает возможностей версий 1.5 и новее (плотные массивы,
+«параллельно для», модуль «модели»). Поэтому «python dan.py сервер» передаёт работу серверу
+компилятора на Дане («дан сервер», сам/сервер.dan), если он собран: semya/dan (semya\\dan.exe) не
+старше семени или файл из переменной DAN_SAM_EXE. DAN_SERVER_PYTHON=1 оставляет этот сервер.
 """
 
 import json
@@ -497,7 +501,29 @@ class Сервер:
                  "newText": новый}]
 
 
+def компилятор_на_дане():
+    """Собранный компилятор на Дане для «дан сервер» или None."""
+    if os.environ.get("DAN_SERVER_PYTHON"):
+        return None
+    if os.environ.get("DAN_SAM_EXE") and os.path.isfile(os.environ["DAN_SAM_EXE"]):
+        return os.environ["DAN_SAM_EXE"]
+    папка = os.path.dirname(os.path.abspath(__file__))
+    семя = os.path.join(папка, "semya", "dan.c")
+    for имя in ("dan.exe", "dan"):
+        путь = os.path.join(папка, "semya", имя)
+        # компилятор, собранный из прежнего семени, может ещё не знать команды «сервер»
+        if os.path.isfile(путь) and (not os.path.isfile(семя) or os.path.getmtime(путь) >= os.path.getmtime(семя)):
+            return путь
+    return None
+
+
 def main():
+    дан = компилятор_на_дане()
+    if дан:
+        import subprocess
+        среда = dict(os.environ)
+        среда.setdefault("DAN_HOME", os.path.dirname(os.path.abspath(__file__)))
+        sys.exit(subprocess.run([дан, "сервер"], env=среда).returncode)
     сервер = Сервер(sys.stdin.buffer, sys.stdout.buffer)
     sys.setrecursionlimit(10000)
     сервер.работать()

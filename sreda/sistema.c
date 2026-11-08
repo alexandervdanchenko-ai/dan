@@ -971,3 +971,312 @@ static void dan_assert_eq_str(dan_str got, dan_str want, int line) {
 static void dan_assert_eq_bool(bool got, bool want, int line) {
     if (got != want) dan_assert_fail(got ? DAN_TRUE : DAN_FALSE, want ? DAN_TRUE : DAN_FALSE, line);
 }
+
+
+/* ==== обмен байтами с другой программой и соединения TCP ====
+   ввод_байтов и вывести_байты читают и пишут стандартные потоки без преобразований
+   (в Windows поток в текстовом режиме заменил бы \n на \r\n): так программа говорит с
+   редактором по протоколу LSP. Соединения TCP - только на адресе 127.0.0.1 этого
+   компьютера: локальный сервер (песочница Дана). В Windows функции сокетов берутся из
+   системной ws2_32.dll при первом обращении (LoadLibrary): программе не нужна
+   библиотека сокетов при сборке. */
+
+#define DAN_IO_MAX ((int64_t)1 << 24)
+
+static dan_bytes dan_read_stdin(int64_t most, int line) {
+    if (most < 1 || most > DAN_IO_MAX) dan_error(DAN_MSG_IO_COUNT, line);
+    uint8_t *buf = dan_alloc((size_t)most);
+    int64_t got = 0;
+#if defined(_WIN32)
+    DWORD n = 0;
+    if (ReadFile(GetStdHandle(STD_INPUT_HANDLE), buf, (DWORD)most, &n, NULL)) got = (int64_t)n;
+#else
+    for (;;) {
+        ssize_t n = read(0, buf, (size_t)most);
+        if (n < 0 && errno == EINTR) continue;
+        if (n > 0) got = (int64_t)n;
+        break;
+    }
+#endif
+    dan_bytes_s *r = dan_bytes_alloc(got);
+    if (got > 0) memcpy(r->data, buf, (size_t)got);
+    dan_free(buf);
+    return r;
+}
+
+static void dan_write_stdout(dan_bytes b) {
+    DAN_OUT_LOCK();
+    fflush(stdout);
+    int64_t done = 0;
+    while (done < b->len) {
+#if defined(_WIN32)
+        DWORD n = 0;
+        DWORD part = b->len - done > 0x40000000 ? 0x40000000 : (DWORD)(b->len - done);
+        if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), b->data + done, part, &n, NULL) || n == 0) break;
+#else
+        ssize_t n = write(1, b->data + done, (size_t)(b->len - done));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+#endif
+        done += (int64_t)n;
+    }
+    DAN_OUT_UNLOCK();
+}
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
+static dan_str dan_program_path(void) {
+#if defined(_WIN32)
+    wchar_t *w = dan_alloc(sizeof(wchar_t) * 32768);
+    DWORD n = GetModuleFileNameW(NULL, w, 32767);
+    w[n < 32767 ? n : 32767] = 0;
+    dan_str r = dan_narrow(w);
+    dan_free(w);
+    return r;
+#elif defined(__wasi__)
+    return dan_strdup("");
+#else
+#if defined(__linux__)
+    char *p = dan_alloc(4097);
+    ssize_t n = readlink("/proc/self/exe", p, 4096);
+    if (n > 0) {
+        p[n] = 0;
+        dan_str r = dan_strdup(p);
+        dan_free(p);
+        return r;
+    }
+    dan_free(p);
+#elif defined(__APPLE__)
+    char p[4096];
+    uint32_t size = sizeof p;
+    if (_NSGetExecutablePath(p, &size) == 0) {
+        char *full = realpath(p, NULL);
+        if (full) {
+            dan_str r = dan_strdup(full);
+            free(full);
+            return r;
+        }
+        return dan_strdup(p);
+    }
+#endif
+    if (dan_argc > 0 && dan_argv[0]) {
+        char *full = realpath(dan_argv[0], NULL);
+        if (full) {
+            dan_str r = dan_strdup(full);
+            free(full);
+            return r;
+        }
+        return dan_strdup(dan_argv[0]);
+    }
+    return dan_strdup("");
+#endif
+}
+
+#if defined(_WIN32)
+/* свои описания: заголовок winsock2.h несовместим с windows.h, подключённым раньше */
+typedef uintptr_t dan_sock_t;
+#define DAN_SOCK_BAD ((dan_sock_t)~(uintptr_t)0)
+typedef struct { uint16_t family, port; uint32_t addr; uint8_t zero[8]; } dan_sockaddr_in;
+typedef int (WINAPI *dan_wsastartup_f)(WORD, void *);
+typedef dan_sock_t (WINAPI *dan_socket_f)(int, int, int);
+typedef int (WINAPI *dan_bind_f)(dan_sock_t, const void *, int);
+typedef int (WINAPI *dan_listen_f)(dan_sock_t, int);
+typedef dan_sock_t (WINAPI *dan_accept_f)(dan_sock_t, void *, int *);
+typedef int (WINAPI *dan_recv_f)(dan_sock_t, char *, int, int);
+typedef int (WINAPI *dan_send_f)(dan_sock_t, const char *, int, int);
+typedef int (WINAPI *dan_close_f)(dan_sock_t);
+typedef int (WINAPI *dan_getsockname_f)(dan_sock_t, void *, int *);
+static struct {
+    int ready;
+    dan_socket_f socket; dan_bind_f bind; dan_listen_f listen; dan_accept_f accept;
+    dan_recv_f recv; dan_send_f send; dan_close_f close; dan_getsockname_f getsockname;
+} dan_ws;
+
+static int dan_ws_load(void) {
+    if (dan_ws.ready) return dan_ws.ready > 0;
+    dan_ws.ready = -1;
+    HMODULE lib = LoadLibraryW(L"ws2_32.dll");
+    if (!lib) return 0;
+    dan_wsastartup_f start = (dan_wsastartup_f)(void (*)(void))GetProcAddress(lib, "WSAStartup");
+    dan_ws.socket = (dan_socket_f)(void (*)(void))GetProcAddress(lib, "socket");
+    dan_ws.bind = (dan_bind_f)(void (*)(void))GetProcAddress(lib, "bind");
+    dan_ws.listen = (dan_listen_f)(void (*)(void))GetProcAddress(lib, "listen");
+    dan_ws.accept = (dan_accept_f)(void (*)(void))GetProcAddress(lib, "accept");
+    dan_ws.recv = (dan_recv_f)(void (*)(void))GetProcAddress(lib, "recv");
+    dan_ws.send = (dan_send_f)(void (*)(void))GetProcAddress(lib, "send");
+    dan_ws.close = (dan_close_f)(void (*)(void))GetProcAddress(lib, "closesocket");
+    dan_ws.getsockname = (dan_getsockname_f)(void (*)(void))GetProcAddress(lib, "getsockname");
+    if (!start || !dan_ws.socket || !dan_ws.bind || !dan_ws.listen || !dan_ws.accept || !dan_ws.recv
+        || !dan_ws.send || !dan_ws.close || !dan_ws.getsockname) return 0;
+    uint8_t data[1024];                    /* WSADATA занимает меньше */
+    if (start(0x0202, data) != 0) return 0;
+    dan_ws.ready = 1;
+    return 1;
+}
+#define DAN_SOCK_OK() dan_ws_load()
+#define DAN_SOCKET dan_ws.socket
+#define DAN_BIND dan_ws.bind
+#define DAN_LISTEN dan_ws.listen
+#define DAN_ACCEPT(s) dan_ws.accept((s), NULL, NULL)
+#define DAN_RECV(s, p, n) dan_ws.recv((s), (char *)(p), (n), 0)
+#define DAN_SEND(s, p, n) dan_ws.send((s), (const char *)(p), (n), 0)
+#define DAN_CLOSE dan_ws.close
+#define DAN_GETSOCKNAME dan_ws.getsockname
+#elif !defined(__wasi__)
+#include <sys/socket.h>
+#include <netinet/in.h>
+typedef int dan_sock_t;
+#define DAN_SOCK_BAD (-1)
+typedef struct sockaddr_in dan_sockaddr_in;
+#define DAN_SOCK_OK() 1
+#define DAN_SOCKET socket
+#define DAN_BIND(s, a, n) bind((s), (const struct sockaddr *)(a), (socklen_t)(n))
+#define DAN_LISTEN listen
+#define DAN_ACCEPT(s) accept((s), NULL, NULL)
+#define DAN_RECV(s, p, n) recv((s), (p), (size_t)(n), 0)
+#ifdef MSG_NOSIGNAL
+#define DAN_SEND(s, p, n) send((s), (p), (size_t)(n), MSG_NOSIGNAL)
+#else
+#define DAN_SEND(s, p, n) send((s), (p), (size_t)(n), 0)
+#endif
+#define DAN_CLOSE close
+#endif
+
+#if !defined(__wasi__)
+/* открытые сокеты: номер для программы - место в таблице плюс 1 */
+#define DAN_SOCK_MAX 256
+static dan_sock_t dan_socks[DAN_SOCK_MAX];
+static bool dan_socks_used[DAN_SOCK_MAX];
+
+static int64_t dan_sock_keep(dan_sock_t s) {
+    for (int i = 0; i < DAN_SOCK_MAX; i++)
+        if (!dan_socks_used[i]) {
+            dan_socks_used[i] = true;
+            dan_socks[i] = s;
+            return i + 1;
+        }
+    DAN_CLOSE(s);
+    return -1;
+}
+
+static bool dan_sock_find(int64_t number, dan_sock_t *s) {
+    if (number < 1 || number > DAN_SOCK_MAX || !dan_socks_used[number - 1]) return false;
+    *s = dan_socks[number - 1];
+    return true;
+}
+#endif
+
+static int64_t dan_listen_port(int64_t port, int line) {
+    if (port < 0 || port > 65535) dan_error(DAN_MSG_SOCK_PORT, line);
+#if defined(__wasi__)
+    return -1;
+#else
+    if (!DAN_SOCK_OK()) return -1;
+    dan_sock_t s = DAN_SOCKET(AF_INET, SOCK_STREAM, 0);
+    if (s == DAN_SOCK_BAD) return -1;
+    dan_sockaddr_in a;
+    memset(&a, 0, sizeof a);
+#if defined(_WIN32)
+    a.family = 2;                                          /* AF_INET */
+    a.port = (uint16_t)(((port & 0xff) << 8) | ((port >> 8) & 0xff));
+    a.addr = 0x0100007fu;                                  /* 127.0.0.1 */
+#else
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#endif
+    if (DAN_BIND(s, &a, sizeof a) != 0 || DAN_LISTEN(s, 16) != 0) {
+        DAN_CLOSE(s);
+        return -1;
+    }
+    return dan_sock_keep(s);
+#endif
+}
+
+static int64_t dan_listener_port(int64_t number) {
+#if defined(__wasi__)
+    (void)number;
+    return -1;
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return -1;
+    dan_sockaddr_in a;
+    memset(&a, 0, sizeof a);
+#if defined(_WIN32)
+    int n = (int)sizeof a;
+    if (DAN_GETSOCKNAME(s, &a, &n) != 0) return -1;
+    return (int64_t)(((a.port & 0xff) << 8) | ((a.port >> 8) & 0xff));
+#else
+    socklen_t n = sizeof a;
+    if (getsockname(s, (struct sockaddr *)&a, &n) != 0) return -1;
+    return (int64_t)ntohs(a.sin_port);
+#endif
+#endif
+}
+
+static int64_t dan_accept_conn(int64_t number) {
+#if defined(__wasi__)
+    (void)number;
+    return -1;
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return -1;
+    fflush(stdout);
+    dan_sock_t c = DAN_ACCEPT(s);
+    if (c == DAN_SOCK_BAD) return -1;
+#if defined(SO_NOSIGPIPE) && !defined(_WIN32)
+    int one = 1;
+    setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return dan_sock_keep(c);
+#endif
+}
+
+static dan_bytes dan_conn_read(int64_t number, int64_t most, int line) {
+    if (most < 1 || most > DAN_IO_MAX) dan_error(DAN_MSG_IO_COUNT, line);
+#if defined(__wasi__)
+    (void)number;
+    return dan_bytes_alloc(0);
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return dan_bytes_alloc(0);
+    uint8_t *buf = dan_alloc((size_t)most);
+    int got = DAN_RECV(s, buf, (int)most);
+    dan_bytes_s *r = dan_bytes_alloc(got > 0 ? got : 0);
+    if (got > 0) memcpy(r->data, buf, (size_t)got);
+    dan_free(buf);
+    return r;
+#endif
+}
+
+static bool dan_conn_write(int64_t number, dan_bytes b) {
+#if defined(__wasi__)
+    (void)number;
+    (void)b;
+    return false;
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return false;
+    int64_t done = 0;
+    while (done < b->len) {
+        int part = b->len - done > 0x40000000 ? 0x40000000 : (int)(b->len - done);
+        int n = (int)DAN_SEND(s, b->data + done, part);
+        if (n <= 0) return false;
+        done += n;
+    }
+    return true;
+#endif
+}
+
+static void dan_conn_close(int64_t number) {
+#if !defined(__wasi__)
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return;
+    dan_socks_used[number - 1] = false;
+    DAN_CLOSE(s);
+#else
+    (void)number;
+#endif
+}

@@ -15,9 +15,13 @@ from server import uri_из_пути
 class Клиент:
     """Простейший клиент LSP: запускает «python dan.py сервер» и обменивается с ним сообщениями."""
 
-    def __init__(self):
-        self.процесс = subprocess.Popen([sys.executable, os.path.join(ПАПКА, "dan.py"), "сервер"],
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def __init__(self, команда=None, env=None):
+        if команда is None and env is None:
+            # сервер на Python, даже если рядом собран компилятор на Дане (server.компилятор_на_дане)
+            env = dict(os.environ, DAN_SERVER_PYTHON="1")
+        self.процесс = subprocess.Popen(команда or [sys.executable, os.path.join(ПАПКА, "dan.py"), "сервер"],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env=env)
         self.номер = 0
         self.уведомления = []
 
@@ -86,6 +90,10 @@ class Клиент:
 
 
 class ТестыСервера(unittest.TestCase):
+    # команда запуска сервера и его среда (None - «python dan.py сервер»); test_odin_kompilyator
+    # выполняет те же тесты с сервером компилятора на Дане
+    команда = None
+    среда = None
 
     def setUp(self):
         self.папка = tempfile.TemporaryDirectory()
@@ -93,7 +101,7 @@ class ТестыСервера(unittest.TestCase):
         with open(os.path.join(self.папка.name, "расчёты.dan"), "w", encoding="utf-8") as ф:
             ф.write(РАСЧЁТЫ)
         self.uri = uri_из_пути(self.путь)
-        self.клиент = Клиент()
+        self.клиент = Клиент(self.команда, self.среда)
         ответ = self.клиент.запрос("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
         self.assertTrue(ответ["capabilities"]["hoverProvider"])
         self.клиент.уведомление("initialized", {})
