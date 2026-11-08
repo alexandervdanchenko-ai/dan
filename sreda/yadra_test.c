@@ -72,10 +72,7 @@ static void find_variants(void) {
         const dan_vk_table *t;
         if (dan_vk_supported(names[i], &t)) variants[nvariants++] = t;
     }
-#ifdef DAN_VK_ARM
-    /* with i8mm «dotprod» is the table with smmla: the one without it too */
-    if (nvariants && variants[nvariants - 1] == &dan_vk_dotprod_i8mm) variants[nvariants++] = &dan_vk_dotprod;
-#endif
+
 }
 
 static void test_dot(void) {
