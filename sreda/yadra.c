@@ -1121,12 +1121,12 @@ DAN_VK_AVX2 static int32_t dan_vk_q8_block_avx2(const int8_t *a, const int8_t *b
 
 
 #define DAN_VK_AVX2F16 __attribute__((target("avx2,f16c")))
-/* 32 products of a block as 8 partial sums */
+/* 32 products of a block as 8 partial sums: |x| (у -128 - 128 без знака) на y со знаком x одной
+   vpmaddubsw, пара не больше 2 * 128 * 127 (у вектора b, квантованного Даном, чисел -128 нет; без
+   расширения до 16 бит - вдвое меньше перестановок на EPYC 7763) */
 DAN_VK_AVX2F16 static inline __m256i dan_vk_q8_part_avx2(const uint8_t *a, const uint8_t *b) {
     __m256i x = _mm256_loadu_si256((const __m256i *)(a + 2)), y = _mm256_loadu_si256((const __m256i *)(b + 2));
-    __m256i xl = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(x)), xh = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(x, 1));
-    __m256i yl = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(y)), yh = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(y, 1));
-    return _mm256_add_epi32(_mm256_madd_epi16(xl, yl), _mm256_madd_epi16(xh, yh));
+    return _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_abs_epi8(x), _mm256_sign_epi8(y, x)), _mm256_set1_epi16(1));
 }
 
 
