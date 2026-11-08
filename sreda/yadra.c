@@ -1271,11 +1271,20 @@ DAN_VK_AVX2F16 static float dan_vk_q40_dot_avx2(const uint8_t *w, const void *xv
     return r;
 }
 
+/* то же, что dan_vk_k4_sm, в регистре (q - 12 байтов масштабов блока Q4_K или Q5_K, за ними ещё
+   есть 4 байта блока): слова u0 u2 u1 u2 (младшие 6 или 4 бита) и u0 u0 u1 u1 (старшие 2 бита),
+   без записи байтов в память и чтения их регистром (запись по частям не передаётся чтению
+   целиком и задерживает его) */
+DAN_VK_AVX2 static inline __m128i dan_vk_k4_sm128_avx2(const uint8_t *q) {
+    __m128i u = _mm_loadu_si128((const __m128i *)(const void *)q);
+    __m128i lo = _mm_and_si128(_mm_srlv_epi32(_mm_shuffle_epi32(u, 0x98), _mm_setr_epi32(0, 0, 0, 4)),
+                               _mm_setr_epi32(0x3f3f3f3f, 0x0f0f0f0f, 0x3f3f3f3f, 0x0f0f0f0f));
+    __m128i hi = _mm_and_si128(_mm_srli_epi32(_mm_shuffle_epi32(u, 0x50), 6), _mm_setr_epi32(0, 0x03030303, 0, 0x03030303));
+    return _mm_or_si128(lo, _mm_slli_epi32(hi, 4));
+}
 /* scales and mins of a Q4_K or Q5_K block as 16 numbers of 16 bits: sc0..sc7, m0..m7 */
 DAN_VK_AVX2 static inline __m256i dan_vk_k4_sm_avx2(const uint8_t *q) {
-    uint8_t sm[16];
-    dan_vk_k4_sm(q, sm);
-    return _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)sm));
+    return _mm256_cvtepu8_epi16(dan_vk_k4_sm128_avx2(q));
 }
 
 /* number k (0..7) of the 8 numbers of 16 bits in both halves of b, in all 16 places */
@@ -2045,6 +2054,17 @@ DAN_VK_AVX2 static inline void dan_vk_rn_put8_avx2(uint8_t *o, __m128i b, __m128
     __m128i v = _mm_shuffle_epi8(b, idx);
     _mm256_storeu_si256((__m256i *)(void *)o, sgn ? _mm256_cvtepi8_epi32(v) : _mm256_cvtepu8_epi32(v));
 }
+/* 16 масштабов Q3_K минус 32 (то же, что dan_vk_q3k_scales) в регистре: слова a0 a1 a0 a1 сдвигаются
+   на 0 0 4 4 (младшие 4 бита), слово a2 - на 0 2 4 6 (старшие 2); без записи байтов в память и
+   чтения их регистром (запись по частям не передаётся чтению целиком и задерживает его) */
+DAN_VK_AVX2 static inline __m128i dan_vk_q3k_sc_avx2(const uint8_t *q) {
+    uint32_t a2;
+    memcpy(&a2, q + 8, 4);
+    __m128i v = _mm_shuffle_epi32(_mm_loadl_epi64((const __m128i *)(const void *)q), 0x44);
+    __m128i lo = _mm_and_si128(_mm_srlv_epi32(v, _mm_setr_epi32(0, 0, 4, 4)), _mm_set1_epi8(0x0f));
+    __m128i hi = _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32((int)a2), _mm_setr_epi32(0, 2, 4, 6)), _mm_set1_epi8(3));
+    return _mm_sub_epi8(_mm_or_si128(lo, _mm_slli_epi32(hi, 4)), _mm_set1_epi8(32));
+}
 /* kvalues_iq4nl + 128 - числа IQ4_XS без знака */
 static const uint8_t dan_vk_iq4nl_u[16] = {1, 24, 45, 63, 79, 93, 106, 118, 129, 141, 153, 166, 181, 197, 217, 241};
 /* Единицы строки Q2_K, Q3_K, IQ4_XS без знака (то же, что dan_vk_rn_lowbit_c в режиме 0): в половине n
@@ -2097,14 +2117,14 @@ DAN_VK_AVX2F16 static void dan_vk_rn_unpack_lowbit_x86(int fmt, const uint8_t *w
             __m128i mn = _mm_shuffle_epi8(_mm_and_si128(_mm_srli_epi16(s, 4), _mm256_castsi256_si128(m4)), order);
             _mm_storeu_si128((__m128i *)(void *)(o + DAN_VK_RN_D + 8), mn);
         } else {
-            int8_t sc[16];
-            if (fmt == DAN_FMT_Q3K) dan_vk_q3k_scales(p + 96, sc);
+            __m128i s;
+            if (fmt == DAN_FMT_Q3K) s = dan_vk_q3k_sc_avx2(p + 96);
             else {
-                int8_t s8[8];
+                int8_t s8[8], sc[16];
                 dan_vk_iq4xs_scales(p, s8);
                 for (int j = 0; j < 16; j++) sc[j] = s8[j / 2];
+                s = _mm_loadu_si128((const __m128i *)(const void *)sc);
             }
-            __m128i s = _mm_loadu_si128((const __m128i *)(const void *)sc);
             dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC, s, order, 1);
             dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC + 32, _mm_srli_si128(s, 8), order, 1);
             dan_vk_putf(o + DAN_VK_RN_D, dan_vk_half(p + (fmt == DAN_FMT_Q3K ? 108 : 0)));
@@ -2121,7 +2141,7 @@ DAN_VK_AVX2F16 static void dan_vk_rn_unpack_x86(int fmt, const uint8_t *w, int64
     if (fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K) {
         for (int64_t b = 0; b < blocks; b++) {
             const uint8_t *p = w + b * wb;
-            uint8_t *o = out + b * DAN_VK_RN_UNIT, sm[16];
+            uint8_t *o = out + b * DAN_VK_RN_UNIT;
             __m256i a[8];
             __m256i hb = fmt == DAN_FMT_Q5K ? DAN_VK_LD(p + 16) : _mm256_setzero_si256();
             const uint8_t *q = p + (fmt == DAN_FMT_Q5K ? 48 : 16);
@@ -2134,8 +2154,7 @@ DAN_VK_AVX2F16 static void dan_vk_rn_unpack_x86(int fmt, const uint8_t *w, int64
                 a[c + 4] = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(v, 4), m4), h1);
             }
             dan_vk_tr8_avx2(a, o);
-            dan_vk_k4_sm(p + 4, sm);
-            __m128i s = _mm_loadu_si128((const __m128i *)(const void *)sm);
+            __m128i s = dan_vk_k4_sm128_avx2(p + 4);
             dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC, s, order, 0);
             dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC + 32, _mm_srli_si128(s, 8), order, 0);
             memset(o + DAN_VK_RN_D, 0, DAN_VK_RN_UNIT - DAN_VK_RN_D);
@@ -2218,9 +2237,7 @@ DAN_VK_AVX2 static inline __m256i dan_vk_q2k_parts_avx2(const uint8_t *w, const 
 
 /* Q3_K: числа q + 4 (0..7) без знака, сдвиг 4 * сумма sc * bsums снимается здесь */
 DAN_VK_AVX2 static inline __m256i dan_vk_q3k_parts_avx2(const uint8_t *w, const dan_q8k *y, int32_t *extra) {
-    int8_t sc[16];
-    dan_vk_q3k_scales(w + 96, sc);
-    __m256i s16 = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(const void *)sc));
+    __m256i s16 = _mm256_cvtepi8_epi16(dan_vk_q3k_sc_avx2(w + 96));
     __m256i bias = _mm256_madd_epi16(s16, _mm256_loadu_si256((const __m256i *)y->bsums));
     __m256i acc = _mm256_sub_epi32(_mm256_setzero_si256(), _mm256_slli_epi32(bias, 2));
     const __m256i m3 = _mm256_set1_epi8(3), one = _mm256_set1_epi8(1);
@@ -2758,9 +2775,7 @@ DAN_VK_AVX2 static inline void dan_vk_sm_k4_dec(int q5, const uint8_t *p, __m256
         a[c + 4] = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(v, 4), m4), h1);
     }
     dan_vk_tr8r_avx2(a, w);
-    uint8_t sm[16];
-    dan_vk_k4_sm(p + 4, sm);
-    __m128i s = _mm_loadu_si128((const __m128i *)(const void *)sm);
+    __m128i s = dan_vk_k4_sm128_avx2(p + 4);
     *sc = _mm256_cvtepu8_epi32(_mm_shuffle_epi8(s, order));
     *mn = _mm256_cvtepu8_epi32(_mm_shuffle_epi8(_mm_srli_si128(s, 8), order));
 }
