@@ -107,3 +107,67 @@ jobs:
         run: |
           python замеры/нейро/сверка.py "$PWD/llama-dvizhok" semya/dan modeli/*.gguf --потоков="$(nproc)" \
             --токенов="$TOKENOV" --память="$pamyat" --итог="$GITHUB_STEP_SUMMARY"
+
+  chernovik:
+    # Спекулятивная генерация (м.ответ_с_черновиком): пары моделей Qwen2.5 Instruct с общим словарём
+    # (Apache 2.0): 7B Q4_K_M и 1.5B Q4_K_M - большие, 0.5B Q8_0 - черновик. Скорость без черновика и с
+    # черновиком при к = 2..8, доля принятых, совпадение текста при жадной выборке; llama.cpp той же версии
+    # без черновика и llama-speculative-simple (если соберётся). Таблица - в итоге задания; из неё
+    # обновляется раздел «Спекулятивная генерация» в замеры/результаты.md.
+    name: Спекулятивная генерация (Linux x86-64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: "1"
+      TOKENOV: "128"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Машина
+        run: |
+          echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ"
+          grep -m1 "model name" /proc/cpuinfo
+          echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
+          echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //' | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
+      - name: Кэш llama.cpp
+        id: kesh
+        uses: actions/cache@v4
+        with:
+          path: llama-chernovik
+          key: llama-chernovik-${{ env.metka }}-${{ runner.os }}-${{ env.cpu }}-${{ hashFiles('.github/workflows/dvizhok.yml') }}
+      - name: Сборка llama.cpp (библиотека и llama-speculative-simple)
+        if: steps.kesh.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 --branch "$metka" https://github.com/ggml-org/llama.cpp llama-src
+          cmake -S llama-src -B llama-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_COMMON=ON -DLLAMA_CURL=OFF
+          cmake --build llama-build --config Release -j "$(nproc)" --target llama
+          mkdir -p llama-chernovik
+          cp -a llama-build/bin/*.so* llama-chernovik/
+          # пример спекулятивной генерации llama.cpp: если не соберётся, замер идёт без него
+          cmake --build llama-build --config Release -j "$(nproc)" --target llama-speculative-simple \
+            && cp -a llama-build/bin/llama-speculative-simple llama-chernovik/ \
+            && cp -a llama-build/bin/*.so* llama-chernovik/ || echo "llama-speculative-simple не собран"
+          ls -la llama-chernovik
+      - name: Модели
+        run: |
+          mkdir -p modeli
+          curl -sSfL --retry 3 -o modeli/qwen7b-q4km.gguf https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+          curl -sSfL --retry 3 -o modeli/qwen1.5b-q4km.gguf https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+          curl -sSfL --retry 3 -o modeli/qwen0.5b-q8.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf
+          ls -la modeli
+      - name: Компилятор из семени
+        run: sh semya/sobrat.sh
+      - name: Замер
+        env:
+          DAN_HOME: ${{ github.workspace }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/llama-chernovik
+        run: |
+          for bolshaya in modeli/qwen7b-q4km.gguf modeli/qwen1.5b-q4km.gguf; do
+            python замеры/нейро/черновик.py semya/dan "$bolshaya" modeli/qwen0.5b-q8.gguf --потоков="$(nproc)" \
+              --токенов="$TOKENOV" --к=2,3,4,5,6,8 --llama="$PWD/llama-chernovik" \
+              --llama-черновик="$PWD/llama-chernovik/llama-speculative-simple" --итог="$GITHUB_STEP_SUMMARY"
+          done
