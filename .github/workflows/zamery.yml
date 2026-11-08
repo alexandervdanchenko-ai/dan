@@ -1,5 +1,6 @@
 # Замеры скорости на машинах GitHub (необязательный сценарий, не входит в проверку):
-# векторные ядра и пул потоков (sreda/yadra_test.c zamer) и эталон скорости чтения
+# векторные ядра и пул потоков (sreda/yadra_test.c zamer, в том числе чтение весов
+# llama.cpp Q4_0, Q4_K, Q5_K, Q6_K) и эталон скорости чтения
 # памяти (замеры/память). Таблицы печатаются в итог задания; из них обновляется
 # замеры/результаты.md.
 #
@@ -119,6 +120,22 @@ jobs:
                   v, dot, mv, mvg, q8, q8g, mm = m.groups()
                   print(f"| {v}, {potokov} | {ch(dot)} | {ch(mv)} ({ch(mvg)} ГБ/с) | {ch(q8)} ({ch(q8g)} ГБ/с) "
                         f"| {ch(mm)} | {ch(bystro.get(v, '?'))} |")
+          print()
+          print("Чтение весов из памяти (sreda/yadra_test.c zamer: матрица со строками по 4096 чисел на 1 ГБ "
+                "на вектор), ГБ/с, лучший из трёх проходов:")
+          print()
+          print("| Вариант, потоков | f32 | q8_0 | q4_0 | q4k | q5k | q6k |")
+          print("|---|---|---|---|---|---|---|")
+          potokov = "?"
+          for s in open("yadra.txt", encoding="utf-8").read().splitlines():
+              m = re.match(r"потоков: (\d+)", s)
+              if m:
+                  potokov = m.group(1)
+              m = re.match(r"(\S+)\s+чтение весов \(\d+ МБ\), ГБ/с:(.*)", s)
+              if m:
+                  z = dict(re.findall(r"(\w+) ([\d.]+);", m.group(2)))
+                  print(f"| {m.group(1)}, {potokov} | " + " | ".join(ch(z.get(k, "?")) for k in
+                        ("f32", "q8_0", "q4_0", "q4k", "q5k", "q6k")) + " |")
           print()
           print("Эталон скорости чтения памяти (замеры/память), медиана 9 проходов:")
           print()
