@@ -1,11 +1,13 @@
-"""Сборка поставки Дана для Windows: dan.exe без Python, компилятор на Дане из семени,
+"""Сборка поставки Дана для Windows без Python: dan.exe - компилятор на Дане, собранный из семени,
 компилятор zig рядом, библиотека llama.cpp для модуля «модели», установщик и переносной архив.
 
-Команды выполняет компилятор на Дане «компилятор/дан.exe», собранный из семени semya/dan.c тем же
-zig, что лежит в поставке. dan.exe (PyInstaller из dan.py) передаёт ему все команды, которые в нём
-есть (sam_kompilyator.py), а сам выполняет только песочницу, сервер языка, обновление и параметры
---веб, --для=, --сжать. Компилятор на Дане вызывает компилятор C одной программой, поэтому рядом с
-zig.exe лежит обёртка zig-cc.exe (поставка/zig_cc.c), которая запускает «zig cc».
+dan.exe - сам компилятор на Дане (сам/дан.dan), собранный из семени semya/dan.c тем же zig, что
+лежит в поставке; с версии 1.8 он выполняет все команды, включая песочницу, сервер языка,
+обновление и параметры --веб, --для=, --сжать, поэтому Python (прежний dan.exe из PyInstaller) в
+поставке не нужен. Папку Дана (sreda, библиотека, учебник/задачи, zig) компилятор находит рядом со
+своим исполняемым файлом, если не задана переменная DAN_HOME. Компилятор на Дане вызывает компилятор C
+одной программой, поэтому рядом с zig.exe лежит обёртка zig-cc.exe (поставка/zig_cc.c), которая
+запускает «zig cc»; её dan.exe берёт, если в системе нет gcc, clang и cc.
 
 Запускается в Windows (на GitHub - задачей «Поставка»):
 
@@ -17,11 +19,11 @@ version.txt, лицензия) кладутся рядом с dan.exe: уста�
 программы на Дане находят llama.dll системным поиском библиотек.
 
 Результат в папке «поставка/готово»:
-    dan/                              - готовая папка Дана (dan.exe, компилятор на Дане, zig, примеры, справочник);
+    dan/                              - готовая папка Дана (dan.exe, zig, библиотека, примеры, справочник);
     dan-<версия>-setup.exe            - установщик (нужен Inno Setup 6);
     dan-<версия>-windows.zip          - та же папка одним архивом, без установки.
 
-Нужны: Python 3 с пакетами pyinstaller, ziglang и markdown (ставятся сами),
+Нужны: Python 3 с пакетами ziglang и markdown (ставятся сами; Python нужен только для сборки),
 Inno Setup 6 (если его нет, установщик не собирается, архив собирается).
 """
 
@@ -50,20 +52,6 @@ def поставить(*пакеты):
     subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", *пакеты], check=True)
 
 
-def собрать_dan_exe():
-    шаг("dan.exe (PyInstaller)")
-    поставить("pyinstaller")
-    работа = os.path.join(ГОТОВО, "_сборка")
-    разделитель = ";" if os.name == "nt" else ":"
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--console",
-                    "--name", "dan", "--icon", os.path.join(ЗНАЧКИ, "dan.ico"), "--distpath", ГОТОВО, "--workpath", работа, "--specpath", работа,
-                    "--add-data", os.path.join(КОРЕНЬ, "sreda") + разделитель + "sreda",
-                    "--add-data", os.path.join(КОРЕНЬ, "библиотека") + разделитель + "библиотека",
-                    "--add-data", os.path.join(КОРЕНЬ, "учебник", "задачи") + разделитель + os.path.join("учебник", "задачи"),
-                    os.path.join(КОРЕНЬ, "dan.py")], check=True, cwd=КОРЕНЬ)
-    shutil.rmtree(работа, ignore_errors=True)
-
-
 def добавить_zig():
     шаг("компилятор zig")
     поставить("ziglang")
@@ -83,31 +71,41 @@ def добавить_zig():
 
 
 def собрать_компилятор_на_дане():
-    шаг("компилятор на Дане (из семени semya/dan.c) и обёртка zig-cc")
+    шаг("dan.exe - компилятор на Дане (из семени semya/dan.c), обёртка zig-cc и папки среды")
     windows = os.name == "nt"
     exe = ".exe" if windows else ""
     zig = os.path.join(ПАПКА, "zig", "zig" + exe)
     # цель указана явно: без неё zig собирает под процессор этой машины, а компилятор должен
     # работать на любом процессоре x86-64
     цель = ["-target", "x86_64-windows-gnu"] if windows else []
-    папка_компилятора = os.path.join(ПАПКА, "компилятор")
-    os.makedirs(папка_компилятора, exist_ok=True)
     # сборка в папке с латинским именем: исходники и выход не зависят от русских букв в пути
     with tempfile.TemporaryDirectory(prefix="dan_sam_") as работа:
         семя = os.path.join(работа, "dan.c")
         shutil.copy(os.path.join(КОРЕНЬ, "semya", "dan.c"), семя)
         выход = os.path.join(работа, "dan" + exe)
+        иконка = []
+        if windows:
+            # значок dan.exe: ресурс из dan.ico (zig собирает файл .rc сам)
+            with open(os.path.join(работа, "dan.rc"), "w", encoding="ascii") as ф:
+                ф.write('1 ICON "dan.ico"\n')
+            shutil.copy(os.path.join(ЗНАЧКИ, "dan.ico"), os.path.join(работа, "dan.ico"))
+            иконка = [os.path.join(работа, "dan.rc")]
         subprocess.run([zig, "cc", *цель, "-std=c11", "-O2", "-fwrapv", "-ffp-contract=off", "-w", "-s", семя,
-                        "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else [])], check=True)
-        shutil.copy(выход, os.path.join(папка_компилятора, "дан" + exe))
+                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else [])], check=True)
+        shutil.copy(выход, os.path.join(ПАПКА, "dan" + exe))
         if windows:
             обёртка = os.path.join(работа, "zig_cc.c")
             shutil.copy(os.path.join(КОРЕНЬ, "поставка", "zig_cc.c"), обёртка)
             готовая = os.path.join(работа, "zig-cc.exe")
             subprocess.run([zig, "cc", *цель, "-O2", "-s", обёртка, "-o", готовая, "-lshell32"], check=True)
             shutil.copy(готовая, os.path.join(ПАПКА, "zig", "zig-cc.exe"))
-    р = subprocess.run([os.path.join(папка_компилятора, "дан" + exe), "--версия"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    # среда выполнения, стандартная библиотека и задачник - рядом с dan.exe (папка Дана)
+    for папка in ("sreda", "библиотека", os.path.join("учебник", "задачи")):
+        shutil.copytree(os.path.join(КОРЕНЬ, папка), os.path.join(ПАПКА, папка),
+                        ignore=shutil.ignore_patterns("*.o", "*.exe", "__pycache__"))
+    среда = {к: з for к, з in os.environ.items() if к != "DAN_HOME"}
+    р = subprocess.run([os.path.join(ПАПКА, "dan" + exe), "--версия"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=среда)
     print(р.stdout.strip() or р.stderr.strip())
     if р.returncode != 0:
         raise SystemExit("собранный компилятор на Дане не запускается")
@@ -160,8 +158,8 @@ def добавить_учебник_и_редактор():
     with tempfile.TemporaryDirectory() as папка:
         исходник = os.path.join(папка, "редактор.dan")
         shutil.copy(os.path.join(КОРЕНЬ, "поставка", "редактор", "редактор.dan"), исходник)
-        # компилятор на Дане собирает редактор тем же zig, что в поставке
-        среда = dict(os.environ)
+        # dan.exe поставки собирает редактор тем же zig, что в поставке
+        среда = {к: з for к, з in os.environ.items() if к != "DAN_HOME"}
         if os.name == "nt":
             среда["DAN_COMPILER"] = os.path.join(ПАПКА, "zig", "zig-cc.exe")
         subprocess.run([dan, "собрать", исходник, "--малый"], check=True, env=среда)
@@ -225,8 +223,7 @@ def main(аргументы):
             print(__doc__.strip())
             return 2
     shutil.rmtree(ГОТОВО, ignore_errors=True)
-    os.makedirs(ГОТОВО)
-    собрать_dan_exe()
+    os.makedirs(ПАПКА)
     добавить_llama(архив_llama)
     добавить_zig()
     собрать_компилятор_на_дане()

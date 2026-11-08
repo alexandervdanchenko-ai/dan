@@ -30,12 +30,12 @@
         "дан.python": {
           "type": "string",
           "default": "",
-          "description": "Команда запуска Python (по умолчанию: python в Windows, python3 в других системах)"
+          "description": "Команда запуска Python, если компилятор - файл dan.py (по умолчанию: python в Windows, python3 в других системах)"
         },
         "дан.компилятор": {
           "type": "string",
           "default": "",
-          "description": "Полный путь к файлу dan.py. Если не указан, он ищется в открытой папке, в переменной среды DAN_HOME и в папке D:\\проекты\\Дан"
+          "description": "Полный путь к dan.exe (dan) или к dan.py. Если не указан, ищутся semya/dan и dan.py в открытой папке, затем папка из DAN_HOME, установленный Дан (%LOCALAPPDATA%\\Programs\\Dan), D:\\проекты\\Дан и команда dan в PATH"
         }
       }
     },
