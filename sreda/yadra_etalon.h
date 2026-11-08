@@ -63,3 +63,61 @@ static void etalon_hashes(uint64_t out[4]) {
     }
     memcpy(out, h, sizeof h);
 }
+
+/* ---- weights of llama.cpp: blocks for the comparison with ggml ----
+
+   Random blocks of Q4_0, Q4_K, Q5_K and Q6_K (random bytes, the scales in
+   half precision - finite numbers of every kind: zero, subnormal, up to
+   65504, both signs). etalon_kvanty_ggml - hashes of what dequantize_row_*
+   of ggml gives on them (llama.cpp b12190, ggml/src/ggml-quants.c built by
+   gcc 13.3 with -O2 -ffp-contract=off on x86-64; sreda/yadra_ggml.c checks
+   them when the sources of ggml are at hand, see test_yadra.py). */
+
+static uint16_t etalon_half(void) {
+    etalon_rng ^= etalon_rng << 13; etalon_rng ^= etalon_rng >> 7; etalon_rng ^= etalon_rng << 17;
+    uint64_t r = etalon_rng;
+    uint16_t sign = (uint16_t)((r >> 20) & 1) << 15;
+    switch (r % 8) {
+    case 0: return sign;                                          /* zero */
+    case 1: return (uint16_t)(sign | (1 + (r >> 30) % 1023));     /* subnormal */
+    default: return (uint16_t)(sign | ((1 + (r >> 30) % 30) << 10) | ((r >> 40) & 0x3ff));
+    }
+}
+
+static const int etalon_kvant_bytes[4] = {18, 144, 176, 210};
+static const int etalon_kvant_n[4] = {32, 256, 256, 256};
+
+static void etalon_kvant_blocks(int fmt, uint8_t *out, int64_t blocks, uint64_t seed) {
+    etalon_rng = seed;
+    int64_t b = etalon_kvant_bytes[fmt];
+    for (int64_t i = 0; i < blocks * b; i++) {
+        etalon_rng ^= etalon_rng << 13; etalon_rng ^= etalon_rng >> 7; etalon_rng ^= etalon_rng << 17;
+        out[i] = (uint8_t)(etalon_rng >> 32);
+    }
+    for (int64_t i = 0; i < blocks; i++) {
+        uint8_t *o = out + i * b;
+        uint16_t h = etalon_half();
+        if (fmt == 3) memcpy(o + 208, &h, 2);   /* Q6_K: d at the end */
+        else memcpy(o, &h, 2);
+        if (fmt == 1 || fmt == 2) { h = etalon_half(); memcpy(o + 2, &h, 2); }   /* dmin */
+    }
+}
+
+#define ETALON_KVANT_BLOCKS 256
+static const uint64_t etalon_kvant_seed = 20261108;
+
+/* hashes of the numbers of ETALON_KVANT_BLOCKS blocks of each format given
+   by dequant(fmt, blocks, numbers, count of blocks) */
+typedef void (*etalon_dequant_fn)(int fmt, const uint8_t *in, float *out, int64_t blocks);
+static void etalon_kvant_hashes(etalon_dequant_fn dequant, uint64_t out[4]) {
+    static uint8_t in[ETALON_KVANT_BLOCKS * 210];
+    static float y[ETALON_KVANT_BLOCKS * 256];
+    for (int f = 0; f < 4; f++) {
+        etalon_kvant_blocks(f, in, ETALON_KVANT_BLOCKS, etalon_kvant_seed + (uint64_t)f);
+        dequant(f, in, y, ETALON_KVANT_BLOCKS);
+        out[f] = etalon_fnv(14695981039346656037ull, y, (size_t)ETALON_KVANT_BLOCKS * etalon_kvant_n[f] * 4);
+    }
+}
+
+/* filled in from ggml by sreda/yadra_ggml.c («печать») */
+static const uint64_t etalon_kvanty_ggml[4] = {0x31a03d62345957d2ull, 0x7ed0a9ea476c4c1cull, 0x4ed495776db8ec2dull, 0x88762c8b76053e5dull};
