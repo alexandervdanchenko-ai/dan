@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import objasnenie
+import sam_kompilyator
 from parser import разобрать
 
 ПАПКА = os.path.dirname(os.path.abspath(__file__))
@@ -97,12 +98,25 @@ class ТестыОбъяснения(unittest.TestCase):
             self.assertEqual(objasnenie.код(значение), запись)
 
     def test_все_строки_примеров(self):
-        for путь in sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan")))[:12]:
+        примеры = []
+        for путь in sorted(glob.glob(os.path.join(ПАПКА, "примеры", "*.dan"))):
             with open(путь, encoding="utf-8") as ф:
-                текст = ф.read()
+                примеры.append((путь, ф.read()))
+        # пример с модулем, написанным после заморозки (модели, нейро), объясняет компилятор на Дане
+        на_python = [п for п in примеры if not sam_kompilyator.требует_компилятор_на_дане(п[1])]
+        на_дане = [п for п in примеры if sam_kompilyator.требует_компилятор_на_дане(п[1])]
+        self.assertTrue(на_дане)
+        for путь, текст in на_python[:12]:
             for номер in range(1, текст.count("\n") + 2):
                 with self.subTest(файл=os.path.basename(путь), строка=номер):
                     self.assertTrue(objasnenie.объяснить(текст, путь, номер))
+        for путь, текст in на_дане:
+            for номер in range(1, текст.count("\n") + 2):
+                with self.subTest(файл=os.path.basename(путь), строка=номер, компилятор="на Дане"):
+                    р = subprocess.run([sam_kompilyator.исполняемый(), "объяснить", f"{путь}:{номер}"],
+                                       capture_output=True, env=sam_kompilyator.среда(), timeout=300)
+                    self.assertEqual(р.returncode, 0, р.stdout.decode("utf-8", "replace"))
+                    self.assertTrue(р.stdout.decode("utf-8").startswith(f"Строка {номер}"))
 
     def test_команда(self):
         with tempfile.TemporaryDirectory() as папка:

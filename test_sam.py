@@ -1415,7 +1415,7 @@ class ТестыСамосборки(unittest.TestCase):
                     ф.write(текст)
                 файлы.append(имя)
             # программы с возможностями после заморозки (модули «модели», «нейро») эталон на Python не проверит
-            исходники = [т for т in ustoychivost.исходники() if 'подключить "модели"' not in т and 'подключить "нейро"' not in т]
+            исходники = [т for т in ustoychivost.исходники() if not sam_kompilyator.требует_компилятор_на_дане(т)]
             сл = random.Random(7)
             for н in range(60):
                 имя = f"испорченная{н}.dan"
