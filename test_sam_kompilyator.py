@@ -234,14 +234,12 @@ class ТестыПоставки(unittest.TestCase):
         код, текст = self.main("проверить", путь)
         self.assertEqual(код, 0, текст)
 
-    def test_команды_python(self):
-        # «--для=» выполняет dan.py, но программу в C переводит компилятор на Дане
-        self.assertIsNone(sam_kompilyator.выполнить_команду(["собрать", "п.dan", "--для=linux"]))
-        self.assertIsNone(sam_kompilyator.выполнить_команду(["песочница"]))
-        # значение для программы после имени файла - не параметр сборки
+    def test_все_команды_на_дане(self):
+        # с версии 1.8 песочницу, сервер, обновление и --для=, --веб, --сжать выполняет компилятор на Дане
         with mock.patch.object(sam_kompilyator, "_запустить", lambda а: 5):
-            self.assertEqual(sam_kompilyator.выполнить_команду(["запустить", "п.dan", "--веб"]), 5)
-
+            for аргументы in (["собрать", "п.dan", "--для=linux"], ["песочница"], ["сервер"], ["обновить"],
+                              ["собрать", "--веб", "п.dan"], ["запустить", "п.dan", "--веб"]):
+                self.assertEqual(sam_kompilyator.выполнить_команду(аргументы), 5, аргументы)
 
 if __name__ == "__main__":
     unittest.main()
