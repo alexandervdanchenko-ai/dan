@@ -3615,6 +3615,18 @@ static inline int32x4_t dan_vk_apply16_neon(const int32x4_t *d, int16x8_t lo, in
     return vmlaq_s32(acc, dan_vk_sum4_neon(d + 12), vmovl_s16(vget_high_s16(hi)));
 }
 
+/* 16 масштабов Q3_K минус 32 в регистре (без записи в память и чтения обратно) */
+static inline int8x16_t dan_vk_q3k_scales_neon(const uint8_t *q) {
+    uint32_t a[3];
+    memcpy(a, q, 12);
+    uint32_t t = a[2];
+    uint64_t lo = (uint64_t)((a[0] & 0x0f0f0f0fu) | ((t & 0x03030303u) << 4))
+                | (uint64_t)((a[1] & 0x0f0f0f0fu) | (((t >> 2) & 0x03030303u) << 4)) << 32;
+    uint64_t hi = (uint64_t)(((a[0] >> 4) & 0x0f0f0f0fu) | (((t >> 4) & 0x03030303u) << 4))
+                | (uint64_t)(((a[1] >> 4) & 0x0f0f0f0fu) | (((t >> 6) & 0x03030303u) << 4)) << 32;
+    return vsubq_s8(vreinterpretq_s8_u8(vcombine_u8(vcreate_u8(lo), vcreate_u8(hi))), vdupq_n_s8(32));
+}
+
 /* по 8 блоков, как DAN_VK_KDOT_NEON: d по смещению DOFF, dmin (MINS) - по MOFF, хвост - PF */
 #define DAN_VK_KDOT2_NEON(NAME, ATTR, PARTS, WB, DOFF, MINS, MOFF, PF) \
 ATTR static float NAME(const uint8_t *w, const void *xv, int64_t blocks) { \
@@ -3683,29 +3695,25 @@ ATTR static inline int32x4_t dan_vk_q2k_parts_##SUF(const uint8_t *w, const dan_
     *extra = vaddvq_s32(mi); \
     return dan_vk_apply16_neon(d, sl, sh); \
 } \
-/* Q3_K: числа -4..3 со знаком */ \
+/* Q3_K: числа -4..3 со знаком - младшие 2 бита минус 4, где старший бит 0 */ \
 ATTR static inline int32x4_t dan_vk_q3k_parts_##SUF(const uint8_t *w, const dan_q8k *y, int32_t *extra) { \
-    int8_t sc[16]; \
-    dan_vk_q3k_scales(w + 96, sc); \
-    const uint8x16_t m3 = vdupq_n_u8(3), one = vdupq_n_u8(1); \
-    const int8x16_t four = vdupq_n_s8(4); \
+    int8x16_t s8 = dan_vk_q3k_scales_neon(w + 96); \
+    const uint8x16_t m3 = vdupq_n_u8(3), four = vdupq_n_u8(4); \
     uint8x16_t h0 = vld1q_u8(w), h1 = vld1q_u8(w + 16); \
     int32x4_t d[16]; \
     for (int n = 0; n < 2; n++) { \
         uint8x16_t q0 = vld1q_u8(w + 32 + 32 * n), q1 = vld1q_u8(w + 48 + 32 * n); \
         const int8_t *v = y->qs + 128 * n; \
         for (int j = 0; j < 4; j++) { \
-            int8x16_t a0 = vsubq_s8(DAN_VK_S8(vorrq_u8(vandq_u8(q0, m3), vshlq_n_u8(vandq_u8(h0, one), 2))), four); \
-            int8x16_t a1 = vsubq_s8(DAN_VK_S8(vorrq_u8(vandq_u8(q1, m3), vshlq_n_u8(vandq_u8(h1, one), 2))), four); \
+            uint8x16_t mb = vdupq_n_u8((uint8_t)(1u << (4 * n + j))); \
+            int8x16_t a0 = vsubq_s8(DAN_VK_S8(vandq_u8(q0, m3)), DAN_VK_S8(vbicq_u8(four, vtstq_u8(h0, mb)))); \
+            int8x16_t a1 = vsubq_s8(DAN_VK_S8(vandq_u8(q1, m3)), DAN_VK_S8(vbicq_u8(four, vtstq_u8(h1, mb)))); \
             d[8 * n + 2 * j] = DOT16(vdupq_n_s32(0), a0, vld1q_s8(v + 32 * j)); \
             d[8 * n + 2 * j + 1] = DOT16(vdupq_n_s32(0), a1, vld1q_s8(v + 32 * j + 16)); \
             q0 = vshrq_n_u8(q0, 2); \
             q1 = vshrq_n_u8(q1, 2); \
-            h0 = vshrq_n_u8(h0, 1); \
-            h1 = vshrq_n_u8(h1, 1); \
         } \
     } \
-    int8x16_t s8 = vld1q_s8(sc); \
     *extra = 0; \
     return dan_vk_apply16_neon(d, vmovl_s8(vget_low_s8(s8)), vmovl_s8(vget_high_s8(s8))); \
 } \
