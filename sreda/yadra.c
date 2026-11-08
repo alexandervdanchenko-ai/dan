@@ -1305,6 +1305,12 @@ DAN_VK_VNNI static inline __m256i dan_vk_mul32_vnni(__m256i v, __m256i a, const 
     return _mm256_dpbusd_epi32(_mm256_setzero_si256(), a, yv);
 }
 DAN_VK_KN_AVX2(vnni, DAN_VK_VNNI, DAN_VK_VNNI, dan_vk_macc_vnni, dan_vk_mul32_vnni)
+DAN_VK_B32N_AVX2(dan_vk_q50_dot1_vnni, DAN_VK_VNNI, dan_vk_mul32_vnni, 1, dan_vk_w_q50_avx2, 1, DAN_Q50_BYTES, DAN_Q8_BYTES, 2, 0, dan_vk_q8_p)
+DAN_VK_B32N_AVX2(dan_vk_q41_dot1_vnni, DAN_VK_VNNI, dan_vk_mul32_vnni, 1, dan_vk_w_q41_avx2, 0, DAN_Q41_BYTES, DAN_Q81_BYTES, 4, 1, dan_vk_q81_p)
+DAN_VK_B32N_AVX2(dan_vk_q51_dot1_vnni, DAN_VK_VNNI, dan_vk_mul32_vnni, 1, dan_vk_w_q51_avx2, 0, DAN_Q51_BYTES, DAN_Q81_BYTES, 4, 1, dan_vk_q81_p)
+DAN_VK_VNNI static float dan_vk_q50_dot_vnni(const uint8_t *w, const void *x, int64_t blocks) { float r; dan_vk_q50_dot1_vnni(w, (const uint8_t *)x, 0, blocks, &r); return r; }
+DAN_VK_VNNI static float dan_vk_q41_dot_vnni(const uint8_t *w, const void *x, int64_t blocks) { float r; dan_vk_q41_dot1_vnni(w, (const uint8_t *)x, 0, blocks, &r); return r; }
+DAN_VK_VNNI static float dan_vk_q51_dot_vnni(const uint8_t *w, const void *x, int64_t blocks) { float r; dan_vk_q51_dot1_vnni(w, (const uint8_t *)x, 0, blocks, &r); return r; }
 
 /* AVX2 (and avx512 without VNNI) */
 #define DAN_VK_AVX2_EXTRA dan_vk_q50_dot_avx2, dan_vk_q41_dot_avx2, dan_vk_q51_dot_avx2, \
@@ -1450,7 +1456,7 @@ static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_
                                          DAN_VK_AVX2_EXTRA};
 
 /* avx512 with VNNI: the kernels of rows by several vectors use its instructions */
-#define DAN_VK_VNNI_EXTRA dan_vk_q50_dot_avx2, dan_vk_q41_dot_avx2, dan_vk_q51_dot_avx2, \
+#define DAN_VK_VNNI_EXTRA dan_vk_q50_dot_vnni, dan_vk_q41_dot_vnni, dan_vk_q51_dot_vnni, \
     {dan_vk_q40_dot4_vnni, dan_vk_q4k_dot4_vnni, dan_vk_q5k_dot4_vnni, dan_vk_q6k_dot4_vnni, \
      dan_vk_q50_dot4_vnni, dan_vk_q41_dot4_vnni, dan_vk_q51_dot4_vnni, dan_vk_q80_dot4_vnni}
 static const dan_vk_table dan_vk_avx512_vnni = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
