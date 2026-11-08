@@ -396,6 +396,29 @@ class ТестыДвижка(unittest.TestCase):
         self.assertEqual(итоги[0], итоги[2])
 
 
+class Свойства(ctypes.Structure):
+    """ggml_type_traits из ggml.h b12190"""
+    _fields_ = [("имя", ctypes.c_char_p), ("блок", ctypes.c_int64), ("чередование", ctypes.c_int64),
+                ("размер", ctypes.c_size_t), ("квант", ctypes.c_bool), ("в_числа", ctypes.c_void_p),
+                ("из_чисел", ctypes.c_void_p)]
+
+
+ПРЕОБРАЗОВАНИЕ = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64)
+
+
+def квантователь_ggml(ggml):
+    """Функция квантования вид, числа -> байты блоков самой ggml (from_float)."""
+    ggml.ggml_get_type_traits.restype = ctypes.POINTER(Свойства)
+
+    def квантовать(вид, числа):
+        с = ggml.ggml_get_type_traits(вид).contents
+        вход = (ctypes.c_float * len(числа))(*числа)
+        выход = ctypes.create_string_buffer(len(числа) // с.блок * с.размер)
+        ПРЕОБРАЗОВАНИЕ(с.из_чисел)(ctypes.cast(вход, ctypes.c_void_p), ctypes.cast(выход, ctypes.c_void_p), len(числа))
+        return выход.raw
+    return квантовать
+
+
 def найти_llama():
     место = os.environ.get("DAN_LLAMA")
     if not место:
@@ -472,27 +495,32 @@ class ТестыСверкиСLlama(unittest.TestCase):
         # llama.cpp переводит вектор в половинную точность, движок считает его в дроб32
         self.сверить(Общее.модели["f16"], 1e-2, жадный=False)
 
-    def test_разворачивание_как_в_ggml(self):
-        """Веса Q4_0 ... Q6_K, созданные квантованием ggml: числа движка побитно равны to_float ggml."""
+    def ggml(self):
         try:
-            ggml = ctypes.CDLL(os.path.join(os.path.dirname(self.библиотека), "libggml-base.so"))
+            return ctypes.CDLL(os.path.join(os.path.dirname(self.библиотека), "libggml-base.so"))
         except OSError as о:
             self.skipTest("нет libggml-base рядом с llama.cpp: " + str(о))
 
-        class Свойства(ctypes.Structure):
-            _fields_ = [("имя", ctypes.c_char_p), ("блок", ctypes.c_int64), ("чередование", ctypes.c_int64),
-                        ("размер", ctypes.c_size_t), ("квант", ctypes.c_bool), ("в_числа", ctypes.c_void_p),
-                        ("из_чисел", ctypes.c_void_p)]
+    def test_кванты_без_разворачивания(self):
+        """Веса Q4_0, Q4_K, Q5_K, Q6_K считаются ядрами языка как есть: вектор переводится в 8 бит, как в
+        llama.cpp, поэтому логиты близки, а жадный ответ совпадает побайтно."""
+        квантовать = квантователь_ggml(self.ggml())
+        виды = [12, 14, 2, 13]                       # Q4_K, Q6_K, Q4_0, Q5_K
+        номер = [0]
 
-        ggml.ggml_get_type_traits.restype = ctypes.POINTER(Свойства)
-        ПРЕОБРАЗОВАНИЕ = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64)
+        def квантователь(имя, размеры, числа):
+            if len(размеры) != 2:
+                return None
+            вид = виды[номер[0] % len(виды)]
+            номер[0] += 1
+            return квантовать(вид, числа), вид
 
-        def квантовать(вид, числа):
-            с = ggml.ggml_get_type_traits(вид).contents
-            вход = (ctypes.c_float * len(числа))(*числа)
-            выход = ctypes.create_string_buffer(len(числа) // с.блок * с.размер)
-            ПРЕОБРАЗОВАНИЕ(с.из_чисел)(ctypes.cast(вход, ctypes.c_void_p), ctypes.cast(выход, ctypes.c_void_p), len(числа))
-            return выход.raw
+        модель = os.path.join(Общее.папка, "кванты_как_есть.gguf")
+        gguf_malaya.создать(модель, ширина=256, голов=4, голов_kv=2, ширина_ffn=512, квантователь=квантователь)
+        self.сверить(модель, 1e-5)
+
+        ggml = self.ggml()
+        квантовать = квантователь_ggml(ggml)
 
         def развернуть(вид, данные, n):
             с = ggml.ggml_get_type_traits(вид).contents
