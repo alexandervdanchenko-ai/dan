@@ -517,6 +517,20 @@ static int dan_ll_load(void) {
                 folder[cut - found] = 0;
                 if (!folder[0]) strcpy(folder, "/");
             }
+#if defined(_WIN32)
+            /* found by its bare name (the folder of Dan in PATH): the variants for the processor lie next
+               to the file that the system opened, and ggml_backend_load_all() would look for them only
+               next to the program */
+            if (!folder[0]) {
+                wchar_t wp[4096];
+                DWORD n = GetModuleFileNameW((HMODULE)lib, wp, 4096);
+                int k = (n > 0 && n < 4096)
+                    ? WideCharToMultiByte(CP_UTF8, 0, wp, -1, folder, (int)sizeof folder, NULL, NULL) : 0;
+                char *s = k > 0 ? strrchr(folder, '\\') : NULL;
+                if (s) *s = 0;
+                else folder[0] = 0;
+            }
+#endif
             if (folder[0] && dan_ll.load_all_from_path) dan_ll.load_all_from_path(folder);
             else if (dan_ll.load_all) dan_ll.load_all();
             dan_ll.backend_init();

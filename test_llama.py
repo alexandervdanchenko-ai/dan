@@ -61,7 +61,7 @@ class ТестыВерсии(unittest.TestCase):
             for нужно in ("-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=ON", "-DGGML_NATIVE=OFF",
                           "-DGGML_METAL=OFF", "-DGGML_CUDA=OFF", "-DGGML_VULKAN=OFF", "-DBUILD_SHARED_LIBS=ON"):
                 self.assertIn(нужно, п, система)
-        self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", м.параметры_cmake("windows", "и"))
+        self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL", м.параметры_cmake("windows", "и"))
 
 
 class ТестыКоманд(unittest.TestCase):
