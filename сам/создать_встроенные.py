@@ -19,6 +19,7 @@ import sistema  # noqa: E402
 import versiya  # noqa: E402
 import yadra  # noqa: E402  (функции только компилятора на Дане)
 import modeli  # noqa: E402  (функции только компилятора на Дане)
+import vyvod  # noqa: E402  (функции только компилятора на Дане)
 from lexer import без_ё  # noqa: E402
 
 ФАЙЛ = os.path.join(ПАПКА, "встроенные.dan")
@@ -50,7 +51,7 @@ def текст():
         if к not in канонические:
             канонические.append(к)
     # таблицы, которых нет в замороженном компиляторе на Python
-    for и in list(yadra.ФУНКЦИИ) + list(modeli.ФУНКЦИИ):
+    for и in list(yadra.ФУНКЦИИ) + list(modeli.ФУНКЦИИ) + list(vyvod.ФУНКЦИИ):
         поиск[без_ё(и)] = и
         канонические.append(и)
         имена.append(и)
@@ -60,6 +61,8 @@ def текст():
             return yadra.ФУНКЦИИ[к]
         if к in modeli.ФУНКЦИИ:
             return modeli.ФУНКЦИИ[к]
+        if к in vyvod.ФУНКЦИИ:
+            return vyvod.ФУНКЦИИ[к]
         return proverka.найти_в_библиотеке(без_ё(к))[1]
 
     строки = [
