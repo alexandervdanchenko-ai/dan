@@ -696,6 +696,30 @@ class ТестыЧерновика(unittest.TestCase):
                 else:
                     self.assertTrue(0 < счёт["принято"] < счёт["предложено"], счёт)
 
+    def test_программа_замера(self):
+        """Программа замера замеры/нейро/черновик.dan (сценарий dvizhok.yml) собирается и на крошечных
+        моделях выдаёт скорости, долю принятых и совпадение текста."""
+        программа = os.path.join(Общее.папка, "черновик_замер.dan")
+        shutil.copy(os.path.join(ПАПКА, "замеры", "нейро", "черновик.dan"), программа)
+        р = subprocess.run([sam_kompilyator.исполняемый(), "собрать", программа], capture_output=True,
+                           env=sam_kompilyator.среда(), timeout=900, cwd=Общее.папка)
+        self.assertEqual(р.returncode, 0, р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace"))
+        запрос = os.path.join(Общее.папка, "запрос_замера.txt")
+        with open(запрос, "w", encoding="utf-8") as ф:
+            ф.write("привет мир как дела")
+        р = subprocess.run([программа[:-4], Общее.модели["spm"], Общее.модели["черн_шум"], запрос, "24", "2,4"],
+                           capture_output=True, timeout=600, cwd=Общее.папка)
+        вывод_ = р.stdout.decode("utf-8", "replace")
+        self.assertEqual(р.returncode, 0, вывод_ + р.stderr.decode("utf-8", "replace"))
+        строки = dict(с.split(": ", 1) for с in вывод_.splitlines() if ": " in с)
+        for ключ in ("к=2", "к=4", "подстройка"):
+            скорость, предложено, принято, проверок, совпал = строки[ключ].split()
+            self.assertGreater(float(скорость), 0)
+            self.assertEqual(совпал, "истина")
+            self.assertEqual(int(принято) + int(проверок), 23)
+        self.assertGreater(float(строки["обычный"]), 0)
+        self.assertEqual(len(строки["температура"].split()), 2)
+
     def test_хи2_замечает_разные_распределения(self):
         """Сама проверка распределения отличает разные распределения такого размера."""
         _, _, одно = хи2_двух_выборок({"а": 1500, "б": 1000, "в": 500}, {"а": 1480, "б": 1010, "в": 510})
