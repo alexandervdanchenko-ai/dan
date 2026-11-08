@@ -28,6 +28,9 @@ void dequantize_row_q4_0(const void *x, float *y, int64_t k);
 void dequantize_row_q4_K(const void *x, float *y, int64_t k);
 void dequantize_row_q5_K(const void *x, float *y, int64_t k);
 void dequantize_row_q6_K(const void *x, float *y, int64_t k);
+void dequantize_row_q5_0(const void *x, float *y, int64_t k);
+void dequantize_row_q4_1(const void *x, float *y, int64_t k);
+void dequantize_row_q5_1(const void *x, float *y, int64_t k);
 void quantize_row_q8_K_ref(const float *x, void *y, int64_t k);
 
 /* what ggml-quants.c asks from the rest of ggml */
@@ -46,7 +49,10 @@ static void deq_ggml(int fmt, const uint8_t *in, float *out, int64_t blocks) {
     case 0: dequantize_row_q4_0(in, out, k); break;
     case 1: dequantize_row_q4_K(in, out, k); break;
     case 2: dequantize_row_q5_K(in, out, k); break;
-    default: dequantize_row_q6_K(in, out, k); break;
+    case 3: dequantize_row_q6_K(in, out, k); break;
+    case 4: dequantize_row_q5_0(in, out, k); break;
+    case 5: dequantize_row_q4_1(in, out, k); break;
+    default: dequantize_row_q5_1(in, out, k); break;
     }
 }
 static void deq_dan(int fmt, const uint8_t *in, float *out, int64_t blocks) {
@@ -54,21 +60,26 @@ static void deq_dan(int fmt, const uint8_t *in, float *out, int64_t blocks) {
     case 0: dan_vk_q40_dequantize(in, out, blocks); break;
     case 1: dan_vk_q4k_dequantize(in, out, blocks); break;
     case 2: dan_vk_q5k_dequantize(in, out, blocks); break;
-    default: dan_vk_q6k_dequantize(in, out, blocks); break;
+    case 3: dan_vk_q6k_dequantize(in, out, blocks); break;
+    case 4: dan_vk_q50_dequantize(in, out, blocks); break;
+    case 5: dan_vk_q41_dequantize(in, out, blocks); break;
+    default: dan_vk_q51_dequantize(in, out, blocks); break;
     }
 }
 
 int main(int argc, char **argv) {
-    static const char *const names[4] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K"};
+    static const char *const names[ETALON_KVANT_FORMATS] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q4_1", "Q5_1"};
     int failures = 0;
-    uint64_t h[4];
+    uint64_t h[ETALON_KVANT_FORMATS];
     etalon_kvant_hashes(deq_ggml, h);
     if (argc > 1 && (strcmp(argv[1], "печать") == 0 || strcmp(argv[1], "pechat") == 0)) {
-        printf("static const uint64_t etalon_kvanty_ggml[4] = {0x%016llxull, 0x%016llxull, 0x%016llxull, 0x%016llxull};\n",
-               (unsigned long long)h[0], (unsigned long long)h[1], (unsigned long long)h[2], (unsigned long long)h[3]);
+        printf("static const uint64_t etalon_kvanty_ggml[ETALON_KVANT_FORMATS] = {");
+        for (int f = 0; f < ETALON_KVANT_FORMATS; f++)
+            printf("%s0x%016llxull", f ? (f % 4 ? ", " : ",\n    ") : "", (unsigned long long)h[f]);
+        printf("};\n");
         return 0;
     }
-    for (int f = 0; f < 4; f++)
+    for (int f = 0; f < ETALON_KVANT_FORMATS; f++)
         if (h[f] != etalon_kvanty_ggml[f]) {
             failures++;
             printf("ошибка: хеш %s у ggml %016llx, а записан %016llx\n", names[f], (unsigned long long)h[f],
@@ -79,7 +90,7 @@ int main(int argc, char **argv) {
     static uint8_t in[B * 210];
     static float a[B * 256], b[B * 256];
     int64_t checked = 0;
-    for (int f = 0; f < 4; f++)
+    for (int f = 0; f < ETALON_KVANT_FORMATS; f++)
         for (uint64_t seed = 1; seed <= 200; seed++) {
             etalon_kvant_blocks(f, in, B, seed * 7919 + (uint64_t)f);
             deq_ggml(f, in, a, B);
