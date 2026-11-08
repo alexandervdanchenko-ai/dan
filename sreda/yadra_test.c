@@ -64,15 +64,18 @@ static void test_f16(void) {
 }
 
 static const dan_vk_table *variants[8];
+static const char *labels[8];   /* the names asked for (several tables are named «avx512») */
 static int nvariants;
 
 static void find_variants(void) {
-    static const char *const names[] = {"c", "avx2", "avx512", "neon", "dotprod"};
-    for (int i = 0; i < 5; i++) {
+    static const char *const names[] = {"c", "avx2", "avx512vnni", "avx512", "neon", "dotprod"};
+    for (int i = 0; i < (int)(sizeof names / sizeof *names); i++) {
         const dan_vk_table *t;
-        if (dan_vk_supported(names[i], &t)) variants[nvariants++] = t;
+        if (!dan_vk_supported(names[i], &t)) continue;
+        int seen = 0;
+        for (int v = 0; v < nvariants; v++) seen |= variants[v] == t;
+        if (!seen) { labels[nvariants] = t->many ? "amx" : names[i]; variants[nvariants++] = t; }
     }
-
 }
 
 static void test_dot(void) {
@@ -473,6 +476,56 @@ static void test_rn(void) {
             kv_matmul(f, w, x, rows, cols, nv, ys);
             free(w); free(x); free(ys);
         }
+    }
+}
+
+/* a matrix by many vectors (AMX and the rest): every variant the bits of
+   the row kernel of C for every row and vector - rows and vectors not
+   multiple of 16, blocks not multiple of 8, tiles of vectors of 2 groups
+   and of all, numbers of a vector from -128 to 127 and large scales */
+static void test_mnogo(void) {
+    static const int64_t rows_[] = {1, 16, 17, 40}, blocks_[] = {1, 8, 9, 17}, nv_[] = {16, 17, 33, 48};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t n = dan_vk_fmt_n[f], bytes = dan_vk_fmt_bytes[f];
+        for (int ri = 0; ri < 4; ri++)
+            for (int bi = 0; bi < 4; bi++) {
+                int64_t rows = rows_[ri], cols = blocks_[bi] * n, nv = nv_[(ri + bi) % 4], blocks = rows * cols / n;
+                uint8_t *w = malloc((size_t)(blocks * bytes));
+                float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4);
+                float *y = malloc((size_t)(rows * nv) * 4);
+                kv_blocks(f, w, blocks, 6060 + (uint64_t)(f * 100 + ri * 10 + bi));
+                for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)(rnd2() * (i % 5 == 1 ? 1000.0 : 1.0));
+                uint8_t *xq = kv_quantize_x(f, x, cols * nv);
+                int64_t xs = cols / n * dan_vk_fmt_xbytes[f];
+                for (int64_t k = 0; k < nv; k++)
+                    for (int64_t i = 0; i < rows; i++)
+                        ys[k * rows + i] = dan_vk_fmt_dot(&dan_vk_plain, f, w + i * (cols / n) * bytes, xq + k * xs, cols / n);
+                for (int v = 0; v < nvariants; v++)
+                    for (int ti = 0; ti < 2; ti++) {
+#ifdef _WIN32
+                        _putenv_s("DAN_YADRA_PLITKA", ti ? "" : "1");
+#else
+                        if (ti) unsetenv("DAN_YADRA_PLITKA");
+                        else setenv("DAN_YADRA_PLITKA", "1", 1);
+#endif
+                        dan_vk_cur = variants[v];
+                        memset(y, 0xff, (size_t)(rows * nv) * 4);
+                        dan_vk_matmul_fmt(f, w, xq, y, rows, cols, nv);
+                        for (int64_t k = 0; k < nv * rows; k++)
+                            if (!same32(y[k], ys[k])) {
+                                CHECK(0, "%s %s на много векторов: %d строк, %d блоков, %d векторов, плитка %s: строка %d, вектор %d: %.9g и %.9g",
+                                      labels[v], kv_names[f], (int)rows, (int)(cols / n), (int)nv, ti ? "обычная" : "малая",
+                                      (int)(k % rows), (int)(k / rows), y[k], ys[k]);
+                                break;
+                            }
+                    }
+#ifdef _WIN32
+                _putenv_s("DAN_YADRA_PLITKA", "");
+#else
+                unsetenv("DAN_YADRA_PLITKA");
+#endif
+                free(w); free(x); free(ys); free(y); free(xq);
+            }
     }
 }
 
@@ -909,8 +962,9 @@ int main(int argc, char **argv) {
     test_sums();
     test_kvanty();
     test_rn();
+    test_mnogo();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
-    for (int v = 0; v < nvariants; v++) printf(" %s", variants[v]->name);
+    for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;
     printf("; выбран: %s; потоков: %d; хеш весов llama.cpp: %016llx %016llx\n", dan_vk_name(), dan_pool_threads(),
            (unsigned long long)kv_hash, (unsigned long long)kv_hash2);
