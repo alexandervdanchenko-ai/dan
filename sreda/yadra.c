@@ -2177,27 +2177,30 @@ DAN_VK_AVX2 static inline __m256i dan_vk_q3k_parts_avx2(const uint8_t *w, const 
     return acc;
 }
 
-/* IQ4_XS: числа kv со знаком, произведение пары - |kv| на y со знаком kv (не больше 2 * 127 * 127) */
+/* IQ4_XS: числа kv со знаком, произведение пары - |kv| на y со знаком kv (не больше 2 * 127 * 127);
+   суммы 8 частей (дорожка - часть) умножаются на масштабы сразу */
 DAN_VK_AVX2 static inline __m256i dan_vk_iq4xs_parts_avx2(const uint8_t *w, const dan_q8k *y, int32_t *extra) {
-    int8_t sc[8];
-    dan_vk_iq4xs_scales(w, sc);
+    uint16_t h;
+    uint32_t l;
+    memcpy(&h, w + 2, 2);
+    memcpy(&l, w + 4, 4);
+    __m256i lo = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32((int)l), _mm256_setr_epi32(0, 4, 8, 12, 16, 20, 24, 28)),
+                                  _mm256_set1_epi32(0xF));
+    __m256i hi = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32(h), _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14)),
+                                  _mm256_set1_epi32(3));
+    __m256i sc = _mm256_sub_epi32(_mm256_or_si256(lo, _mm256_slli_epi32(hi, 4)), _mm256_set1_epi32(32));
     const __m256i kv = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(const void *)dan_vk_iq4nl));
-    const __m256i m4 = _mm256_set1_epi8(0xF);
-    __m256i acc = _mm256_setzero_si256();
-    for (int b = 0; b < 8; b += 2) {
-        __m256i q = _mm256_loadu_si256((const __m256i *)(const void *)(w + 8 + 16 * b));
-        __m256i lo = _mm256_shuffle_epi8(kv, _mm256_and_si256(q, m4));
-        __m256i hi = _mm256_shuffle_epi8(kv, _mm256_and_si256(_mm256_srli_epi16(q, 4), m4));
-        __m256i a0 = _mm256_permute2x128_si256(lo, hi, 0x20), a1 = _mm256_permute2x128_si256(lo, hi, 0x31);
-        __m256i y0 = _mm256_loadu_si256((const __m256i *)(const void *)(y->qs + 32 * b));
-        __m256i y1 = _mm256_loadu_si256((const __m256i *)(const void *)(y->qs + 32 * b + 32));
-        __m256i p0 = _mm256_maddubs_epi16(_mm256_abs_epi8(a0), _mm256_sign_epi8(y0, a0));
-        __m256i p1 = _mm256_maddubs_epi16(_mm256_abs_epi8(a1), _mm256_sign_epi8(y1, a1));
-        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(p0, _mm256_set1_epi16(sc[b])));
-        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(p1, _mm256_set1_epi16(sc[b + 1])));
+    const __m128i m4 = _mm_set1_epi8(0xF);
+    const __m256i one = _mm256_set1_epi16(1);
+    __m256i v[8];
+    for (int b = 0; b < 8; b++) {
+        __m128i q = _mm_loadu_si128((const __m128i *)(const void *)(w + 8 + 16 * b));
+        __m256i a = _mm256_shuffle_epi8(kv, _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q, 4), m4), _mm_and_si128(q, m4)));
+        __m256i yv = _mm256_loadu_si256((const __m256i *)(const void *)(y->qs + 32 * b));
+        v[b] = _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_abs_epi8(a), _mm256_sign_epi8(yv, a)), one);
     }
     *extra = 0;
-    return acc;
+    return _mm256_mullo_epi32(dan_vk_hadd8_avx2(v), sc);
 }
 
 /* по 8 блоков, как DAN_VK_KDOT_AVX2: d по смещению DOFF, dmin (MINS) - по MOFF, хвост - PF */
