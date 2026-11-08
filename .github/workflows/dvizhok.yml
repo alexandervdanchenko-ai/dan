@@ -8,8 +8,10 @@
 # «скорость памяти / объём весов» по эталону замеры/память. Таблица - в итоге задания;
 # из неё обновляется раздел «Движок на Дане» в замеры/результаты.md.
 #
-# Задание slabaya - замер на слабой машине (ARM, 4 ядра и 4 ГБ, модели в 2-4 бита): ветки
+# Задание slabaya - замер на слабой машине (ARM и x86, 4 ядра и 4 ГБ, модели в 2-4 бита): ветки
 # dvizhok-zamer-slabaya-... (только оно) и запуск вручную.
+# Задание kachestvo - недоумение (perplexity) моделей в 2-8 бит, Дан против llama-perplexity: ветки, в
+# названии которых есть «kachestvo» (только оно), и запуск вручную с kachestvo=да.
 #
 # Запуск вручную:
 #   gh api -X POST repos/<владелец>/dan/actions/workflows/dvizhok.yml/dispatches -f ref=<ветка>
@@ -29,11 +31,15 @@ on:
         description: "токенов жадного ответа"
         required: false
         default: "32"
+      kachestvo:
+        description: "недоумение моделей в 2-8 бит (задание kachestvo, долгое): да или нет"
+        required: false
+        default: "нет"
 
 jobs:
   dvizhok:
     name: Движок против llama.cpp (Linux ${{ matrix.arch }})
-    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') }}
+    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') && !contains(github.ref_name, 'kachestvo') }}
     strategy:
       fail-fast: false
       matrix:
@@ -124,7 +130,7 @@ jobs:
     # без черновика и llama-speculative-simple (если соберётся). Таблица - в итоге задания; из неё
     # обновляется раздел «Спекулятивная генерация» в замеры/результаты.md.
     name: Спекулятивная генерация (Linux x86-64)
-    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') }}
+    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') && !contains(github.ref_name, 'kachestvo') }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -190,10 +196,19 @@ jobs:
     # против llama.cpp той же версии в тех же пределах: скорость порождения и чтения запроса, пиковая память
     # группы, доля предела, совпадение жадного ответа. Таблица - в итоге задания; из неё обновляется раздел
     # «Поток 24В» в замеры/результаты.md.
-    name: Слабая машина - 4 ядра и 4 ГБ (Linux ARM)
+    # На x86 (ubuntu-latest) - те же пределы и модели (поток 25В).
+    name: Слабая машина - 4 ядра и 4 ГБ (Linux ${{ matrix.arch }})
     # только для веток dvizhok-zamer-slabaya* и запуска вручную: замер долгий
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'dvizhok-zamer-slabaya')
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            arch: ARM
+          - os: ubuntu-latest
+            arch: x86-64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
       PYTHONUTF8: "1"
@@ -208,6 +223,7 @@ jobs:
           echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ, подкачка: $(free -g | awk '/Swap/ {print $2}') ГБ"
           cpu="$(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')"
           echo "процессор: $cpu; cgroup: $(stat -fc %T /sys/fs/cgroup); $(systemctl --version | head -1)"
+          echo "флаги: $(grep -m1 -o -w -E 'avx512_vnni|avx512f|avx2|asimddp|i8mm' /proc/cpuinfo | sort -u | tr '\n' ' ')"
           echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
           echo "cpu=$(echo "$cpu" | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
       - name: Кэш llama.cpp
@@ -244,10 +260,116 @@ jobs:
         run: |
           gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o yadra_test -lm -pthread
           ./yadra_test | tail -1
+          echo "### Ядра, ${{ matrix.arch }}: $(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')" >> "$GITHUB_STEP_SUMMARY"
           DAN_POTOKI=4 ./yadra_test zamer_paket | grep -E "потоков|Q2_K|Q3_K|IQ4_XS|Q4_K" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Замер в пределах 4 ядер и 4 ГБ
         env:
           DAN_HOME: ${{ github.workspace }}
         run: |
+          echo "### ${{ matrix.arch }}: $(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')" >> "$GITHUB_STEP_SUMMARY"
           python замеры/нейро/слабая_машина.py "$PWD/llama-slabaya" semya/dan modeli/*.gguf --ядер=4 --память=4G \
             --токенов="$TOKENOV" --итог="$GITHUB_STEP_SUMMARY"
+
+  kachestvo:
+    # Качество моделей в 2-8 бит (поток 25В): недоумение (perplexity) на первых окнах wikitext-2 (test, CC BY-SA)
+    # по 512 токенов - движок на Дане (м.недоумение, замеры/нейро/недоумение.py) против llama-perplexity той же
+    # версии, тот же текст и те же окна. Mistral 7B Instruct v0.2 (Apache 2.0): Q2_K, Q3_K_M, Q4_K_M, Q8_0 -
+    # файлы TheBloke (без imatrix), IQ4_XS - MaziyarPanahi (если нет - llama-quantize из Q8_0); Qwen2.5 1.5B
+    # Instruct (Apache 2.0): Q2_K, Q3_K_M, IQ4_XS, Q4_K_M, Q8_0 - файлы bartowski (с imatrix). Файлы
+    # скачиваются по одному и удаляются после замера. Таблица - в итоге задания; из неё обновляется раздел
+    # «Поток 25В» в замеры/результаты.md.
+    name: Недоумение ${{ matrix.model }} (Linux ${{ matrix.arch }})
+    if: (github.event_name == 'workflow_dispatch' && github.event.inputs.kachestvo == 'да') || contains(github.ref_name, 'kachestvo')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04-arm, arch: ARM, model: mistral7b, okon: 16}
+          - {os: ubuntu-24.04-arm, arch: ARM, model: qwen1.5b, okon: 32}
+          - {os: ubuntu-latest, arch: x86-64, model: mistral7b, okon: 16}
+          - {os: ubuntu-latest, arch: x86-64, model: qwen1.5b, okon: 32}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 345
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Машина
+        run: |
+          echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ, диск: $(df -h . | tail -1)"
+          cpu="$(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')"
+          echo "процессор: $cpu"
+          echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
+          echo "cpu=$(echo "$cpu" | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
+      - name: Кэш llama.cpp
+        id: kesh
+        uses: actions/cache@v4
+        with:
+          path: llama-kachestvo
+          key: llama-kachestvo-${{ env.metka }}-${{ runner.os }}-${{ env.cpu }}-${{ hashFiles('.github/workflows/dvizhok.yml') }}
+      - name: Сборка llama.cpp (llama-perplexity, llama-quantize)
+        if: steps.kesh.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 --branch "$metka" https://github.com/ggml-org/llama.cpp llama-src
+          cmake -S llama-src -B llama-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_COMMON=ON -DLLAMA_CURL=OFF
+          cmake --build llama-build --config Release -j "$(nproc)" --target llama-perplexity llama-quantize
+          mkdir -p llama-kachestvo
+          cp -a llama-build/bin/*.so* llama-build/bin/llama-perplexity llama-build/bin/llama-quantize llama-kachestvo/
+          ls -la llama-kachestvo
+      - name: Текст wikitext-2 (test)
+        run: |
+          curl -sSfL --retry 3 -o wikitext.zip https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip
+          unzip -q wikitext.zip
+          # первые 80 000 байт (целыми строками): около 20 тысяч токенов - хватает на 32 окна по 512 токенов
+          head -c 80000 wikitext-2-raw/wiki.test.raw | head -n -1 > tekst.txt
+          wc -c tekst.txt
+      - name: Компилятор из семени
+        run: sh semya/sobrat.sh
+      - name: Недоумение
+        env:
+          DAN_HOME: ${{ github.workspace }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/llama-kachestvo
+        run: |
+          mkdir -p modeli
+          echo "### ${{ matrix.model }}, ${{ matrix.arch }}: $(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')" >> "$GITHUB_STEP_SUMMARY"
+          skachat() {  # файл, затем адреса по очереди
+            f="$1"; shift
+            for u in "$@"; do
+              curl -sSfL --retry 3 -o "$f" "$u" && return 0
+              echo "нет $u"
+            done
+            return 1
+          }
+          m=https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2
+          mz=https://huggingface.co/MaziyarPanahi/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/Mistral-7B-Instruct-v0.2
+          q=https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct
+          qo=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct
+          shapka=--шапка
+          for v in Q8_0 Q2_K Q3_K_M IQ4_XS Q4_K_M; do
+            f="modeli/${{ matrix.model }}-$v.gguf"
+            if [ "${{ matrix.model }}" = mistral7b ]; then
+              case $v in
+                IQ4_XS)
+                  if ! skachat "$f" "$mz.IQ4_XS.gguf"; then
+                    # нет готового файла: из Q8_0 (повторное квантование, без imatrix) - помечается в имени
+                    skachat modeli/q8.gguf "$m.Q8_0.gguf" && f="modeli/${{ matrix.model }}-IQ4_XS-iz-Q8_0.gguf" \
+                      && llama-kachestvo/llama-quantize --allow-requantize modeli/q8.gguf "$f" IQ4_XS > /dev/null 2>&1
+                    rm -f modeli/q8.gguf
+                  fi ;;
+                *) skachat "$f" "$m.$v.gguf" ;;
+              esac
+            else
+              lower=$(echo "$v" | tr 'A-Z' 'a-z')
+              skachat "$f" "$q-$v.gguf" "$qo-$lower.gguf"
+            fi
+            if [ ! -f "$f" ]; then echo "нет модели $v" | tee -a "$GITHUB_STEP_SUMMARY"; continue; fi
+            python замеры/нейро/недоумение.py "$PWD/llama-kachestvo" semya/dan tekst.txt "$f" --окно=512 \
+              --окон=${{ matrix.okon }} --потоков="$(nproc)" --итог="$GITHUB_STEP_SUMMARY" $shapka
+            shapka=
+            rm -f "$f"
+          done
