@@ -52,14 +52,18 @@ def запустить(команда, окружение=None):
 
 def llama_черновик(программа, большая, черновик, файл, токенов, потоков, к):
     """Скорость и доля принятых llama-speculative-simple (None, если не вышло)."""
-    команда = [программа, "-m", большая, "-md", черновик, "-f", файл, "-n", str(токенов), "-t", str(потоков),
-               "-td", str(потоков), "-c", "1024", "--draft-max", str(к), "--draft-min", "0", "--temp", "0",
-               "--top-k", "1", "-ngl", "0", "-ngld", "0"]
-    try:
-        р = subprocess.run(команда, capture_output=True, timeout=3600)
-    except subprocess.TimeoutExpired:
-        return None
-    вывод_ = р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace")
+    основа = [программа, "-m", большая, "-md", черновик, "-f", файл, "-n", str(токенов), "-t", str(потоков),
+              "-td", str(потоков), "-c", "1024", "--temp", "0", "--top-k", "1", "-ngl", "0", "-ngld", "0"]
+    # имена ключей черновика менялись между версиями llama.cpp: первый, который она примет
+    for ключи_ in (["--spec-draft-n-max", str(к), "--spec-draft-n-min", "0"], ["--spec-draft-n-max", str(к)],
+                   ["--draft-max", str(к), "--draft-min", "0"]):
+        try:
+            р = subprocess.run(основа + ключи_, capture_output=True, timeout=3600)
+        except subprocess.TimeoutExpired:
+            return None
+        вывод_ = р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace")
+        if "error while handling argument" not in вывод_:
+            break
     скорость = re.findall(r"decoded\s+(\d+) tokens in\s+([\d.]+) seconds, speed:\s+([\d.]+) t/s", вывод_)
     доля = re.findall(r"accept\s*=\s*([\d.]+)%", вывод_)
     if р.returncode != 0 or not скорость:
@@ -116,7 +120,10 @@ def главная():
         т_скорость, т_доля = о["температура"][0].split()
         ячейки.append("%.2f (x%.2f, %.0f%%)" % (float(т_скорость), float(т_скорость) / обычный, float(т_доля) * 100))
         таблица.append("| %s | %.2f | %s | %s |" % (метка, обычный, " | ".join(ячейки), "да" if совпали else "НЕТ"))
-        подробно.append("%s, %s: загрузка %s с; %s" % (имя, метка, о["загрузка"][0], о["текст"][0][:300]))
+        пакет = [float(т) for т in о["пакет"][0].split()]
+        подробно.append("%s, %s: загрузка %s с; проход пакета из 1..9 токенов, с: %s (к одному: %s); %s" % (
+            имя, метка, о["загрузка"][0], " ".join("%.3f" % т for т in пакет),
+            " ".join("%.2f" % (т / пакет[0]) for т in пакет), о["текст"][0][:300]))
         if сверка:
             их = запустить([сверка, os.path.join(ключи["llama"], "libllama.so"), большая, файл, str(токенов),
                             str(потоков), "f16"], {"LD_LIBRARY_PATH": ключи["llama"]})

@@ -168,6 +168,6 @@ jobs:
         run: |
           for bolshaya in modeli/qwen7b-q4km.gguf modeli/qwen1.5b-q4km.gguf; do
             python замеры/нейро/черновик.py semya/dan "$bolshaya" modeli/qwen0.5b-q8.gguf --потоков="$(nproc)" \
-              --токенов="$TOKENOV" --к=2,3,4,5,6,8 --llama="$PWD/llama-chernovik" \
+              --токенов="$TOKENOV" --к=1,2,3,4,6,8 --llama="$PWD/llama-chernovik" \
               --llama-черновик="$PWD/llama-chernovik/llama-speculative-simple" --итог="$GITHUB_STEP_SUMMARY"
           done
