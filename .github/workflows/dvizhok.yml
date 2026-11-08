@@ -1,8 +1,10 @@
 # Движок «нейро» на настоящих моделях (необязательный сценарий, не входит в проверку):
-# скачивает небольшие модели GGUF с открытой лицензией (TinyLlama 1.1B Chat - Apache 2.0,
-# Qwen2.5 0.5B Instruct - Apache 2.0) в Q8_0 и Q4_K_M, собирает llama.cpp закреплённой
+# скачивает модели GGUF с открытой лицензией (TinyLlama 1.1B Chat - Apache 2.0, Qwen2.5 0.5B
+# Instruct - Apache 2.0, в Q8_0 и Q4_K_M; Mistral 7B Instruct v0.2 - Apache 2.0, в Q4_K_M -
+# модель главной цели ROADMAP.md: 7B Q4_K_M на 4 ядрах), собирает llama.cpp закреплённой
 # версии (modeli.ВЕРСИЯ_LLAMA) и сверяет с ней движок на Дане: токены набора строк, логиты,
-# жадный ответ; печатает скорость движка и llama.cpp при одинаковом числе потоков и предел
+# жадный ответ; печатает скорость порождения и чтения запроса движка и llama.cpp при одинаковом
+# числе потоков и предел
 # «скорость памяти / объём весов» по эталону замеры/память. Таблица - в итоге задания;
 # из неё обновляется раздел «Движок на Дане» в замеры/результаты.md.
 #
@@ -17,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       modeli:
-        description: "модели через пробел: tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km"
+        description: "модели через пробел: tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km mistral7b-q4km"
         required: false
-        default: "tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km"
+        default: "tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km mistral7b-q4km"
       tokenov:
         description: "токенов жадного ответа"
         required: false
@@ -32,7 +34,7 @@ jobs:
     timeout-minutes: 150
     env:
       PYTHONUTF8: "1"
-      MODELI: ${{ github.event.inputs.modeli || 'tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km' }}
+      MODELI: ${{ github.event.inputs.modeli || 'tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km mistral7b-q4km' }}
       TOKENOV: ${{ github.event.inputs.tokenov || '32' }}
     steps:
       - uses: actions/checkout@v5
@@ -70,6 +72,7 @@ jobs:
               tinyllama-q4km) u=https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf ;;
               qwen-q8) u=https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf ;;
               qwen-q4km) u=https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf ;;
+              mistral7b-q4km) u=https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf ;;
               *) echo "неизвестная модель $m"; exit 1 ;;
             esac
             curl -sSfL --retry 3 -o "modeli/$m.gguf" "$u"
