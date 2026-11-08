@@ -162,8 +162,12 @@ def параметры_cmake(сис, исходники):
         п += ["-DCMAKE_INSTALL_RPATH=@loader_path", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
               "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3", "-DGGML_ACCELERATE=ON"]
     elif сис == "windows":
-        # среда C (CRT) встроена в каждую DLL: на машине пользователя не нужен Visual C++ Redistributable
-        п += ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"]
+        # одна общая среда C (CRT) для всех DLL: llama.dll открывает файл модели функцией ggml-base.dll и
+        # работает с полученным FILE*, а при CRT, встроенной в каждую DLL (MultiThreaded), FILE* одной DLL
+        # чужой для другой - загрузка модели останавливалась (0xC0000409). Библиотеки среды C++
+        # (vcruntime140*.dll, msvcp140*.dll) кладутся в архив рядом с llama.dll (сложить), поэтому
+        # Visual C++ Redistributable на машине пользователя по-прежнему не нужен
+        п += ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"]
         # clang даёт больше вариантов для процессора (у MSVC нет части наборов команд) и более
         # быстрый код ggml; так собирает и сам llama.cpp
         if shutil.which("clang"):
@@ -212,6 +216,27 @@ def папка_результата(сборка):
     raise SystemExit("Сборка llama.cpp не создала папку bin")
 
 
+# Библиотеки среды C++ Visual Studio, которые нужны llama.dll и ggml*.dll (сборка с MultiThreadedDLL);
+# распространять их вместе с программой разрешено (Visual C++ redistributable, app-local).
+CRT = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+
+
+def библиотеки_crt():
+    """Пути к библиотекам CRT из папки redist Visual Studio (переменная VCToolsRedistDir)."""
+    среда = среда_visual_studio() or {}
+    redist = среда.get("VCToolsRedistDir") or os.environ.get("VCToolsRedistDir") or ""
+    папки = sorted(glob.glob(os.path.join(redist, "x64", "Microsoft.VC*.CRT")))
+    if not папки:
+        raise SystemExit(f"Не найдена папка библиотек среды C++ x64\\Microsoft.VC*.CRT в «{redist}» (VCToolsRedistDir)")
+    пути = []
+    for имя in CRT:
+        путь = os.path.join(папки[-1], имя)
+        if not os.path.isfile(путь):
+            raise SystemExit(f"Нет {имя} в {папки[-1]}")
+        пути.append(путь)
+    return пути
+
+
 def сложить(исходники, сборка, цель, метка):
     сис = система()
     главные, образец = ФАЙЛЫ[сис]
@@ -226,6 +251,9 @@ def сложить(исходники, сборка, цель, метка):
         if not os.path.isfile(путь):
             raise SystemExit(f"Сборка не создала файл {имя} в {откуда}")
         shutil.copyfile(путь, os.path.join(цель, имя))
+    if сис == "windows":
+        for путь in библиотеки_crt():
+            shutil.copyfile(путь, os.path.join(цель, os.path.basename(путь)))
     shutil.copyfile(os.path.join(исходники, "LICENSE"), os.path.join(цель, "LICENSE-llama.cpp.txt"))
     р = subprocess.run(["git", "-C", исходники, "rev-parse", "HEAD"], capture_output=True, text=True)
     with open(os.path.join(цель, "version.txt"), "w", encoding="utf-8", newline="\n") as ф:
