@@ -78,6 +78,9 @@ import re
     (["сам/проверка.dan", "сам/дан.dan", "сам/сервер.dan", "сам/объяснение.dan", "kody.py"], ["test_pustoy_obrabotchik"]),
     (["сам/проверка.dan", "kody.py"], ["test_perenos_stroki"]),
     (["сам/дан.dan", "semya/sobrat.sh"], ["test_papka_dana"]),
+    # запись части «м[а..б] = х», склеить, параллельная сводка
+    (["сам/проверка.dan", "сам/порождение.dan", "сам/разбор.dan", "сам/формат.dan", "sreda/massivy.c", "kody.py"],
+     ["test_chasti"]),
     # передача значения в вызов под «!» без копии
     (["сам/порождение.dan"], ["test_rezultat_bez_kopii"]),
     # локальные языковые модели через llama.cpp (модуль «модели»)

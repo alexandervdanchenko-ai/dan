@@ -354,6 +354,52 @@ static dan_arr *dan_arr_borrow(dan_arr *a, int64_t from, int64_t to, int line) {
     return r;
 }
 
+static void dan_arr_part_len_error(int64_t part, int64_t value, int line) {
+    char buf[200];
+    snprintf(buf, sizeof buf, "в часть из %lld элементов записывается %lld: длины должны совпадать",
+             (long long)part, (long long)value);
+    dan_error(buf, line);
+}
+
+/* м[а..б] = v: a is the array's own (dan_arr_mut was called), v has the same kind.
+   The bounds are checked as for a part; the lengths must be equal. v may share
+   the elements of a (a part of it, or a itself): memmove copies overlapping
+   elements correctly, and a packed copy goes through a copy of v. */
+static void dan_arr_put(dan_arr *a, int64_t from, int64_t to, dan_arr *v, int line) {
+    if (from < 0 || from > a->len) dan_index_error(from, a->len, line);
+    if (to < from - 1 || to >= a->len) dan_index_error(to, a->len, line);
+    int64_t n = to - from + 1;
+    if (n != v->len) dan_arr_part_len_error(n, v->len, line);
+    if (n == 0) return;
+    int64_t bits = dan_arr_bits[a->kind];
+    if ((from * bits) % 8 == 0 && (n * bits) % 8 == 0) {
+        memmove(a->data + from * bits / 8, v->data, (size_t)(n * bits / 8));
+        return;
+    }
+    /* packed elements inside a byte: one by one, from a copy if v lies in the same memory */
+    const uint8_t *vs = v->data, *ve = v->data + dan_arr_nbytes(v->kind, v->len);
+    const uint8_t *as = a->data, *ae = a->data + dan_arr_nbytes(a->kind, a->len);
+    dan_arr *src = v;
+    if (vs < ae && as < ve) src = dan_arr_copy(v);
+    for (int64_t i = 0; i < n; i++) dan_arr_wi(a, from + i, dan_arr_ri(src, i), line);
+}
+
+/* склеить(а, б): a new array with the elements of а and then of б */
+static dan_arr *dan_arr_concat(const dan_arr *a, const dan_arr *b, int line) {
+    if (a->len > INT64_MAX - b->len) dan_error("массив слишком большой", line);
+    dan_arr *r = dan_arr_new(a->kind, a->len + b->len, line);
+    if (dan_arr_bits[a->kind] >= 8) {
+        size_t na = dan_arr_nbytes(a->kind, a->len);
+        if (a->len) memcpy(r->data, a->data, na);
+        if (b->len) memcpy(r->data + na, b->data, dan_arr_nbytes(b->kind, b->len));
+    } else {
+        /* packed: the last byte of a part may hold elements after its end */
+        for (int64_t i = 0; i < a->len; i++) dan_arr_wi(r, i, dan_arr_ri(a, i), line);
+        for (int64_t i = 0; i < b->len; i++) dan_arr_wi(r, a->len + i, dan_arr_ri(b, i), line);
+    }
+    return r;
+}
+
 static bool dan_arr_eq(const dan_arr *a, const dan_arr *b) {
     if (a->len != b->len) return false;
     bool f = a->kind <= DAN_AF16;
