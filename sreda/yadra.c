@@ -1377,6 +1377,62 @@ DAN_VK_AVX2 static inline __m256i dan_vk_q6k_parts_avx2(const uint8_t *w, const 
     return acc;
 }
 
+/* Хвост строки K-формата (меньше 8 блоков после последних полных 8: у строк из 1536 чисел, Qwen2.5
+   1.5B, - все 6 блоков): целые суммы n блоков складываются по дорожкам, как у полных 8 (дорожки
+   n..7 - нули), числа p блоков считаются по дорожкам теми же действиями, что у ядра строки, и
+   прибавляются к r по одному по порядку. Прежде каждый блок хвоста складывался отдельно и его p
+   считалось на скалярах. */
+DAN_VK_AVX2 static inline __m256i dan_vk_hadd8_avx2(const __m256i *v);
+/* n (1..7) половинных чисел через stride байтов как числа с плавающей точкой (остальные - 0),
+   без чтения за n-м */
+DAN_VK_AVX2F16 static inline __m256 dan_vk_halvesn_avx2(const uint8_t *p, int stride, int n) {
+    __m128i h = _mm_setzero_si128();
+    uint16_t v;
+    switch (n) {
+#define DAN_VK_HALF_N(l) memcpy(&v, p + (l) * stride, 2); h = _mm_insert_epi16(h, v, (l));
+    case 7: DAN_VK_HALF_N(6) /* fallthrough */
+    case 6: DAN_VK_HALF_N(5) /* fallthrough */
+    case 5: DAN_VK_HALF_N(4) /* fallthrough */
+    case 4: DAN_VK_HALF_N(3) /* fallthrough */
+    case 3: DAN_VK_HALF_N(2) /* fallthrough */
+    case 2: DAN_VK_HALF_N(1) /* fallthrough */
+    default: DAN_VK_HALF_N(0)
+#undef DAN_VK_HALF_N
+    }
+    return _mm256_cvtph_ps(h);
+}
+/* d n блоков вектора (остальные - 0) */
+DAN_VK_AVX2 static inline __m256 dan_vk_ydn_avx2(const dan_q8k *px, int n) {
+    float d[8];
+    for (int l = 0; l < 8; l++) d[l] = l < n ? px[l].d : 0.0f;
+    return _mm256_setr_ps(d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+}
+/* хвост: PARTS(w, y, &mins) - 8 частичных сумм isum блока и imin (VEC: вектор частичных сумм, иначе
+   int32_t), d по смещению DOFF, dmin (MINS) по MOFF */
+#define DAN_VK_KTAIL_AVX2(PARTS, WB, DOFF, MINS, MOFF, VEC) \
+    if (i < blocks) { \
+        int n = (int)(blocks - i); \
+        const uint8_t *pw = w + i * (WB); \
+        const dan_q8k *px = x + i; \
+        __m256i v[8], mv[8]; \
+        int32_t ex[8] = {0}; \
+        for (int l = 0; l < 8; l++) { \
+            v[l] = _mm256_setzero_si256(); \
+            mv[l] = _mm256_setzero_si256(); \
+        } \
+        for (int l = 0; l < n; l++) v[l] = VEC ? PARTS(pw + l * (WB), px + l, (void *)&mv[l]) : PARTS(pw + l * (WB), px + l, (void *)&ex[l]); \
+        __m256 yd = dan_vk_ydn_avx2(px, n); \
+        __m256 t = _mm256_mul_ps(_mm256_mul_ps(yd, dan_vk_halvesn_avx2(pw + (DOFF), WB, n)), _mm256_cvtepi32_ps(dan_vk_hadd8_avx2(v))); \
+        if (MINS) { \
+            __m256 b = _mm256_mul_ps(yd, dan_vk_halvesn_avx2(pw + (MOFF), WB, n)); \
+            __m256i m = VEC ? dan_vk_hadd8_avx2(mv) : _mm256_setr_epi32(ex[0], ex[1], ex[2], ex[3], ex[4], ex[5], ex[6], ex[7]); \
+            t = _mm256_sub_ps(t, _mm256_mul_ps(b, _mm256_cvtepi32_ps(m))); \
+        } \
+        float pf[8]; \
+        _mm256_storeu_ps(pf, t); \
+        for (int l = 0; l < n; l++) r = r + pf[l]; \
+    }
+
 /* 8 blocks at a time: the integer sums of 8 blocks gathered by hadd into
    one vector, lane l - block l; then p of the 8 blocks as in C (the lanes of
    the Q8_0 kernel) */
@@ -1398,7 +1454,8 @@ DAN_VK_AVX2F16 static float NAME(const uint8_t *w, const void *xv, int64_t block
         __m256 t = _mm256_mul_ps(_mm256_mul_ps(yd, dan_vk_halves8_avx2(pw + (DOFF), WB)), _mm256_cvtepi32_ps(isum)); \
         if (MINS) { \
             __m256 b = _mm256_mul_ps(yd, dan_vk_halves8_avx2(pw + 2, WB)); \
-            t = _mm256_sub_ps(t, _mm256_mul_ps(b, _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i *)ex)))); \
+            __m256i m = _mm256_setr_epi32(ex[0], ex[1], ex[2], ex[3], ex[4], ex[5], ex[6], ex[7]); \
+            t = _mm256_sub_ps(t, _mm256_mul_ps(b, _mm256_cvtepi32_ps(m))); \
         } \
         acc = _mm256_add_ps(acc, t); \
     } \
@@ -1406,12 +1463,7 @@ DAN_VK_AVX2F16 static float NAME(const uint8_t *w, const void *xv, int64_t block
     v4 = _mm_add_ps(v4, _mm_movehl_ps(v4, v4)); \
     v4 = _mm_add_ss(v4, _mm_shuffle_ps(v4, v4, 1)); \
     float r = _mm_cvtss_f32(v4); \
-    for (; i < blocks; i++) { \
-        int32_t ex; \
-        int32_t is = dan_vk_hsum_i32_avx2(PARTS(w + i * (WB), x + i, &ex)); \
-        float p = MINS ? dan_vk_k4_p(w + i * (WB), x + i, is, ex) : dan_vk_q6k_p(w + i * (WB), x + i, is, 0); \
-        r = r + p; \
-    } \
+    DAN_VK_KTAIL_AVX2(PARTS, WB, DOFF, MINS, 2, 0) \
     return r; \
 }
 DAN_VK_KDOT_AVX2(dan_vk_q4k_dot_avx2, dan_vk_q4k_parts_avx2, DAN_Q4K_BYTES, 0, 1)
@@ -2274,18 +2326,23 @@ DAN_VK_AVX2 static inline __m256i dan_vk_iq4xs_parts_avx2(const uint8_t *w, cons
     __m256i hi = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32(h), _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14)),
                                   _mm256_set1_epi32(3));
     __m256i sc = _mm256_sub_epi32(_mm256_or_si256(lo, _mm256_slli_epi32(hi, 4)), _mm256_set1_epi32(32));
+    /* 8 масштабов 16-битными числами в обеих половинах: пары произведений части b сразу умножаются
+       на масштаб b (vpmaddwd), без сложения частей по дорожкам в каждом блоке */
+    __m128i s8 = _mm_packs_epi32(_mm256_castsi256_si128(sc), _mm256_extracti128_si256(sc, 1));
+    __m256i s16 = _mm256_broadcastsi128_si256(s8);
     const __m256i kv = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(const void *)dan_vk_iq4nl));
     const __m128i m4 = _mm_set1_epi8(0xF);
-    const __m256i one = _mm256_set1_epi16(1);
-    __m256i v[8];
+    __m256i acc = _mm256_setzero_si256();
     for (int b = 0; b < 8; b++) {
         __m128i q = _mm_loadu_si128((const __m128i *)(const void *)(w + 8 + 16 * b));
         __m256i a = _mm256_shuffle_epi8(kv, _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q, 4), m4), _mm_and_si128(q, m4)));
         __m256i yv = _mm256_loadu_si256((const __m256i *)(const void *)(y->qs + 32 * b));
-        v[b] = _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_abs_epi8(a), _mm256_sign_epi8(yv, a)), one);
+        /* пара не больше 2 * 127 * 127, на масштаб до 32 по модулю - сумма блока помещается в 32 бита */
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_abs_epi8(a), _mm256_sign_epi8(yv, a)),
+                                                      DAN_VK_BC16(s16, b)));
     }
     *extra = 0;
-    return _mm256_mullo_epi32(dan_vk_hadd8_avx2(v), sc);
+    return acc;
 }
 
 /* по 8 блоков, как DAN_VK_KDOT_AVX2: d по смещению DOFF, dmin (MINS) - по MOFF, хвост - PF */
@@ -2305,17 +2362,14 @@ DAN_VK_AVX2F16 static float NAME(const uint8_t *w, const void *xv, int64_t block
         __m256 t = _mm256_mul_ps(_mm256_mul_ps(yd, dan_vk_halves8_avx2(pw + (DOFF), WB)), _mm256_cvtepi32_ps(isum)); \
         if (MINS) { \
             __m256 b = _mm256_mul_ps(yd, dan_vk_halves8_avx2(pw + (MOFF), WB)); \
-            t = _mm256_sub_ps(t, _mm256_mul_ps(b, _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i *)ex)))); \
+            __m256i m = _mm256_setr_epi32(ex[0], ex[1], ex[2], ex[3], ex[4], ex[5], ex[6], ex[7]); \
+            t = _mm256_sub_ps(t, _mm256_mul_ps(b, _mm256_cvtepi32_ps(m))); \
         } \
         acc = _mm256_add_ps(acc, t); \
     } \
     float r = dan_vk_hsum8_lanes_avx2(acc); \
-    for (; i < blocks; i++) { \
-        int32_t ex; \
-        int32_t is = dan_vk_hsum_i32_avx2(PARTS(w + i * (WB), x + i, &ex)); \
-        float p = PF(w + i * (WB), x + i, is, ex); \
-        r = r + p; \
-    } \
+    (void)PF; \
+    DAN_VK_KTAIL_AVX2(PARTS, WB, DOFF, MINS, MOFF, 0) \
     return r; \
 }
 /* строка Q2_K: наименьшие 8 блоков, как и isum, собираются сложением по дорожкам (dan_vk_hadd8_avx2),
@@ -2336,12 +2390,7 @@ DAN_VK_AVX2F16 static float dan_vk_q2k_dot_avx2(const uint8_t *w, const void *xv
         acc = _mm256_add_ps(acc, t);
     }
     float r = dan_vk_hsum8_lanes_avx2(acc);
-    for (; i < blocks; i++) {
-        __m256i mv;
-        int32_t is = dan_vk_hsum_i32_avx2(dan_vk_q2k_parts2_avx2(w + i * DAN_Q2K_BYTES, x + i, &mv));
-        float p = dan_vk_q2k_p(w + i * DAN_Q2K_BYTES, x + i, is, dan_vk_hsum_i32_avx2(mv));
-        r = r + p;
-    }
+    DAN_VK_KTAIL_AVX2(dan_vk_q2k_parts2_avx2, DAN_Q2K_BYTES, 80, 1, 82, 1)
     return r;
 }
 DAN_VK_KDOT2_AVX2(dan_vk_q3k_dot_avx2, dan_vk_q3k_parts_avx2, DAN_Q3K_BYTES, 108, 0, 0, dan_vk_q3k_p)
