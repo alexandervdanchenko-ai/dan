@@ -1,4 +1,4 @@
-# Движок «нейро» на настоящих моделях (необязательный сценарий, не входит в проверку):
+# Движок «нейро» на настоящих моделях (необязательный сценарий, не входит в проверку), на Linux x86-64 и ARM:
 # скачивает модели GGUF с открытой лицензией (TinyLlama 1.1B Chat - Apache 2.0, Qwen2.5 0.5B
 # Instruct - Apache 2.0, в Q8_0 и Q4_K_M; Mistral 7B Instruct v0.2 - Apache 2.0, в Q4_K_M -
 # модель главной цели ROADMAP.md: 7B Q4_K_M на 4 ядрах), собирает llama.cpp закреплённой
@@ -29,8 +29,16 @@ on:
 
 jobs:
   dvizhok:
-    name: Движок против llama.cpp (Linux x86-64)
-    runs-on: ubuntu-latest
+    name: Движок против llama.cpp (Linux ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86-64
+          - os: ubuntu-24.04-arm
+            arch: ARM
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 150
     env:
       PYTHONUTF8: "1"
@@ -44,10 +52,12 @@ jobs:
       - name: Машина
         run: |
           echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ"
-          grep -m1 "model name" /proc/cpuinfo
+          # на ARM в /proc/cpuinfo нет строки «model name»: модель процессора - из lscpu
+          cpu="$(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')"
+          echo "процессор: $cpu; $(grep -m1 -o -w 'i8mm' /proc/cpuinfo || echo 'без i8mm')"
           echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
           # llama.cpp собирается с -DGGML_NATIVE=ON: сборка с другого процессора может не выполниться
-          echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //' | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
+          echo "cpu=$(echo "$cpu" | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
       - name: Кэш llama.cpp
         id: kesh
         uses: actions/cache@v4
@@ -82,6 +92,10 @@ jobs:
           done
       - name: Компилятор из семени
         run: sh semya/sobrat.sh
+      - name: Ядра пакета (матрица весов на 256 векторов)
+        run: |
+          gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o yadra_test -lm -pthread
+          ./yadra_test zamer_paket | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Эталон скорости чтения памяти
         run: |
           semya/dan собрать замеры/память/память.dan
