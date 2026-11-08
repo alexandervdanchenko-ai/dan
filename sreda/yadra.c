@@ -194,10 +194,11 @@ typedef struct {
     void (*dot4[DAN_NFMT])(const uint8_t *, const uint8_t *, int64_t, int64_t, float *);
     /* several rows by several vectors at once (below, «rows by vectors»):
        rn_rows rows unpacked by unpack, rn_vecs vectors prepared by
-       dan_vk_rn_prep; rn_signed - the numbers of weights unpacked with their
-       sign (for the instructions of signed bytes); rn[fmt] NULL - the kernels
+       dan_vk_rn_prep; rn_mode - DAN_VK_RN_SIGNED: the numbers of weights
+       unpacked with their sign (for the instructions of signed bytes),
+       DAN_VK_RN_CHUNK8: the numbers by 8 (smmla); rn[fmt] NULL - the kernels
        of a row by 4 vectors */
-    int rn_rows, rn_vecs, rn_signed;
+    int rn_rows, rn_vecs, rn_mode;
     void (*unpack)(int, const uint8_t *, int64_t, uint8_t *, int);
     void (*rn[DAN_NFMT])(const uint8_t *, int64_t, const uint8_t *, int64_t, int64_t, float *);
 } dan_vk_table;
@@ -573,6 +574,20 @@ static int64_t dan_vk_rn_units(int fmt, int64_t blocks) { return dan_vk_rn_k(fmt
 static inline void dan_vk_put32(uint8_t *p, int32_t v) { memcpy(p, &v, 4); }
 static inline void dan_vk_putf(uint8_t *p, float v) { memcpy(p, &v, 4); }
 
+/* The modes of the layout: the numbers of rows with their sign; the numbers
+   by 8: the 256 bytes of steps become chunks - chunk s of 64 bytes holds the
+   numbers 8s..8s+7 of the 8 parts (8 bytes each, lane order) of the region
+   (for Q6_K chunks 0, 1 - the first half, 2, 3 - the second) */
+#define DAN_VK_RN_SIGNED 1
+#define DAN_VK_RN_CHUNK8 2
+static void dan_vk_rn_chunk8(uint8_t *q) {
+    uint8_t t[256];
+    for (int c = 0; c < 4; c++)
+        for (int L = 0; L < 8; L++)
+            for (int b = 0; b < 8; b++) t[64 * c + 8 * L + b] = q[32 * (2 * c + b / 4) + 4 * L + b % 4];
+    memcpy(q, t, 256);
+}
+
 /* the numbers of a block of 32 as in a row (q of the format; signed - minus the shift) */
 static void dan_vk_rn_b32_nat(int fmt, const uint8_t *w, int sgn, uint8_t *nat) {
     switch (fmt) {
@@ -598,8 +613,13 @@ static void dan_vk_rn_b32_nat(int fmt, const uint8_t *w, int sgn, uint8_t *nat) 
 
 /* units of a row of «blocks» blocks of the format into «out»: the plain C reference
    (and the last group of blocks of 32 for the variants) */
-static void dan_vk_rn_unpack_c(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int sgn) {
-    int wb = dan_vk_fmt_bytes[fmt];
+static void dan_vk_rn_unpack_c(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int mode) {
+    int wb = dan_vk_fmt_bytes[fmt], sgn = mode & DAN_VK_RN_SIGNED;
+    if (mode & DAN_VK_RN_CHUNK8) {
+        dan_vk_rn_unpack_c(fmt, w, blocks, out, mode & ~DAN_VK_RN_CHUNK8);
+        for (int64_t u = 0; u < dan_vk_rn_units(fmt, blocks); u++) dan_vk_rn_chunk8(out + u * DAN_VK_RN_UNIT);
+        return;
+    }
     if (dan_vk_rn_k(fmt)) {
         for (int64_t b = 0; b < blocks; b++) {
             const uint8_t *p = w + b * wb;
@@ -660,7 +680,13 @@ static void dan_vk_rn_unpack_c(int fmt, const uint8_t *w, int64_t blocks, uint8_
 }
 
 /* a vector in 8 bits (dan_vk_fmt_quantize_x) of «blocks» blocks into units */
-static void dan_vk_rn_prep(int fmt, const uint8_t *x, int64_t blocks, uint8_t *out, int sgn) {
+static void dan_vk_rn_prep(int fmt, const uint8_t *x, int64_t blocks, uint8_t *out, int mode) {
+    int sgn = mode & DAN_VK_RN_SIGNED;
+    if (mode & DAN_VK_RN_CHUNK8) {
+        dan_vk_rn_prep(fmt, x, blocks, out, mode & ~DAN_VK_RN_CHUNK8);
+        for (int64_t u = 0; u < dan_vk_rn_units(fmt, blocks); u++) dan_vk_rn_chunk8(out + u * DAN_VK_RN_UNIT);
+        return;
+    }
     if (dan_vk_rn_k(fmt)) {
         for (int64_t b = 0; b < blocks; b++) {
             const dan_q8k *y = (const dan_q8k *)(const void *)x + b;
@@ -1736,6 +1762,7 @@ DAN_VK_AVX2 static inline void dan_vk_rn_put8_avx2(uint8_t *o, __m128i b, __m128
     _mm256_storeu_si256((__m256i *)(void *)o, sgn ? _mm256_cvtepi8_epi32(v) : _mm256_cvtepu8_epi32(v));
 }
 DAN_VK_AVX2F16 static void dan_vk_rn_unpack_x86(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int sgn) {
+    /* sgn - the mode: only 0 here, the rest by plain C */
     const int wb = dan_vk_fmt_bytes[fmt];
     const __m256i m4 = _mm256_set1_epi8(0xF), one = _mm256_set1_epi8(1), m3 = _mm256_set1_epi8(3);
     const __m128i order = _mm_setr_epi8(0, 2, 4, 6, 1, 3, 5, 7, 8, 10, 12, 14, 9, 11, 13, 15);
@@ -2884,9 +2911,10 @@ static inline void dan_vk_rn_put8_neon(uint8_t *o, uint8x16_t b, int sgn) {
     }
 }
 static void dan_vk_rn_unpack_neon(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int sgn) {
+    /* sgn - the mode: DAN_VK_RN_SIGNED here, the rest by plain C */
     const int wb = dan_vk_fmt_bytes[fmt];
     const uint8x16_t m4 = vdupq_n_u8(0xF), m3 = vdupq_n_u8(3), b16 = vdupq_n_u8(16);
-    if (!sgn) { dan_vk_rn_unpack_c(fmt, w, blocks, out, sgn); return; }
+    if (sgn != DAN_VK_RN_SIGNED) { dan_vk_rn_unpack_c(fmt, w, blocks, out, sgn); return; }
     if (fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K) {
         for (int64_t b = 0; b < blocks; b++) {
             const uint8_t *p = w + b * wb;
@@ -2970,6 +2998,219 @@ static const dan_vk_table dan_vk_dotprod = {"dotprod", dan_vk_dot_f32_neon, dan_
                                          {dan_vk_q40_dot4_dotprod, dan_vk_q4k_dot4_dotprod, dan_vk_q5k_dot4_dotprod, dan_vk_q6k_dot4_dotprod,
                                           dan_vk_q50_dot4_dotprod, dan_vk_q41_dot4_dotprod, dan_vk_q51_dot4_dotprod, dan_vk_q80_dot4_dotprod} DAN_VK_RN_DOTPROD_TAIL};
 
+/* ---- rows by vectors on ARM with smmla (i8mm): 4 rows by 4 vectors, the
+   numbers by 8 (DAN_VK_RN_CHUNK8); smmla multiplies 8 numbers of 2 rows by
+   8 numbers of 2 vectors: the lanes of a sum - (row 0, vector 0), (0, 1),
+   (1, 0), (1, 1) of a pair of rows rp and a pair of vectors vp ---- */
+#if defined(__clang__)
+#define DAN_VK_I8MM __attribute__((target("dotprod,i8mm")))
+#else
+#define DAN_VK_I8MM __attribute__((target("+dotprod+i8mm")))
+#endif
+#define DAN_VK_RN_R_I8MM 4
+#define DAN_VK_RN_V_I8MM 4
+/* 8 bytes of two units (rows or vectors) at offset o as one register */
+#define DAN_VK_PAIR8(a, b, o) vcombine_s8(vld1_s8((const int8_t *)(const void *)((a) + (o))), vld1_s8((const int8_t *)(const void *)((b) + (o))))
+/* 32-bit numbers at offset o of two units as (a, a, b, b) and (a, b, a, b) */
+static inline int32x4_t dan_vk_i32aabb(const uint8_t *a, const uint8_t *b, int o) {
+    int32_t x, y;
+    memcpy(&x, a + o, 4);
+    memcpy(&y, b + o, 4);
+    return vcombine_s32(vdup_n_s32(x), vdup_n_s32(y));
+}
+static inline int32x4_t dan_vk_i32abab(const uint8_t *a, const uint8_t *b, int o) {
+    int32_t v[2];
+    memcpy(&v[0], a + o, 4);
+    memcpy(&v[1], b + o, 4);
+    int32x2_t h = vld1_s32(v);
+    return vcombine_s32(h, h);
+}
+static inline float32x4_t dan_vk_f32aabb(const uint8_t *a, const uint8_t *b, int o) {
+    float x, y;
+    memcpy(&x, a + o, 4);
+    memcpy(&y, b + o, 4);
+    return vcombine_f32(vdup_n_f32(x), vdup_n_f32(y));
+}
+static inline float32x4_t dan_vk_f32abab(const uint8_t *a, const uint8_t *b, int o) {
+    float v[2];
+    memcpy(&v[0], a + o, 4);
+    memcpy(&v[1], b + o, 4);
+    float32x2_t h = vld1_f32(v);
+    return vcombine_f32(h, h);
+}
+
+/* the integer sums of a block of a K format: T[rp][vp], M[rp][vp];
+   HALVES - 1 (Q4_K, Q5_K: chunks of 4 per part) or 2 (Q6_K: two halves of
+   8 parts by 2 chunks) */
+DAN_VK_I8MM static inline void dan_vk_rn_ints_i8mm(const uint8_t *const *wb, const uint8_t *const *xb, int q6, int32x4_t (*T)[2],
+                                                    int32x4_t (*M)[2]) {
+    for (int rp = 0; rp < 2; rp++)
+        for (int vp = 0; vp < 2; vp++) T[rp][vp] = M[rp][vp] = vdupq_n_s32(0);
+    for (int n = 0; n < (q6 ? 2 : 1); n++) {
+        int chunks = q6 ? 2 : 4;
+        for (int L = 0; L < 8; L++) {
+            int32x4_t acc[2][2];
+            for (int rp = 0; rp < 2; rp++)
+                for (int vp = 0; vp < 2; vp++) acc[rp][vp] = vdupq_n_s32(0);
+            for (int c = 0; c < chunks; c++) {
+                int o = 128 * n + 64 * c + 8 * L;
+                int8x16_t A[2], B[2];
+                for (int rp = 0; rp < 2; rp++) A[rp] = DAN_VK_PAIR8(wb[2 * rp], wb[2 * rp + 1], o);
+                for (int vp = 0; vp < 2; vp++) B[vp] = DAN_VK_PAIR8(xb[2 * vp], xb[2 * vp + 1], o);
+                for (int rp = 0; rp < 2; rp++)
+                    for (int vp = 0; vp < 2; vp++) acc[rp][vp] = vmmlaq_s32(acc[rp][vp], A[rp], B[vp]);
+            }
+            for (int rp = 0; rp < 2; rp++) {
+                int32x4_t sc = dan_vk_i32aabb(wb[2 * rp], wb[2 * rp + 1], DAN_VK_RN_SC + 32 * n + 4 * L);
+                int32x4_t m = q6 ? sc : dan_vk_i32aabb(wb[2 * rp], wb[2 * rp + 1], DAN_VK_RN_SC + 32 + 4 * L);
+                for (int vp = 0; vp < 2; vp++) {
+                    T[rp][vp] = vmlaq_s32(T[rp][vp], acc[rp][vp], sc);
+                    if (!q6) M[rp][vp] = vmlaq_s32(M[rp][vp], m, dan_vk_i32abab(xb[2 * vp], xb[2 * vp + 1], DAN_VK_RN_SC + 32 + 4 * L));
+                }
+            }
+        }
+    }
+}
+#define DAN_VK_RNK_I8MM(NAME, Q6) \
+DAN_VK_I8MM static void NAME(const uint8_t *w, int64_t ws, const uint8_t *x, int64_t xs, int64_t blocks, float *out) { \
+    float accf[8][16], tail[16]; \
+    memset(accf, 0, sizeof accf); \
+    for (int l = 0; l < 16; l++) tail[l] = 0.0f; \
+    const int64_t full = blocks / 8 * 8; \
+    for (int64_t b = 0; b < blocks; b++) { \
+        const uint8_t *wb[4], *xb[4]; \
+        for (int r = 0; r < 4; r++) wb[r] = w + r * ws + b * DAN_VK_RN_UNIT; \
+        for (int k = 0; k < 4; k++) xb[k] = x + k * xs + b * DAN_VK_RN_UNIT; \
+        int32x4_t T[2][2], M[2][2]; \
+        dan_vk_rn_ints_i8mm(wb, xb, Q6, T, M); \
+        for (int rp = 0; rp < 2; rp++) { \
+            float32x4_t dw = dan_vk_f32aabb(wb[2 * rp], wb[2 * rp + 1], DAN_VK_RN_D); \
+            float32x4_t dm = dan_vk_f32aabb(wb[2 * rp], wb[2 * rp + 1], DAN_VK_RN_D + 4); \
+            for (int vp = 0; vp < 2; vp++) { \
+                float32x4_t Y = dan_vk_f32abab(xb[2 * vp], xb[2 * vp + 1], DAN_VK_RN_D); \
+                float32x4_t t = vmulq_f32(vmulq_f32(Y, dw), vcvtq_f32_s32(T[rp][vp])); \
+                if (!(Q6)) t = vsubq_f32(t, vmulq_f32(vmulq_f32(Y, dm), vcvtq_f32_s32(M[rp][vp]))); \
+                float *dst = b < full ? &accf[b & 7][4 * (2 * rp + vp)] : &tail[4 * (2 * rp + vp)]; \
+                vst1q_f32(dst, vaddq_f32(vld1q_f32(dst), t)); \
+            } \
+        } \
+        if (b + 1 == full) \
+            for (int g = 0; g < 16; g += 4) { \
+                float32x4_t a[8]; \
+                for (int l = 0; l < 8; l++) a[l] = vld1q_f32(&accf[l][g]); \
+                vst1q_f32(&tail[g], vaddq_f32(vaddq_f32(vaddq_f32(a[0], a[4]), vaddq_f32(a[2], a[6])), \
+                                              vaddq_f32(vaddq_f32(a[1], a[5]), vaddq_f32(a[3], a[7])))); \
+            } \
+    } \
+    for (int rp = 0; rp < 2; rp++) \
+        for (int vp = 0; vp < 2; vp++) \
+            for (int l = 0; l < 4; l++) out[(2 * rp + l / 2) * 4 + 2 * vp + l % 2] = tail[4 * (2 * rp + vp) + l]; \
+}
+DAN_VK_RNK_I8MM(dan_vk_rn_q4k_i8mm, 0)
+DAN_VK_RNK_I8MM(dan_vk_rn_q6k_i8mm, 1)
+
+/* blocks of 32: part L - block L of a group */
+DAN_VK_I8MM static void dan_vk_rn_b32_i8mm(const uint8_t *w, int64_t ws, const uint8_t *x, int64_t xs, int64_t blocks, float *out) {
+    float facc[8][16];
+    int32_t last[8][16];
+    memset(facc, 0, sizeof facc);
+    const int64_t units = (blocks + 7) / 8, fullu = blocks / 8;
+    for (int64_t u = 0; u < units; u++) {
+        const uint8_t *wb[4], *xb[4];
+        for (int r = 0; r < 4; r++) wb[r] = w + r * ws + u * DAN_VK_RN_UNIT;
+        for (int k = 0; k < 4; k++) xb[k] = x + k * xs + u * DAN_VK_RN_UNIT;
+        for (int L = 0; L < 8; L++) {
+            int32x4_t acc[2][2];
+            for (int rp = 0; rp < 2; rp++)
+                for (int vp = 0; vp < 2; vp++) acc[rp][vp] = vdupq_n_s32(0);
+            for (int c = 0; c < 4; c++) {
+                int o = 64 * c + 8 * L;
+                int8x16_t A[2], B[2];
+                for (int rp = 0; rp < 2; rp++) A[rp] = DAN_VK_PAIR8(wb[2 * rp], wb[2 * rp + 1], o);
+                for (int vp = 0; vp < 2; vp++) B[vp] = DAN_VK_PAIR8(xb[2 * vp], xb[2 * vp + 1], o);
+                for (int rp = 0; rp < 2; rp++)
+                    for (int vp = 0; vp < 2; vp++) acc[rp][vp] = vmmlaq_s32(acc[rp][vp], A[rp], B[vp]);
+            }
+            for (int rp = 0; rp < 2; rp++) {
+                float32x4_t dw = dan_vk_f32aabb(wb[2 * rp], wb[2 * rp + 1], DAN_VK_RN_D + 4 * L);
+                for (int vp = 0; vp < 2; vp++) {
+                    int32x4_t is = vsubq_s32(acc[rp][vp], dan_vk_i32abab(xb[2 * vp], xb[2 * vp + 1], DAN_VK_RN_SC + 4 * L));
+                    int g = 4 * (2 * rp + vp);
+                    if (u < fullu) {
+                        float32x4_t d = vmulq_f32(dw, dan_vk_f32abab(xb[2 * vp], xb[2 * vp + 1], DAN_VK_RN_D + 4 * L));
+                        vst1q_f32(&facc[L][g], vaddq_f32(vld1q_f32(&facc[L][g]), vmulq_f32(d, vcvtq_f32_s32(is))));
+                    } else vst1q_s32(&last[L][g], is);
+                }
+            }
+        }
+    }
+    float res[16];
+    for (int g = 0; g < 16; g += 4) {
+        float32x4_t a[8];
+        for (int l = 0; l < 8; l++) a[l] = vld1q_f32(&facc[l][g]);
+        vst1q_f32(&res[g], vaddq_f32(vaddq_f32(vaddq_f32(a[0], a[4]), vaddq_f32(a[2], a[6])),
+                                     vaddq_f32(vaddq_f32(a[1], a[5]), vaddq_f32(a[3], a[7]))));
+    }
+    for (int rp = 0; rp < 2; rp++)
+        for (int vp = 0; vp < 2; vp++)
+            for (int l = 0; l < 4; l++) {
+                int r = 2 * rp + l / 2, k = 2 * vp + l % 2, g = 4 * (2 * rp + vp) + l;
+                float v = res[g];
+                const uint8_t *wl = w + r * ws + fullu * DAN_VK_RN_UNIT + DAN_VK_RN_D, *xl = x + k * xs + fullu * DAN_VK_RN_UNIT + DAN_VK_RN_D;
+                for (int L = 0; L < blocks - 8 * fullu; L++) {
+                    float a, c;
+                    memcpy(&a, wl + 4 * L, 4);
+                    memcpy(&c, xl + 4 * L, 4);
+                    float d = a * c, p = d * (float)last[L][g];
+                    v = v + p;
+                }
+                out[r * 4 + k] = v;
+            }
+}
+
+/* the numbers by 8: the steps of a unit rearranged in place (dan_vk_rn_chunk8) */
+static void dan_vk_rn_unpack_i8mm(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int mode) {
+    (void)mode;
+    dan_vk_rn_unpack_neon(fmt, w, blocks, out, DAN_VK_RN_SIGNED);
+    for (int64_t u = 0; u < dan_vk_rn_units(fmt, blocks); u++) {
+        uint8_t *q = out + u * DAN_VK_RN_UNIT;
+        for (int c = 0; c < 4; c++) {
+            uint32x4_t a = vld1q_u32((const uint32_t *)(void *)(q + 64 * c)), a2 = vld1q_u32((const uint32_t *)(void *)(q + 64 * c + 16));
+            uint32x4_t b = vld1q_u32((const uint32_t *)(void *)(q + 64 * c + 32)), b2 = vld1q_u32((const uint32_t *)(void *)(q + 64 * c + 48));
+            vst1q_u32((uint32_t *)(void *)(q + 64 * c), vzip1q_u32(a, b));
+            vst1q_u32((uint32_t *)(void *)(q + 64 * c + 16), vzip2q_u32(a, b));
+            vst1q_u32((uint32_t *)(void *)(q + 64 * c + 32), vzip1q_u32(a2, b2));
+            vst1q_u32((uint32_t *)(void *)(q + 64 * c + 48), vzip2q_u32(a2, b2));
+        }
+    }
+}
+#define DAN_VK_RN_I8MM_TAIL , DAN_VK_RN_R_I8MM, DAN_VK_RN_V_I8MM, DAN_VK_RN_SIGNED | DAN_VK_RN_CHUNK8, dan_vk_rn_unpack_i8mm, \
+    {dan_vk_rn_b32_i8mm, dan_vk_rn_q4k_i8mm, dan_vk_rn_q4k_i8mm, dan_vk_rn_q6k_i8mm, dan_vk_rn_b32_i8mm, NULL, NULL, dan_vk_rn_b32_i8mm}
+
+static int dan_vk_has_i8mm(void) {
+#if defined(__linux__)
+#ifndef HWCAP2_I8MM
+#define HWCAP2_I8MM (1 << 13)
+#endif
+    return (getauxval(AT_HWCAP2) & HWCAP2_I8MM) != 0;
+#elif defined(__APPLE__)
+    int v = 0;
+    size_t len = sizeof v;
+    if (sysctlbyname("hw.optional.arm.FEAT_I8MM", &v, &len, NULL, 0) != 0) return 0;
+    return v != 0;
+#else
+    return 0;
+#endif
+}
+
+/* dotprod with i8mm: the same kernels but the rows by vectors with smmla */
+static const dan_vk_table dan_vk_dotprod_i8mm = {"dotprod", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon, dan_vk_sum_f32_neon, dan_vk_sum_f64_neon,
+                                            dan_vk_mm_f32_neon, dan_vk_mm_f64_neon, dan_vk_q8_block_dotprod, dan_vk_q8_dot_dotprod, dan_vk_dot32_acc_neon, dan_vk_h2f_neon, dan_vk_dot_f32_neon_fast, dan_vk_dot_f64_neon_fast, dan_vk_mm_f32_neon_fast, dan_vk_mm_f64_neon_fast,
+                                            dan_vk_q40_dot_dotprod, dan_vk_q4k_dot_dotprod, dan_vk_q5k_dot_dotprod, dan_vk_q6k_dot_dotprod,
+                                         dan_vk_q50_dot_dotprod, dan_vk_q41_dot_dotprod, dan_vk_q51_dot_dotprod,
+                                         {dan_vk_q40_dot4_dotprod, dan_vk_q4k_dot4_dotprod, dan_vk_q5k_dot4_dotprod, dan_vk_q6k_dot4_dotprod,
+                                          dan_vk_q50_dot4_dotprod, dan_vk_q41_dot4_dotprod, dan_vk_q51_dot4_dotprod, dan_vk_q80_dot4_dotprod} DAN_VK_RN_I8MM_TAIL};
+
 static int dan_vk_has_dotprod(void) {
 #if defined(__linux__)
 #ifndef HWCAP_ASIMDDP
@@ -3008,7 +3249,7 @@ static int dan_vk_supported(const char *name, const dan_vk_table **t) {
 #endif
 #ifdef DAN_VK_ARM
     if (strcmp(name, "neon") == 0) { *t = &dan_vk_neon; return 1; }
-    if (strcmp(name, "dotprod") == 0 && dan_vk_has_dotprod()) { *t = &dan_vk_dotprod; return 1; }
+    if (strcmp(name, "dotprod") == 0 && dan_vk_has_dotprod()) { *t = dan_vk_has_i8mm() ? &dan_vk_dotprod_i8mm : &dan_vk_dotprod; return 1; }
 #endif
     return 0;
 }
@@ -3847,7 +4088,7 @@ static int dan_vk_matmul_rn(int fmt, const uint8_t *w, const uint8_t *xq, float 
     memset(xp + nv * us, 0, (size_t)((nvp - nv) * us));
     int64_t tile = dan_vk_tile_bytes() / us;
     tile = tile < t->rn_vecs ? t->rn_vecs : tile / t->rn_vecs * t->rn_vecs;
-    dan_vk_rn_job j = {w, xq, xp, y, blocks, units, rows, nv, nvp, tile, fmt, t->rn_signed};
+    dan_vk_rn_job j = {w, xq, xp, y, blocks, units, rows, nv, nvp, tile, fmt, t->rn_mode};
     dan_pool_run(nv, 1, dan_vk_rn_prep_part, &j);
     int64_t groups = (rows + t->rn_rows - 1) / t->rn_rows, work = cols * nv * t->rn_rows;
     dan_pool_run(groups, work >= 65536 ? 1 : 65536 / work, dan_vk_rn_job_part, &j);
