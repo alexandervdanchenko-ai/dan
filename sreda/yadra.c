@@ -635,10 +635,19 @@ DAN_VK_AVX2F16 static inline __m256i dan_vk_q8_part_avx2(const uint8_t *a, const
     return _mm256_add_epi32(_mm256_madd_epi16(xl, yl), _mm256_madd_epi16(xh, yh));
 }
 
-DAN_VK_AVX2F16 static inline __m256 dan_vk_q8_scales_avx2(const uint8_t *p) {
-    uint16_t h[8];
-    for (int l = 0; l < 8; l++) memcpy(&h[l], p + l * DAN_Q8_BYTES, 2);
-    return _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)h));
+
+
+/* 8 scales in half precision, one in every «stride» bytes */
+/* (word by word into the register: through an array in memory gcc 15 of
+   MinGW stores 8 halves and loads 16 bytes, and the store does not forward) */
+DAN_VK_AVX2F16 static inline __m256 dan_vk_halves8_avx2(const uint8_t *p, int stride) {
+    __m128i h = _mm_setzero_si128();
+    uint16_t v;
+#define DAN_VK_HALF_IN(l) memcpy(&v, p + (l) * stride, 2); h = _mm_insert_epi16(h, v, (l));
+    DAN_VK_HALF_IN(0) DAN_VK_HALF_IN(1) DAN_VK_HALF_IN(2) DAN_VK_HALF_IN(3)
+    DAN_VK_HALF_IN(4) DAN_VK_HALF_IN(5) DAN_VK_HALF_IN(6) DAN_VK_HALF_IN(7)
+#undef DAN_VK_HALF_IN
+    return _mm256_cvtph_ps(h);
 }
 
 /* 8 blocks at a time: the sums of 8 vectors of partial sums gathered by hadd */
@@ -652,7 +661,7 @@ DAN_VK_AVX2F16 static float dan_vk_q8_dot_avx2(const uint8_t *a, const uint8_t *
         __m256i h0 = _mm256_hadd_epi32(_mm256_hadd_epi32(v[0], v[1]), _mm256_hadd_epi32(v[2], v[3]));
         __m256i h1 = _mm256_hadd_epi32(_mm256_hadd_epi32(v[4], v[5]), _mm256_hadd_epi32(v[6], v[7]));
         __m256i isum = _mm256_add_epi32(_mm256_permute2x128_si256(h0, h1, 0x20), _mm256_permute2x128_si256(h0, h1, 0x31));
-        __m256 d = _mm256_mul_ps(dan_vk_q8_scales_avx2(pa), dan_vk_q8_scales_avx2(pb));
+        __m256 d = _mm256_mul_ps(dan_vk_halves8_avx2(pa, DAN_Q8_BYTES), dan_vk_halves8_avx2(pb, DAN_Q8_BYTES));
         acc = _mm256_add_ps(acc, _mm256_mul_ps(d, _mm256_cvtepi32_ps(isum)));
     }
     __m128 v4 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
@@ -724,12 +733,6 @@ DAN_VK_AVX2 static inline int32_t dan_vk_hsum_i32_avx2(__m256i s) {
     return _mm_cvtsi128_si32(v);
 }
 
-/* 8 scales in half precision, one in every «stride» bytes */
-DAN_VK_AVX2F16 static inline __m256 dan_vk_halves8_avx2(const uint8_t *p, int stride) {
-    uint16_t h[8];
-    for (int l = 0; l < 8; l++) memcpy(&h[l], p + l * stride, 2);
-    return _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)h));
-}
 
 /* products of a Q4_0 block and a Q8_0 block as 8 partial sums */
 DAN_VK_AVX2 static inline __m256i dan_vk_q40_part_avx2(const uint8_t *w, const uint8_t *x) {
@@ -1073,6 +1076,10 @@ static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_
     float32x4_t s8 = s[8], s9 = s[9], s10 = s[10], s11 = s[11], s12 = s[12], s13 = s[13], s14 = s[14], s15 = s[15]; \
     const float *pa = a, *pb = b; \
     for (int64_t k_ = 0; k_ + 64 <= n; k_ += 64, pa += 64, pb += 64) { \
+        /* the first factor (the weights) 1 KB ahead: on Neoverse-N2 from memory 16-17 GB/s on one \
+           thread instead of 13-14, 65 instead of 56 on 4 */ \
+        __builtin_prefetch(pa + 256); __builtin_prefetch(pa + 272); \
+        __builtin_prefetch(pa + 288); __builtin_prefetch(pa + 304); \
         DAN_VK_NEON_G4(s0, s1, s2, s3, 0); \
         DAN_VK_NEON_G4(s4, s5, s6, s7, 16); \
         DAN_VK_NEON_G4(s8, s9, s10, s11, 32); \
@@ -1319,23 +1326,41 @@ static inline int32x4_t dan_vk_dot16_neon(int32x4_t acc, int8x16_t a, int8x16_t 
     return vpadalq_s16(acc, vmull_s8(vget_high_s8(a), vget_high_s8(b)));
 }
 
-/* the sum of the mins with the sums of the vector's parts of 32 */
-static inline int32_t dan_vk_k4_mins_neon(const uint8_t *m, const dan_q8k *y) {
-    int16x8_t pairs = vpaddq_s16(vld1q_s16(y->bsums), vld1q_s16(y->bsums + 8));   /* below 2 * 16 * 128 */
-    int16x8_t mm = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(m)));
-    int32x4_t s = vmull_s16(vget_low_s16(mm), vget_low_s16(pairs));
-    s = vmlal_s16(s, vget_high_s16(mm), vget_high_s16(pairs));
-    return vaddvq_s32(s);
+/* the sums of the 4 lanes of 4 vectors as one vector */
+static inline int32x4_t dan_vk_sum4_neon(const int32x4_t *d) {
+    return vpaddq_s32(vpaddq_s32(d[0], d[1]), vpaddq_s32(d[2], d[3]));
 }
-/* sums of sc * bsums of Q6_K in 4 lanes */
-static inline int32x4_t dan_vk_q6k_bias_neon(const int8_t *sc, const dan_q8k *y) {
+
+/* Q4_K, Q5_K: d - 8 parts of 32 (sums in 4 lanes), sm - scales and mins
+   (dan_vk_k4_sm); lanes of the result add up to isum, *imin - the sum of the
+   mins with the sums of the vector's parts of 32 */
+static inline int32x4_t dan_vk_k4_apply_neon(const int32x4_t *d, const uint8_t *sm, const dan_q8k *y, int32_t *imin) {
+    uint8x16_t smv = vld1q_u8(sm);
+    uint16x8_t s16 = vmovl_u8(vget_low_u8(smv));
+    int32x4_t sc0 = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(s16)));
+    int32x4_t sc1 = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(s16)));
+    int16x8_t pairs = vpaddq_s16(vld1q_s16(y->bsums), vld1q_s16(y->bsums + 8));   /* below 2 * 16 * 128 */
+    int16x8_t mm = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(smv)));
+    int32x4_t ms = vmull_s16(vget_low_s16(mm), vget_low_s16(pairs));
+    ms = vmlal_s16(ms, vget_high_s16(mm), vget_high_s16(pairs));
+    *imin = vaddvq_s32(ms);
+    return vmlaq_s32(vmulq_s32(dan_vk_sum4_neon(d), sc0), dan_vk_sum4_neon(d + 4), sc1);
+}
+
+/* Q6_K: d - 16 parts of 16, the scales sc; minus 32 * sum of sc * bsums */
+static inline int32x4_t dan_vk_q6k_apply_neon(const int32x4_t *d, const int8_t *sc, const dan_q8k *y) {
     int8x16_t s = vld1q_s8(sc);
     int16x8_t lo = vmovl_s8(vget_low_s8(s)), hi = vmovl_s8(vget_high_s8(s));
     int16x8_t b0 = vld1q_s16(y->bsums), b1 = vld1q_s16(y->bsums + 8);
-    int32x4_t r = vmull_s16(vget_low_s16(lo), vget_low_s16(b0));
-    r = vmlal_s16(r, vget_high_s16(lo), vget_high_s16(b0));
-    r = vmlal_s16(r, vget_low_s16(hi), vget_low_s16(b1));
-    return vmlal_s16(r, vget_high_s16(hi), vget_high_s16(b1));
+    int32x4_t bias = vmull_s16(vget_low_s16(lo), vget_low_s16(b0));
+    bias = vmlal_s16(bias, vget_high_s16(lo), vget_high_s16(b0));
+    bias = vmlal_s16(bias, vget_low_s16(hi), vget_low_s16(b1));
+    bias = vmlal_s16(bias, vget_high_s16(hi), vget_high_s16(b1));
+    int32x4_t acc = vnegq_s32(vshlq_n_s32(bias, 5));
+    acc = vmlaq_s32(acc, dan_vk_sum4_neon(d), vmovl_s16(vget_low_s16(lo)));
+    acc = vmlaq_s32(acc, dan_vk_sum4_neon(d + 4), vmovl_s16(vget_high_s16(lo)));
+    acc = vmlaq_s32(acc, dan_vk_sum4_neon(d + 8), vmovl_s16(vget_low_s16(hi)));
+    return vmlaq_s32(acc, dan_vk_sum4_neon(d + 12), vmovl_s16(vget_high_s16(hi)));
 }
 
 /* 8 blocks at a time: lane l of acc0 and acc1 - blocks l and l + 4 of every 8 */
@@ -1420,31 +1445,31 @@ ATTR static float dan_vk_q40_dot_##SUF(const uint8_t *w, const void *xv, int64_t
     } \
     return r; \
 } \
+/* the integer part of a block: the 4 lanes add up to isum; *extra - imin. \
+   The sums of the parts are gathered by pairwise adds and multiplied by the \
+   scales at once (a multiplication per part was slower on Neoverse-N2) */ \
 ATTR static inline int32x4_t dan_vk_q4k_parts_##SUF(const uint8_t *w, const dan_q8k *y, int32_t *extra) { \
     uint8_t sm[16]; \
     dan_vk_k4_sm(w + 4, sm); \
     const uint8x16_t m4 = vdupq_n_u8(0xF); \
-    int32x4_t acc = vdupq_n_s32(0); \
+    int32x4_t d[8]; \
     for (int p = 0; p < 4; p++) { \
         const uint8_t *q = w + 16 + 32 * p; \
         const int8_t *v = y->qs + 64 * p; \
         uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16); \
-        int32x4_t lo = DOT16(vdupq_n_s32(0), DAN_VK_S8(vandq_u8(q0, m4)), vld1q_s8(v)); \
-        lo = DOT16(lo, DAN_VK_S8(vandq_u8(q1, m4)), vld1q_s8(v + 16)); \
-        int32x4_t hi = DOT16(vdupq_n_s32(0), DAN_VK_S8(vshrq_n_u8(q0, 4)), vld1q_s8(v + 32)); \
-        hi = DOT16(hi, DAN_VK_S8(vshrq_n_u8(q1, 4)), vld1q_s8(v + 48)); \
-        acc = vmlaq_n_s32(acc, lo, sm[2 * p]); \
-        acc = vmlaq_n_s32(acc, hi, sm[2 * p + 1]); \
+        d[2 * p] = DOT16(DOT16(vdupq_n_s32(0), DAN_VK_S8(vandq_u8(q0, m4)), vld1q_s8(v)), \
+                         DAN_VK_S8(vandq_u8(q1, m4)), vld1q_s8(v + 16)); \
+        d[2 * p + 1] = DOT16(DOT16(vdupq_n_s32(0), DAN_VK_S8(vshrq_n_u8(q0, 4)), vld1q_s8(v + 32)), \
+                             DAN_VK_S8(vshrq_n_u8(q1, 4)), vld1q_s8(v + 48)); \
     } \
-    *extra = dan_vk_k4_mins_neon(sm + 8, y); \
-    return acc; \
+    return dan_vk_k4_apply_neon(d, sm, y, extra); \
 } \
 ATTR static inline int32x4_t dan_vk_q5k_parts_##SUF(const uint8_t *w, const dan_q8k *y, int32_t *extra) { \
     uint8_t sm[16]; \
     dan_vk_k4_sm(w + 4, sm); \
     const uint8x16_t m4 = vdupq_n_u8(0xF), b16 = vdupq_n_u8(16); \
     uint8x16_t h0 = vld1q_u8(w + 16), h1 = vld1q_u8(w + 32); \
-    int32x4_t acc = vdupq_n_s32(0); \
+    int32x4_t d[8]; \
     for (int p = 0; p < 4; p++) { \
         const uint8_t *q = w + 48 + 32 * p; \
         const int8_t *v = y->qs + 64 * p; \
@@ -1454,38 +1479,34 @@ ATTR static inline int32x4_t dan_vk_q5k_parts_##SUF(const uint8_t *w, const dan_
         uint8x16_t a1 = vorrq_u8(vandq_u8(q1, m4), vandq_u8(vtstq_u8(h1, u1), b16)); \
         uint8x16_t c0 = vorrq_u8(vshrq_n_u8(q0, 4), vandq_u8(vtstq_u8(h0, u2), b16)); \
         uint8x16_t c1 = vorrq_u8(vshrq_n_u8(q1, 4), vandq_u8(vtstq_u8(h1, u2), b16)); \
-        int32x4_t lo = DOT16(vdupq_n_s32(0), DAN_VK_S8(a0), vld1q_s8(v)); \
-        lo = DOT16(lo, DAN_VK_S8(a1), vld1q_s8(v + 16)); \
-        int32x4_t hi = DOT16(vdupq_n_s32(0), DAN_VK_S8(c0), vld1q_s8(v + 32)); \
-        hi = DOT16(hi, DAN_VK_S8(c1), vld1q_s8(v + 48)); \
-        acc = vmlaq_n_s32(acc, lo, sm[2 * p]); \
-        acc = vmlaq_n_s32(acc, hi, sm[2 * p + 1]); \
+        d[2 * p] = DOT16(DOT16(vdupq_n_s32(0), DAN_VK_S8(a0), vld1q_s8(v)), DAN_VK_S8(a1), vld1q_s8(v + 16)); \
+        d[2 * p + 1] = DOT16(DOT16(vdupq_n_s32(0), DAN_VK_S8(c0), vld1q_s8(v + 32)), DAN_VK_S8(c1), vld1q_s8(v + 48)); \
     } \
-    *extra = dan_vk_k4_mins_neon(sm + 8, y); \
-    return acc; \
+    return dan_vk_k4_apply_neon(d, sm, y, extra); \
 } \
-/* Q6_K: the bias 32 * sum of sc * bsums is taken off here, *extra = 0 */ \
+/* Q6_K: 16 parts of 16; the bias 32 * sum of sc * bsums is taken off here, *extra = 0 */ \
 ATTR static inline int32x4_t dan_vk_q6k_parts_##SUF(const uint8_t *w, const dan_q8k *y, int32_t *extra) { \
     const uint8x16_t m4 = vdupq_n_u8(0xF), m3 = vdupq_n_u8(3); \
     const int8_t *sc = (const int8_t *)w + 192; \
-    int32x4_t acc = vnegq_s32(vshlq_n_s32(dan_vk_q6k_bias_neon(sc, y), 5)); \
+    int32x4_t d[16]; \
     for (int n = 0; n < 2; n++) { \
         const uint8_t *ql = w + 64 * n, *qh = w + 128 + 32 * n; \
-        const int8_t *v = y->qs + 128 * n, *s = sc + 8 * n; \
-        for (int t = 0; t < 2; t++) {   /* numbers 16t..16t + 15 of each quarter */ \
+        const int8_t *v = y->qs + 128 * n; \
+        int32x4_t *e = d + 8 * n; \
+        for (int t = 0; t < 2; t++) {   /* numbers 16t..16t + 15 of each quarter: parts t, 2 + t, 4 + t, 6 + t */ \
             uint8x16_t l0 = vld1q_u8(ql + 16 * t), l1 = vld1q_u8(ql + 32 + 16 * t), h = vld1q_u8(qh + 16 * t); \
             uint8x16_t q1 = vorrq_u8(vandq_u8(l0, m4), vshlq_n_u8(vandq_u8(h, m3), 4)); \
             uint8x16_t q2 = vorrq_u8(vandq_u8(l1, m4), vshlq_n_u8(vandq_u8(vshrq_n_u8(h, 2), m3), 4)); \
             uint8x16_t q3 = vorrq_u8(vshrq_n_u8(l0, 4), vshlq_n_u8(vandq_u8(vshrq_n_u8(h, 4), m3), 4)); \
             uint8x16_t q4 = vorrq_u8(vshrq_n_u8(l1, 4), vshlq_n_u8(vshrq_n_u8(h, 6), 4)); \
-            acc = vmlaq_n_s32(acc, DOT16(vdupq_n_s32(0), DAN_VK_S8(q1), vld1q_s8(v + 16 * t)), s[t]); \
-            acc = vmlaq_n_s32(acc, DOT16(vdupq_n_s32(0), DAN_VK_S8(q2), vld1q_s8(v + 32 + 16 * t)), s[2 + t]); \
-            acc = vmlaq_n_s32(acc, DOT16(vdupq_n_s32(0), DAN_VK_S8(q3), vld1q_s8(v + 64 + 16 * t)), s[4 + t]); \
-            acc = vmlaq_n_s32(acc, DOT16(vdupq_n_s32(0), DAN_VK_S8(q4), vld1q_s8(v + 96 + 16 * t)), s[6 + t]); \
+            e[t] = DOT16(vdupq_n_s32(0), DAN_VK_S8(q1), vld1q_s8(v + 16 * t)); \
+            e[2 + t] = DOT16(vdupq_n_s32(0), DAN_VK_S8(q2), vld1q_s8(v + 32 + 16 * t)); \
+            e[4 + t] = DOT16(vdupq_n_s32(0), DAN_VK_S8(q3), vld1q_s8(v + 64 + 16 * t)); \
+            e[6 + t] = DOT16(vdupq_n_s32(0), DAN_VK_S8(q4), vld1q_s8(v + 96 + 16 * t)); \
         } \
     } \
     *extra = 0; \
-    return acc; \
+    return dan_vk_q6k_apply_neon(d, sc, y); \
 } \
 DAN_VK_KDOT_NEON(dan_vk_q4k_dot_##SUF, ATTR, dan_vk_q4k_parts_##SUF, DAN_Q4K_BYTES, 0, 1) \
 DAN_VK_KDOT_NEON(dan_vk_q5k_dot_##SUF, ATTR, dan_vk_q5k_parts_##SUF, DAN_Q5K_BYTES, 0, 1) \
