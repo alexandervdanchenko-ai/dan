@@ -2045,11 +2045,78 @@ DAN_VK_AVX2 static inline void dan_vk_rn_put8_avx2(uint8_t *o, __m128i b, __m128
     __m128i v = _mm_shuffle_epi8(b, idx);
     _mm256_storeu_si256((__m256i *)(void *)o, sgn ? _mm256_cvtepi8_epi32(v) : _mm256_cvtepu8_epi32(v));
 }
+/* kvalues_iq4nl + 128 - числа IQ4_XS без знака */
+static const uint8_t dan_vk_iq4nl_u[16] = {1, 24, 45, 63, 79, 93, 106, 118, 129, 141, 153, 166, 181, 197, 217, 241};
+/* Единицы строки Q2_K, Q3_K, IQ4_XS без знака (то же, что dan_vk_rn_lowbit_c в режиме 0): в половине n
+   q[j] - числа 128n + 32j + l (l < 32), их 32-битные слова переставляются, как у Q6_K. */
+DAN_VK_AVX2F16 static void dan_vk_rn_unpack_lowbit_x86(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out) {
+    const int wb = dan_vk_fmt_bytes[fmt];
+    const __m256i m3 = _mm256_set1_epi8(3), one = _mm256_set1_epi8(1), m4 = _mm256_set1_epi8(0xF);
+    const __m256i kv = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(const void *)dan_vk_iq4nl_u));
+    const __m128i order = _mm_setr_epi8(0, 2, 4, 6, 1, 3, 5, 7, 8, 10, 12, 14, 9, 11, 13, 15);
+    for (int64_t b = 0; b < blocks; b++) {
+        const uint8_t *p = w + b * wb;
+        uint8_t *o = out + b * DAN_VK_RN_UNIT;
+        __m256i h = fmt == DAN_FMT_Q3K ? DAN_VK_LD(p) : _mm256_setzero_si256();
+        for (int n = 0; n < 2; n++) {
+            __m256i q[4];
+            if (fmt == DAN_FMT_IQ4XS) {
+                for (int j = 0; j < 4; j++) {
+                    __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(p + 8 + 16 * (4 * n + j)));
+                    __m256i nb = _mm256_inserti128_si256(_mm256_castsi128_si256(v), _mm_srli_epi16(v, 4), 1);
+                    q[j] = _mm256_shuffle_epi8(kv, _mm256_and_si256(nb, m4));
+                }
+            } else {
+                __m256i v = DAN_VK_LD(p + (fmt == DAN_FMT_Q2K ? 16 : 32) + 32 * n);
+                for (int j = 0; j < 4; j++) {
+                    q[j] = _mm256_and_si256(v, m3);
+                    v = _mm256_srli_epi16(v, 2);
+                    if (fmt == DAN_FMT_Q3K) {
+                        /* старший бит 4n + j байта hmask - как 4; h сдвигается на 1 каждый шаг */
+                        q[j] = _mm256_or_si256(q[j], _mm256_slli_epi16(_mm256_and_si256(h, one), 2));
+                        h = _mm256_srli_epi16(h, 1);
+                    }
+                }
+            }
+            __m256i t0 = _mm256_unpacklo_epi32(q[0], q[1]), t1 = _mm256_unpackhi_epi32(q[0], q[1]);
+            __m256i t2 = _mm256_unpacklo_epi32(q[2], q[3]), t3 = _mm256_unpackhi_epi32(q[2], q[3]);
+            uint8_t *on = o + 128 * n;
+            _mm256_storeu_si256((__m256i *)(void *)on, _mm256_unpacklo_epi64(t0, t2));
+            _mm256_storeu_si256((__m256i *)(void *)(on + 32), _mm256_unpackhi_epi64(t0, t2));
+            _mm256_storeu_si256((__m256i *)(void *)(on + 64), _mm256_unpacklo_epi64(t1, t3));
+            _mm256_storeu_si256((__m256i *)(void *)(on + 96), _mm256_unpackhi_epi64(t1, t3));
+        }
+        memset(o + DAN_VK_RN_D, 0, DAN_VK_RN_UNIT - DAN_VK_RN_D);
+        if (fmt == DAN_FMT_Q2K) {
+            __m128i s = _mm_loadu_si128((const __m128i *)(const void *)p);
+            __m128i sc = _mm_and_si128(s, _mm256_castsi256_si128(m4));
+            dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC, sc, order, 0);
+            dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC + 32, _mm_srli_si128(sc, 8), order, 0);
+            dan_vk_putf(o + DAN_VK_RN_D, dan_vk_half(p + 80));
+            dan_vk_putf(o + DAN_VK_RN_D + 4, dan_vk_half(p + 82));
+            __m128i mn = _mm_shuffle_epi8(_mm_and_si128(_mm_srli_epi16(s, 4), _mm256_castsi256_si128(m4)), order);
+            _mm_storeu_si128((__m128i *)(void *)(o + DAN_VK_RN_D + 8), mn);
+        } else {
+            int8_t sc[16];
+            if (fmt == DAN_FMT_Q3K) dan_vk_q3k_scales(p + 96, sc);
+            else {
+                int8_t s8[8];
+                dan_vk_iq4xs_scales(p, s8);
+                for (int j = 0; j < 16; j++) sc[j] = s8[j / 2];
+            }
+            __m128i s = _mm_loadu_si128((const __m128i *)(const void *)sc);
+            dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC, s, order, 1);
+            dan_vk_rn_put8_avx2(o + DAN_VK_RN_SC + 32, _mm_srli_si128(s, 8), order, 1);
+            dan_vk_putf(o + DAN_VK_RN_D, dan_vk_half(p + (fmt == DAN_FMT_Q3K ? 108 : 0)));
+        }
+    }
+}
 DAN_VK_AVX2F16 static void dan_vk_rn_unpack_x86(int fmt, const uint8_t *w, int64_t blocks, uint8_t *out, int sgn) {
     /* sgn - the mode: only 0 here, the rest by plain C */
     const int wb = dan_vk_fmt_bytes[fmt];
     const __m256i m4 = _mm256_set1_epi8(0xF), one = _mm256_set1_epi8(1), m3 = _mm256_set1_epi8(3);
     const __m128i order = _mm_setr_epi8(0, 2, 4, 6, 1, 3, 5, 7, 8, 10, 12, 14, 9, 11, 13, 15);
+    if (!sgn && fmt >= DAN_FMT_Q2K) { dan_vk_rn_unpack_lowbit_x86(fmt, w, blocks, out); return; }
     if (sgn || fmt >= DAN_FMT_Q2K) { dan_vk_rn_unpack_c(fmt, w, blocks, out, sgn); return; }
     if (fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K) {
         for (int64_t b = 0; b < blocks; b++) {
@@ -2279,9 +2346,58 @@ DAN_VK_AVX2 static inline void dan_vk_rn_q2k_avx2(const uint8_t *const *wb, cons
 DAN_VK_RNK_X86(dan_vk_rn_q2k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1, dan_vk_rn_q2k_vnni)
 DAN_VK_RNK_X86(dan_vk_rn_q2k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 1, dan_vk_rn_q2k_avx2)
 
+/* Q3_K на AVX2: числа q + 4 не больше 7, 16-битные суммы всех 4 шагов половины не больше
+   4 * 2 * 7 * 128 - одно умножение на масштабы на половину (у ядра Q6_K - на 2 шага) */
+DAN_VK_AVX2 static inline void dan_vk_rn_q3k_avx2(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
+    __m256i acc[DAN_VK_RN_R_AVX2][DAN_VK_RN_V], s16[DAN_VK_RN_R_AVX2];
+    (void)M;
+    for (int n = 0; n < 2; n++) {
+        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) s16[r] = dan_vk_sc16_avx2(wb[r] + DAN_VK_RN_SC + 32 * n);
+        DAN_VK_RNA_STEPS(128 * n, 4, 4, s16[r])
+        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
+            __m256i sc = DAN_VK_LD(wb[r] + DAN_VK_RN_SC + 32 * n);
+            for (int k = 0; k < DAN_VK_RN_V; k++) {
+                __m256i t = _mm256_sub_epi32(acc[r][k], _mm256_mullo_epi32(DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32 * n), sc));
+                T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], t) : t;
+            }
+        }
+    }
+}
+DAN_VK_RNK_X86(dan_vk_rn_q3k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_q3k_avx2)
+
+/* IQ4_XS на AVX2: числа единиц kv + 128 (до 241) не годятся для vpmaddubsw (сумма пары
+   переполнила бы 16 бит), поэтому число берётся со знаком (kv = u ^ 0x80): |kv| на y со знаком
+   kv, пара не больше 2 * 127 * 127, и сразу умножается на масштабы части; суммы вектора со
+   сдвигом 128 не нужны */
+DAN_VK_AVX2 static inline void dan_vk_rn_iq4xs_avx2(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
+    (void)M;
+    const __m256i x80 = _mm256_set1_epi8((char)0x80);
+    for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) T[r * DAN_VK_RN_V + k] = _mm256_setzero_si256();
+    for (int n = 0; n < 2; n++) {
+        __m256i s16[DAN_VK_RN_R_AVX2];
+        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) s16[r] = dan_vk_sc16_avx2(wb[r] + DAN_VK_RN_SC + 32 * n);
+        DAN_VK_ROLLED
+        for (int i = 0; i < 4; i++) {
+            __m256i sv[DAN_VK_RN_R_AVX2], av[DAN_VK_RN_R_AVX2];
+            for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
+                sv[r] = _mm256_xor_si256(DAN_VK_LD(wb[r] + 128 * n + 32 * i), x80);
+                av[r] = _mm256_abs_epi8(sv[r]);
+            }
+            for (int k = 0; k < DAN_VK_RN_V; k++) {
+                __m256i yv = DAN_VK_LD(xb[k] + 128 * n + 32 * i);
+                for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+                    T[r * DAN_VK_RN_V + k] = _mm256_add_epi32(T[r * DAN_VK_RN_V + k],
+                        _mm256_madd_epi16(_mm256_maddubs_epi16(av[r], _mm256_sign_epi8(yv, sv[r])), s16[r]));
+            }
+        }
+    }
+}
+DAN_VK_RNK_X86(dan_vk_rn_iq4xs_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_iq4xs_avx2)
+
 #define DAN_VK_RN_AVX2_TAIL , DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_q40_avx2f, dan_vk_rn_q4k_avx2f, dan_vk_rn_q5k_avx2f, dan_vk_rn_q6k_avx2f, dan_vk_rn_q50_avx2f, NULL, NULL, NULL, \
-     dan_vk_rn_q2k_avx2f, dan_vk_rn_q6k_avx2f, NULL}
+     dan_vk_rn_q2k_avx2f, dan_vk_rn_q3k_avx2f, dan_vk_rn_iq4xs_avx2f}
 #define DAN_VK_RN_VNNI_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_b32_vnni_f, dan_vk_rn_q4k_vnni, dan_vk_rn_q4k_vnni, dan_vk_rn_q6k_vnni_f, dan_vk_rn_b32_vnni_f, NULL, NULL, dan_vk_rn_b32_vnni_f, \
      dan_vk_rn_q2k_vnni_f, dan_vk_rn_q6k_vnni_f, dan_vk_rn_q6k_vnni_f}
