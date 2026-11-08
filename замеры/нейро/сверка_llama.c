@@ -13,8 +13,9 @@
        ответ: 5 6 7                  - N токенов жадной выборки (наибольший логит, при равенстве - меньший номер)
        текст: ...                    - тот же ответ текстом (llama_token_to_piece, без служебных частей)
        скорость: ...                 - токенов в секунду порождения (без обработки запроса)
-   Кэш ключей и значений по умолчанию f32 и без flash attention (ближе к движку на Дане); «f16» -
-   как по умолчанию в llama.cpp. Запрос подаётся по одному токену, как в движке. */
+       запрос: ...                   - токенов запроса в секунду (только с «f16»)
+   Кэш ключей и значений по умолчанию f32 и без flash attention (ближе к движку на Дане), запрос
+   подаётся по одному токену; «f16» - как по умолчанию в llama.cpp: кэш f16, запрос одним пакетом. */
 
 #define _POSIX_C_SOURCE 200809L
 #include <dlfcn.h>
@@ -156,9 +157,16 @@ int main(int argc, char **argv) {
     for (int32_t i = 0; i < n; i++) printf(" %d", t[i]);
     printf("\n");
     if (n == 0 || n_gen == 0) return 0;     /* N = 0 - только токены */
-    for (int32_t i = 0; i < n; i++) {
-        struct batch b = { 1, t + i, NULL, NULL, NULL, NULL, NULL };
+    if (f16) {
+        struct batch b = { n, t, NULL, NULL, NULL, NULL, NULL };
+        double s0 = now();
         if (decode(ctx, b) != 0) { fprintf(stderr, "llama_decode не выполнилась\n"); return 3; }
+        printf("запрос: %.3f\n", n / (now() - s0));
+    } else {
+        for (int32_t i = 0; i < n; i++) {
+            struct batch b = { 1, t + i, NULL, NULL, NULL, NULL, NULL };
+            if (decode(ctx, b) != 0) { fprintf(stderr, "llama_decode не выполнилась\n"); return 3; }
+        }
     }
     float *lg = logits_ith(ctx, -1);
     printf("логиты:");
