@@ -399,7 +399,8 @@ class ТестыОбновления(unittest.TestCase):
         self.tmp.cleanup()
 
     def выпуск(self, версия, пробный=False, испортить=False):
-        папка = os.path.join(self.п, "выпуск_" + версия)
+        # латиницей: curl в Windows не раскодирует русские буквы в адресе file://
+        папка = os.path.join(self.п, "vypusk_" + версия)
         os.makedirs(папка)
         архив = os.path.join(папка, f"dan-{версия}-windows.zip")
         with zipfile.ZipFile(архив, "w") as з:
