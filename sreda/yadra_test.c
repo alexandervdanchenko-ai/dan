@@ -508,6 +508,37 @@ static void test_rn(void) {
     }
 }
 
+/* матрица на вектор кусками по 8 строк (ядра 8 строк на x86): каждый вариант - биты ядра строки C
+   при любом числе блоков строки (одни блоки хвоста, ровно 8, 8 и хвост) и строк, не кратном 8 */
+static void test_rows8(void) {
+    static const int64_t nb[] = {1, 2, 3, 5, 6, 7, 8, 9, 14, 16, 17, 35};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f];
+        for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+            int64_t blocks = nb[s], rows = 8 * 9 + 5, cols = blocks * n;
+            uint8_t *w = malloc((size_t)(rows * blocks * bytes));
+            float *x = malloc((size_t)cols * 4), *ys = malloc((size_t)rows * 4), *y = malloc((size_t)rows * 4);
+            kv_blocks(f, w, rows * blocks, 9090 + (uint64_t)(f * 100 + (int64_t)s));
+            for (int64_t i = 0; i < cols; i++) x[i] = (float)(rnd2() * (i % 7 == 2 ? 30.0 : 1.0));
+            uint8_t *xq = kv_quantize_x(f, x, cols);
+            for (int64_t i = 0; i < rows; i++) ys[i] = dan_vk_fmt_dot(&dan_vk_plain, f, w + i * blocks * bytes, xq, blocks);
+            for (int v = 0; v < nvariants; v++) {
+                dan_vk_cur = variants[v];
+                memset(y, 0xff, (size_t)rows * 4);
+                if (f == DAN_FMT_Q80) dan_vk_matvec_q8(w, xq, y, rows, cols);
+                else dan_vk_matvec_fmt(f, w, xq, y, rows, cols);
+                for (int64_t i = 0; i < rows; i++)
+                    if (!same32(y[i], ys[i])) {
+                        CHECK(0, "%s %s матрица на вектор, %d блоков: строка %d: %.9g и %.9g", labels[v], kv_names[f], (int)blocks,
+                              (int)i, y[i], ys[i]);
+                        break;
+                    }
+            }
+            free(w); free(x); free(ys); free(y); free(xq);
+        }
+    }
+}
+
 /* a matrix by many vectors (AMX and the rest): every variant the bits of
    the row kernel of C for every row and vector - rows and vectors not
    multiple of 16, blocks not multiple of 8, tiles of vectors of 2 groups
@@ -1189,6 +1220,7 @@ int main(int argc, char **argv) {
     test_mnogo();
     test_malye();
     test_stroki();
+    test_rows8();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;
