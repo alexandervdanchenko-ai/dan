@@ -8,8 +8,12 @@
    The variant is chosen once, when the program first uses a kernel, by what
    the processor can do: plain C (always present, the reference), AVX2,
    AVX-512 (F and BW) on x86-64, NEON and NEON with dot product instructions
-   on 64-bit ARM. The environment variable DAN_YADRA=c|avx2|avx512|neon|dotprod
-   asks for a variant (an unsupported one is ignored).
+   on 64-bit ARM. The avx512 variant takes VNNI where the processor has it, on
+   AMD Zen 5 - VNNI on 512 bits, on Intel with AMX in Linux - the tiles of
+   AMX for a matrix by many vectors. The environment variable
+   DAN_YADRA=c|avx2|avx512|neon|dotprod asks for a variant (an unsupported one
+   is ignored; avx512vnni, avx512z and amx - the kinds of avx512, for
+   measurements).
 
    Every variant gives exactly the same bits as plain C. The order of
    summation is fixed by this file, not by the processor: a dot product of
