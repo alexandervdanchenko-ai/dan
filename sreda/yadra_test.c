@@ -564,10 +564,16 @@ static void test_malye(void) {
         }
         free(w); free(xp); free(x); free(xq);
     }
+    /* the batches up to 16 by the kernels of small batches (groups), whatever the processor */
+#ifdef _WIN32
+    _putenv_s("DAN_YADRA_MALYE", "16");
+#else
+    setenv("DAN_YADRA_MALYE", "16", 1);
+#endif
     for (int f = 0; f < DAN_NFMT; f++) {
         int64_t n = dan_vk_fmt_n[f], rows = 37, cols = n == 32 ? 11 * 32 : 9 * 256, bytes = dan_vk_fmt_bytes[f];
         int64_t blocks = rows * cols / n;
-        for (int64_t nv = 2; nv <= 9; nv++) {
+        for (int64_t nv = 2; nv <= 16; nv += nv < 9 ? 1 : 7) {
             uint8_t *w = malloc((size_t)(blocks * bytes));
             float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4);
             kv_blocks(f, w, blocks, 8080 + (uint64_t)(f * 10 + nv));
@@ -582,6 +588,11 @@ static void test_malye(void) {
             free(w); free(x); free(ys);
         }
     }
+#ifdef _WIN32
+    _putenv_s("DAN_YADRA_MALYE", "");
+#else
+    unsetenv("DAN_YADRA_MALYE");
+#endif
 }
 
 static void test_matvec(void) {

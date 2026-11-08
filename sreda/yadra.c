@@ -156,6 +156,8 @@ static int32_t dan_vk_q8_block_c(const int8_t *a, const int8_t *b) {
 #ifndef DAN_VK_NV
 #define DAN_VK_NV 4
 #endif
+/* vectors of the kernels of a row by a few vectors at most (small batches) */
+#define DAN_VK_SM_MAX 8
 /* formats of weights of llama.cpp (sreda/yadra.c below) */
 enum { DAN_FMT_Q40, DAN_FMT_Q4K, DAN_FMT_Q5K, DAN_FMT_Q6K, DAN_FMT_Q50, DAN_FMT_Q41, DAN_FMT_Q51, DAN_FMT_Q80, DAN_NFMT };
 
@@ -2144,7 +2146,6 @@ static int dan_vk_matmul_amx(int fmt, const uint8_t *w, const uint8_t *xq, float
    block go into the float part by 8 blocks: lane l - block 8i + l, as in the
    row kernel; the blocks after the last full 8 - one by one. The bits are
    those of the row kernel. */
-#define DAN_VK_SM_MAX 8
 
 /* dan_vk_tr8_avx2 into registers: o[i] - step i */
 DAN_VK_AVX2 static inline void dan_vk_tr8r_avx2(const __m256i *a, __m256i *o) {
@@ -4496,9 +4497,24 @@ static int dan_vk_matmul_amx(int fmt, const uint8_t *w, const uint8_t *xq, float
    units (sign mode 0), each part of the pool takes rows, and a row is
    multiplied by up to sm vectors at a time (more vectors - by groups of
    equal size: the row stays in the first level cache). For batches of 2 to
-   DAN_VK_SM_LIMIT vectors (DAN_YADRA_MALYE sets the limit, for
-   measurements); larger - the kernels of rows by vectors. */
+   dan_vk_sm_limit vectors (DAN_YADRA_MALYE sets the limit, up to
+   DAN_VK_SM_LIMIT is tested); larger - the kernels of rows by vectors. */
 #define DAN_VK_SM_LIMIT 16
+/* the largest batch for which the kernels of small batches are faster than
+   those of rows by vectors (yadra_test zamer_malye, замеры/результаты.md):
+   AVX-512 on Intel - 8, on AMD (Zen 4, Zen 5) - 3, AVX2 - 5 */
+static int64_t dan_vk_sm_limit(const dan_vk_table *t) {
+    const char *e = getenv("DAN_YADRA_MALYE");
+    if (e) return atoll(e);
+#ifdef DAN_VK_X86
+    if (t->sm == dan_vk_sm_avx2) return 5;
+    __builtin_cpu_init();
+    return __builtin_cpu_is("amd") ? 3 : 8;
+#else
+    (void)t;
+    return DAN_VK_SM_LIMIT;
+#endif
+}
 typedef struct { const uint8_t *w, *xp; float *y; int64_t blocks, rows, nv, us; int fmt, per; } dan_vk_sm_job;
 
 static void dan_vk_sm_part(void *c, int64_t b, int64_t e) {
@@ -4517,9 +4533,7 @@ static void dan_vk_sm_part(void *c, int64_t b, int64_t e) {
 /* 1 if done by the kernels of small batches */
 static int dan_vk_matmul_sm(int fmt, const uint8_t *w, const uint8_t *xq, float *y, int64_t rows, int64_t cols, int64_t nv) {
     const dan_vk_table *t = dan_vk();
-    int64_t limit = DAN_VK_SM_LIMIT;
-    const char *e = getenv("DAN_YADRA_MALYE");
-    if (e) limit = atoll(e);
+    int64_t limit = t->sm ? dan_vk_sm_limit(t) : 0;
     if (!t->sm || nv < 2 || nv > limit || rows < 1 || cols < 1 || t->rn_mode != 0 || !t->sm(fmt, 1, NULL, 0, NULL, 0, NULL)) return 0;
     int max = DAN_VK_SM_MAX;
     while (max > 1 && !t->sm(fmt, max, NULL, 0, NULL, 0, NULL)) max--;
