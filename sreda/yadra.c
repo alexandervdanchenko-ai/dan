@@ -1562,6 +1562,57 @@ DAN_VK_VNNI static float dan_vk_q51_dot_vnni(const uint8_t *w, const void *x, in
                 _mm256_storeu_ps(&tail[8 * g], s); \
             }
 
+/* the same for NV = 4 with the floats of the 8 pairs of a group made by
+   broadcasts (rows 2g and 2g + 1 - halves, vectors - lanes 0..3 of each
+   half) and not through memory: 8 stores of 4 bytes read back as one vector
+   of 32 bytes wait for the stores (the same numbers, the same bits) */
+#define DAN_VK_RNK_END4(R, MINS) \
+        { \
+            float yv[4]; \
+            for (int k = 0; k < 4; k++) memcpy(&yv[k], xb[k] + DAN_VK_RN_D, 4); \
+            __m128 y4 = _mm_setr_ps(yv[0], yv[1], yv[2], yv[3]); \
+            __m256 Y = _mm256_set_m128(y4, y4); \
+            for (int g = 0; g < (R) / 2; g++) { \
+                float d0, d1, m0, m1; \
+                memcpy(&d0, wb[2 * g] + DAN_VK_RN_D, 4); \
+                memcpy(&d1, wb[2 * g + 1] + DAN_VK_RN_D, 4); \
+                __m256 dw = _mm256_set_m128(_mm_set1_ps(d1), _mm_set1_ps(d0)); \
+                __m256 t = _mm256_mul_ps(_mm256_mul_ps(Y, dw), _mm256_cvtepi32_ps(dan_vk_hadd8_avx2(T + 8 * g))); \
+                if (MINS) { \
+                    memcpy(&m0, wb[2 * g] + DAN_VK_RN_D + 4, 4); \
+                    memcpy(&m1, wb[2 * g + 1] + DAN_VK_RN_D + 4, 4); \
+                    __m256 bm = _mm256_mul_ps(Y, _mm256_set_m128(_mm_set1_ps(m1), _mm_set1_ps(m0))); \
+                    t = _mm256_sub_ps(t, _mm256_mul_ps(bm, _mm256_cvtepi32_ps(dan_vk_hadd8_avx2(M + 8 * g)))); \
+                } \
+                if (b < full) _mm256_storeu_ps(&accf[b & 7][8 * g], _mm256_add_ps(_mm256_loadu_ps(&accf[b & 7][8 * g]), t)); \
+                else _mm256_storeu_ps(&tail[8 * g], _mm256_add_ps(_mm256_loadu_ps(&tail[8 * g]), t)); \
+            } \
+        } \
+        if (b + 1 == full) \
+            for (int g = 0; g < (R) / 2; g++) { \
+                __m256 a[8]; \
+                for (int l = 0; l < 8; l++) a[l] = _mm256_loadu_ps(&accf[l][8 * g]); \
+                __m256 s = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(a[0], a[4]), _mm256_add_ps(a[2], a[6])), \
+                                         _mm256_add_ps(_mm256_add_ps(a[1], a[5]), _mm256_add_ps(a[3], a[7]))); \
+                _mm256_storeu_ps(&tail[8 * g], s); \
+            }
+#define DAN_VK_RNK4_X86(NAME, ATTR, R, MINS, INTS) \
+ATTR static void NAME(const uint8_t *w, int64_t ws, const uint8_t *x, int64_t xs, int64_t blocks, float *out) { \
+    float accf[8][(R) * 4], tail[(R) * 4]; \
+    memset(accf, 0, sizeof accf); \
+    for (int l = 0; l < (R) * 4; l++) tail[l] = 0.0f; \
+    const int64_t full = blocks / 8 * 8; \
+    for (int64_t b = 0; b < blocks; b++) { \
+        const uint8_t *wb[R], *xb[4]; \
+        for (int r = 0; r < (R); r++) wb[r] = w + r * ws + b * DAN_VK_RN_UNIT; \
+        for (int k = 0; k < 4; k++) xb[k] = x + k * xs + b * DAN_VK_RN_UNIT; \
+        __m256i T[(R) * 4], M[(R) * 4]; \
+        INTS(wb, xb, T, M); \
+        DAN_VK_RNK_END4(R, MINS) \
+    } \
+    for (int l = 0; l < (R) * 4; l++) out[l] = tail[l]; \
+}
+
 /* R rows (units ws bytes apart) by NV vectors (xs bytes apart) of a K format:
    INTS(wb, xb, T, M) - the integer sums of a block; out[r * NV + k] */
 #define DAN_VK_RNK_X86(NAME, ATTR, R, NV, MINS, INTS) \
@@ -1719,8 +1770,8 @@ DAN_VK_VNNI static inline void dan_vk_rn_b32_vnniz(const uint8_t *const *wb, con
     for (int r = 0; r < DAN_VK_RN_R_VNNI; r++)
         for (int k = 0; k < DAN_VK_RN_V; k++) S[r * DAN_VK_RN_V + k] = acc[r][k];
 }
-DAN_VK_RNK_X86(dan_vk_rn_q4k_vnniz, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1, dan_vk_rn_k4_vnniz)
-DAN_VK_RNK_X86(dan_vk_rn_q6k_vnniz_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_q6k_vnniz)
+DAN_VK_RNK4_X86(dan_vk_rn_q4k_vnniz, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, 1, dan_vk_rn_k4_vnniz)
+DAN_VK_RNK4_X86(dan_vk_rn_q6k_vnniz_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, 0, dan_vk_rn_q6k_vnniz)
 DAN_VK_RNB_X86(dan_vk_rn_b32_vnniz_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, dan_vk_rn_b32_vnniz)
 
 /* -- AVX2: 16-bit sums of G steps, then multiplied by MUL16(r) -- */
