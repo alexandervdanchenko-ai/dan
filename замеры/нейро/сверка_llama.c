@@ -5,6 +5,7 @@
 
        cc -std=c11 -O2 сверка_llama.c -o сверка_llama -ldl
        ./сверка_llama папка_или_libllama модель.gguf запрос.txt N [потоков] [кэш]
+   (N = 0 - только токены)
 
    Запрос читается из файла (UTF-8, как есть). Печатает строки:
        токены: 1 2 3                 - разбиение запроса (служебные части разбираются, BOS по модели)
@@ -143,7 +144,7 @@ int main(int argc, char **argv) {
     printf("токены:");
     for (int32_t i = 0; i < n; i++) printf(" %d", t[i]);
     printf("\n");
-    if (n == 0) return 0;
+    if (n == 0 || n_gen == 0) return 0;     /* N = 0 - только токены */
     for (int32_t i = 0; i < n; i++) {
         struct batch b = { 1, t + i, NULL, NULL, NULL, NULL, NULL };
         if (decode(ctx, b) != 0) { fprintf(stderr, "llama_decode не выполнилась\n"); return 3; }
