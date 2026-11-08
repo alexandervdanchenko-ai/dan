@@ -3,6 +3,9 @@
 import contextlib
 import io
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -167,6 +170,77 @@ class ТестыЧерезКомпиляторНаДане(unittest.TestCase):
         with contextlib.redirect_stdout(вывод_):
             self.assertEqual(dan.main(["--версия"]), 0)
         self.assertTrue(вывод_.getvalue().startswith("Дан "))
+
+
+@unittest.skipUnless(dan.компилятор_есть(), "нет компилятора C")
+class ТестыПоставки(unittest.TestCase):
+    """Собранная поставка (dan.exe из PyInstaller): команды выполняет компилятор на Дане из папки
+    «компилятор» рядом с dan.exe, без DAN_KOMPILYATOR."""
+
+    def setUp(self):
+        готовый = sam_kompilyator.исполняемый()
+        временная = tempfile.TemporaryDirectory()
+        self.addCleanup(временная.cleanup)
+        self.папка = временная.name
+        os.makedirs(os.path.join(self.папка, "компилятор"))
+        имя = "дан" + (".exe" if os.name == "nt" else "")
+        shutil.copy2(готовый, os.path.join(self.папка, "компилятор", имя))
+        for патч in (mock.patch.object(sys, "frozen", True, create=True),
+                     mock.patch.object(sys, "executable", os.path.join(self.папка, "dan.exe")),
+                     mock.patch.object(sys, "_MEIPASS", sam_kompilyator.ПАПКА, create=True),
+                     mock.patch.dict(os.environ, {"DAN_KOMPILYATOR": "", "DAN_SAM_EXE": ""})):
+            патч.start()
+            self.addCleanup(патч.stop)
+
+    def main(self, *аргументы):
+        вывод_ = io.StringIO()
+        with contextlib.redirect_stdout(вывод_), contextlib.redirect_stderr(вывод_):
+            код = dan.main(list(аргументы))
+        return код, вывод_.getvalue()
+
+    def test_включён_без_переменной(self):
+        self.assertTrue(sam_kompilyator.включён())
+        self.assertEqual(sam_kompilyator.исполняемый(), os.path.join(self.папка, "компилятор",
+                                                                     "дан" + (".exe" if os.name == "nt" else "")))
+        с = sam_kompilyator.среда()
+        self.assertEqual(с["DAN_HOME"], sam_kompilyator.ПАПКА)
+        путь = next(з for к, з in с.items() if к.upper() == "PATH")
+        self.assertTrue(путь.startswith(self.папка + os.pathsep))
+        with mock.patch.dict(os.environ, {"DAN_KOMPILYATOR": "python"}):
+            self.assertFalse(sam_kompilyator.включён())
+
+    def test_версия(self):
+        код, текст = self.main("--версия")
+        self.assertEqual(код, 0)
+        self.assertTrue(текст.startswith("Дан "), текст)
+        self.assertIn("Команды выполняет компилятор на Дане", текст)
+
+    def test_справка(self):
+        код, текст = self.main()
+        self.assertEqual(код, 2)
+        self.assertIn("dan модели проверить", текст)
+        self.assertNotIn("python dan.py", текст)
+
+    def test_новые_возможности(self):
+        # плотный массив и векторная функция: их знает только компилятор на Дане
+        путь = os.path.join(self.папка, "массив.dan")
+        with open(путь, "w", encoding="utf-8") as ф:
+            ф.write("пусть а = массив(дроб32, 3, 0.5)\nвывод(скаляр(а, а))\n")
+        код, текст = self.main("собрать", путь)
+        self.assertEqual(код, 0, текст)
+        exe = путь[:-4] + (".exe" if os.name == "nt" else "")
+        р = subprocess.run([exe], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(р.stdout.strip(), "0.75")
+        код, текст = self.main("проверить", путь)
+        self.assertEqual(код, 0, текст)
+
+    def test_команды_python(self):
+        # «--для=» выполняет dan.py, но программу в C переводит компилятор на Дане
+        self.assertIsNone(sam_kompilyator.выполнить_команду(["собрать", "п.dan", "--для=linux"]))
+        self.assertIsNone(sam_kompilyator.выполнить_команду(["песочница"]))
+        # значение для программы после имени файла - не параметр сборки
+        with mock.patch.object(sam_kompilyator, "_запустить", lambda а: 5):
+            self.assertEqual(sam_kompilyator.выполнить_команду(["запустить", "п.dan", "--веб"]), 5)
 
 
 if __name__ == "__main__":
