@@ -409,6 +409,72 @@ static void test_kvanty(void) {
           (unsigned long long)kv_hash2);
 }
 
+
+/* rows by vectors: the unpacking of every variant gives the bytes of plain C,
+   the kernels of every variant the bits of the row kernel of C for every row
+   and vector (blocks of the tail, the last group of blocks of 32 not full),
+   the matrix by vectors - for numbers of rows and vectors not multiple of the
+   kernel's */
+static void test_rn(void) {
+    enum { MAXB = 33, RMAX = 8, VMAX = 8 };
+    static const int64_t nb[] = {1, 2, 7, 8, 9, 15, 16, 17, 33};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f];
+        int64_t units = dan_vk_rn_units(f, MAXB), us = units * DAN_VK_RN_UNIT, xs = MAXB * dan_vk_fmt_xbytes[f];
+        uint8_t *w = malloc((size_t)(RMAX * MAXB * bytes)), *u1 = malloc((size_t)(RMAX * us)), *u2 = malloc((size_t)(RMAX * us));
+        uint8_t *xp = malloc((size_t)(VMAX * us));
+        float *x = malloc((size_t)(VMAX * MAXB * n) * 4);
+        kv_blocks(f, w, RMAX * MAXB, 991 + (uint64_t)f);
+        for (int64_t i = 0; i < VMAX * MAXB * n; i++) x[i] = (float)(rnd2() * (i % 7 == 3 ? 100.0 : 1.0));
+        uint8_t *xq = kv_quantize_x(f, x, VMAX * MAXB * n);
+        for (int v = 0; v < nvariants; v++) {
+            const dan_vk_table *t = variants[v];
+            if (!t->rn[f]) continue;
+            int R = t->rn_rows, NV = t->rn_vecs;
+            for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+                int64_t b = nb[s];
+                for (int r = 0; r < R; r++) {
+                    memset(u1 + r * us, 0x55, (size_t)us);
+                    memset(u2 + r * us, 0x55, (size_t)us);
+                    t->unpack(f, w + r * MAXB * bytes, b, u1 + r * us, t->rn_signed);
+                    dan_vk_rn_unpack_c(f, w + r * MAXB * bytes, b, u2 + r * us, t->rn_signed);
+                    CHECK(memcmp(u1 + r * us, u2 + r * us, (size_t)(dan_vk_rn_units(f, b) * DAN_VK_RN_UNIT)) == 0,
+                          "%s: строки %s развёрнуты не так, как в C (%d блоков)", t->name, kv_names[f], (int)b);
+                }
+                for (int k = 0; k < NV; k++) dan_vk_rn_prep(f, xq + k * xs, b, xp + k * us, t->rn_signed);
+                float out[64];
+                t->rn[f](u1, us, xp, us, b, out);
+                for (int r = 0; r < R; r++)
+                    for (int k = 0; k < NV; k++) {
+                        float e = dan_vk_fmt_dot(&dan_vk_plain, f, w + r * MAXB * bytes, xq + k * xs, b);
+                        CHECK(same32(out[r * NV + k], e), "%s %s строк на векторы: строка %d, вектор %d, %d блоков: %.9g и %.9g",
+                              t->name, kv_names[f], r, k, (int)b, out[r * NV + k], e);
+                    }
+            }
+        }
+        free(xq); free(w); free(u1); free(u2); free(xp); free(x);
+    }
+    /* the matrix: rows and vectors not multiple of the kernel's, a group of blocks of 32 not full */
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t n = dan_vk_fmt_n[f], rows = 23, cols = n == 32 ? 13 * 32 : 3 * 256, bytes = dan_vk_fmt_bytes[f];
+        int64_t blocks = rows * cols / n;
+        for (int64_t nv = 1; nv <= 9; nv += 4) {
+            uint8_t *w = malloc((size_t)(blocks * bytes));
+            float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4);
+            kv_blocks(f, w, blocks, 4242 + (uint64_t)(f * 10 + nv));
+            for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)rnd2();
+            for (int64_t k = 0; k < nv; k++) {
+                void *xk = kv_quantize_x(f, x + k * cols, cols);
+                dan_vk_cur = &dan_vk_plain;
+                dan_vk_matvec_fmt(f, w, xk, ys + k * rows, rows, cols);
+                free(xk);
+            }
+            kv_matmul(f, w, x, rows, cols, nv, ys);
+            free(w); free(x); free(ys);
+        }
+    }
+}
+
 static void test_matvec(void) {
     int64_t rows = 517, cols = 300;
     float *w = malloc(rows * cols * 4), *x = malloc(cols * 4), *y1 = malloc(rows * 4), *y2 = malloc(rows * 4);
@@ -710,6 +776,57 @@ static void bench_weights(void) {
     free(buf); free(y); free(x8); free(xk);
 }
 
+
+/* the matrix of weights by vectors (the batch of a prompt): 4096 x 4096 by
+   256 vectors, billions of multiplications per second, the kernels of rows
+   by vectors and (DAN_YADRA_RN=0) of a row by 4 vectors; «замер_пакет» or
+   «zamer_paket» as the first argument */
+static void bench_batch(void) {
+    enum { ROWS = 4096, COLS = 4096, NV = 256 };
+    static const int fmts[] = {DAN_FMT_Q40, DAN_FMT_Q4K, DAN_FMT_Q5K, DAN_FMT_Q6K, DAN_FMT_Q50, DAN_FMT_Q80};
+    float *x = malloc((size_t)COLS * NV * 4), *y = malloc((size_t)ROWS * NV * 4);
+    for (int64_t i = 0; i < (int64_t)COLS * NV; i++) x[i] = (float)rnd();
+    printf("потоков: %d\n", dan_pool_threads());
+    for (size_t fi = 0; fi < sizeof fmts / sizeof *fmts; fi++) {
+        int f = fmts[fi];
+        int64_t bytes = dan_vk_fmt_bytes[f], blocks = (int64_t)ROWS * COLS / dan_vk_fmt_n[f];
+        uint8_t *w = malloc((size_t)(blocks * bytes));
+        kv_blocks(f, w, blocks, 31 + (uint64_t)f);
+        uint16_t hd = dan_f32_to_f16(0.01f);
+        for (int64_t b = 0; b < blocks; b++) {
+            memcpy(w + b * bytes + (f == DAN_FMT_Q6K ? 208 : 0), &hd, 2);
+            if (f == DAN_FMT_Q4K || f == DAN_FMT_Q5K) memcpy(w + b * bytes + 2, &hd, 2);
+        }
+        uint8_t *xq = kv_quantize_x(f, x, (int64_t)COLS * NV);
+        for (int v = 0; v < nvariants; v++) {
+            dan_vk_cur = variants[v];
+            double best[2] = {1e30, 1e30};
+            for (int pass = 0; pass < 6; pass++) {
+                int rn = pass % 2;
+#ifdef _WIN32
+                _putenv_s("DAN_YADRA_RN", rn ? "1" : "0");
+#else
+                setenv("DAN_YADRA_RN", rn ? "1" : "0", 1);
+#endif
+                double t0 = now();
+                dan_vk_matmul_fmt(f, w, xq, y, ROWS, COLS, NV);
+                double t = now() - t0;
+                if (t < best[rn]) best[rn] = t;
+            }
+            double ops = (double)ROWS * COLS * NV * 1e-9;
+            printf("%-8s пакет %s: строки на векторы %.1f, строка на 4 вектора %.1f млрд умножений/с\n", variants[v]->name,
+                   kv_names[f], ops / best[1], ops / best[0]);
+        }
+        free(w); free(xq);
+    }
+#ifdef _WIN32
+    _putenv_s("DAN_YADRA_RN", "");
+#else
+    unsetenv("DAN_YADRA_RN");
+#endif
+    free(x); free(y);
+}
+
 /* measurements: GFLOP/s by variant; «замер» or «zamer» (Windows) as the first argument */
 static void bench(void) {
     enum { DN = 4096, MV = 4096, MM = 1024 };
@@ -778,6 +895,7 @@ int main(int argc, char **argv) {
     find_variants();
     check_subnormals();
     if (argc > 1 && (strcmp(argv[1], "замер") == 0 || strcmp(argv[1], "zamer") == 0)) { bench(); return 0; }
+    if (argc > 1 && (strcmp(argv[1], "замер_пакет") == 0 || strcmp(argv[1], "zamer_paket") == 0)) { bench_batch(); return 0; }
     test_f16();
     test_dot();
     test_mm();
@@ -789,6 +907,7 @@ int main(int argc, char **argv) {
     test_norms();
     test_sums();
     test_kvanty();
+    test_rn();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", variants[v]->name);
     dan_vk_cur = NULL;
