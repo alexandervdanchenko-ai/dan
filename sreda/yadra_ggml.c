@@ -31,6 +31,9 @@ void dequantize_row_q6_K(const void *x, float *y, int64_t k);
 void dequantize_row_q5_0(const void *x, float *y, int64_t k);
 void dequantize_row_q4_1(const void *x, float *y, int64_t k);
 void dequantize_row_q5_1(const void *x, float *y, int64_t k);
+void dequantize_row_q2_K(const void *x, float *y, int64_t k);
+void dequantize_row_q3_K(const void *x, float *y, int64_t k);
+void dequantize_row_iq4_xs(const void *x, float *y, int64_t k);
 void quantize_row_q8_K_ref(const float *x, void *y, int64_t k);
 
 /* what ggml-quants.c asks from the rest of ggml */
@@ -67,15 +70,33 @@ static void deq_dan(int fmt, const uint8_t *in, float *out, int64_t blocks) {
     }
 }
 
+/* Q2_K, Q3_K, IQ4_XS: номера 0..2 списка etalon_kvant2 */
+static void deq2_ggml(int fmt, const uint8_t *in, float *out, int64_t blocks) {
+    int64_t k = blocks * 256;
+    switch (fmt) {
+    case 0: dequantize_row_q2_K(in, out, k); break;
+    case 1: dequantize_row_q3_K(in, out, k); break;
+    default: dequantize_row_iq4_xs(in, out, k); break;
+    }
+}
+static void deq2_dan(int fmt, const uint8_t *in, float *out, int64_t blocks) {
+    dan_vk_fmt_dequantize(DAN_FMT_Q2K + fmt, in, out, blocks);
+}
+
 int main(int argc, char **argv) {
     static const char *const names[ETALON_KVANT_FORMATS] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q4_1", "Q5_1"};
     int failures = 0;
-    uint64_t h[ETALON_KVANT_FORMATS];
+    static const char *const names2[ETALON_KVANT2_FORMATS] = {"Q2_K", "Q3_K", "IQ4_XS"};
+    uint64_t h[ETALON_KVANT_FORMATS], h2[ETALON_KVANT2_FORMATS];
     etalon_kvant_hashes(deq_ggml, h);
+    etalon_kvant2_hashes(deq2_ggml, h2);
     if (argc > 1 && (strcmp(argv[1], "печать") == 0 || strcmp(argv[1], "pechat") == 0)) {
         printf("static const uint64_t etalon_kvanty_ggml[ETALON_KVANT_FORMATS] = {");
         for (int f = 0; f < ETALON_KVANT_FORMATS; f++)
             printf("%s0x%016llxull", f ? (f % 4 ? ", " : ",\n    ") : "", (unsigned long long)h[f]);
+        printf("};\n");
+        printf("static const uint64_t etalon_kvanty2_ggml[ETALON_KVANT2_FORMATS] = {");
+        for (int f = 0; f < ETALON_KVANT2_FORMATS; f++) printf("%s0x%016llxull", f ? ", " : "", (unsigned long long)h2[f]);
         printf("};\n");
         return 0;
     }
@@ -84,6 +105,12 @@ int main(int argc, char **argv) {
             failures++;
             printf("ошибка: хеш %s у ggml %016llx, а записан %016llx\n", names[f], (unsigned long long)h[f],
                    (unsigned long long)etalon_kvanty_ggml[f]);
+        }
+    for (int f = 0; f < ETALON_KVANT2_FORMATS; f++)
+        if (h2[f] != etalon_kvanty2_ggml[f]) {
+            failures++;
+            printf("ошибка: хеш %s у ggml %016llx, а записан %016llx\n", names2[f], (unsigned long long)h2[f],
+                   (unsigned long long)etalon_kvanty2_ggml[f]);
         }
     /* many random blocks: the same bits */
     enum { B = 512 };
@@ -102,6 +129,23 @@ int main(int argc, char **argv) {
                 for (int64_t i = 0; i < n; i++)
                     if (memcmp(&a[i], &b[i], 4) != 0) {
                         printf("ошибка: %s, семя %llu, число %lld: ggml %.9g, Дан %.9g\n", names[f], (unsigned long long)seed,
+                               (long long)i, (double)a[i], (double)b[i]);
+                        break;
+                    }
+            }
+        }
+    for (int f = 0; f < ETALON_KVANT2_FORMATS; f++)
+        for (uint64_t seed = 1; seed <= 200; seed++) {
+            etalon_kvant2_blocks(f, in, B, seed * 7919 + 100 + (uint64_t)f);
+            deq2_ggml(f, in, a, B);
+            deq2_dan(f, in, b, B);
+            int64_t n = (int64_t)B * 256;
+            checked += B;
+            if (memcmp(a, b, (size_t)n * 4) != 0) {
+                failures++;
+                for (int64_t i = 0; i < n; i++)
+                    if (memcmp(&a[i], &b[i], 4) != 0) {
+                        printf("ошибка: %s, семя %llu, число %lld: ggml %.9g, Дан %.9g\n", names2[f], (unsigned long long)seed,
                                (long long)i, (double)a[i], (double)b[i]);
                         break;
                     }
