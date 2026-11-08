@@ -107,6 +107,9 @@ import re
     (["сам/дан.dan", "сам/песочница.dan", "сам/сервер.dan", "сам/обновление.dan", "сам/страницы.dan",
       "сам/подсказки.dan", "сам/создать_страницы.py", "сам/создать_подсказки.py", "sreda/sistema.c",
       "sam_kompilyator.py"], ["test_odin_kompilyator"]),
+    # номер версии в документах и команды установки README (сценарий proverka_vypuska.yml)
+    (["versiya.py", "выпуски/*", "README.md", "spec.md", "справочник.md", "SECURITY.md", "ROADMAP.md", "CHANGELOG.md",
+      "поставка/проверить_выпуск.py"], ["test_dokumenty_versii"]),
     (["создать_llms.py", "llms.txt", "llms-full.txt"], ["test_llms"]),
     (["сам/создать_*.py", "пересоздать.py"], ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды",
                                                "test_llms", "test_testy_svyazi"]),
