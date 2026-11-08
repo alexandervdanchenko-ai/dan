@@ -2424,8 +2424,35 @@ DAN_VK_AVX2 static inline void dan_vk_rn_iq4xs_avx2(const uint8_t *const *wb, co
 }
 DAN_VK_RNK_X86(dan_vk_rn_iq4xs_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_iq4xs_avx2)
 
+/* Q8_0 на AVX2: числа единиц q + 128 переполнили бы 16-битные суммы пары, поэтому, как у
+   IQ4_XS, |q| (у -128 - 128 без знака) на y со знаком q, пара не больше 2 * 128 * 127, и
+   сразу в 32 бита; DAN_VK_RNB_X86 вычитает из суммы сдвиг 128 * сумма блока вектора, поэтому
+   он прибавляется здесь (S = сумма (q + 128) y, та же, что у VNNI) */
+DAN_VK_AVX2 static inline void dan_vk_rn_q80_avx2(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *S) {
+    const __m256i x80 = _mm256_set1_epi8((char)0x80), one = _mm256_set1_epi16(1);
+    __m256i acc[DAN_VK_RN_R_AVX2][DAN_VK_RN_V];
+    for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) acc[r][k] = DAN_VK_LD(xb[k] + DAN_VK_RN_SC);
+    DAN_VK_ROLLED
+    for (int i = 0; i < 8; i++) {
+        __m256i sv[DAN_VK_RN_R_AVX2], av[DAN_VK_RN_R_AVX2];
+        for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) {
+            sv[r] = _mm256_xor_si256(DAN_VK_LD(wb[r] + 32 * i), x80);
+            av[r] = _mm256_abs_epi8(sv[r]);
+        }
+        for (int k = 0; k < DAN_VK_RN_V; k++) {
+            __m256i yv = DAN_VK_LD(xb[k] + 32 * i);
+            for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+                acc[r][k] = _mm256_add_epi32(acc[r][k], _mm256_madd_epi16(_mm256_maddubs_epi16(av[r], _mm256_sign_epi8(yv, sv[r])), one));
+        }
+    }
+    for (int r = 0; r < DAN_VK_RN_R_AVX2; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) S[r * DAN_VK_RN_V + k] = acc[r][k];
+}
+DAN_VK_RNB_X86(dan_vk_rn_q80_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, dan_vk_rn_q80_avx2)
+
 #define DAN_VK_RN_AVX2_TAIL , DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
-    {dan_vk_rn_q40_avx2f, dan_vk_rn_q4k_avx2f, dan_vk_rn_q5k_avx2f, dan_vk_rn_q6k_avx2f, dan_vk_rn_q50_avx2f, NULL, NULL, NULL, \
+    {dan_vk_rn_q40_avx2f, dan_vk_rn_q4k_avx2f, dan_vk_rn_q5k_avx2f, dan_vk_rn_q6k_avx2f, dan_vk_rn_q50_avx2f, NULL, NULL, dan_vk_rn_q80_avx2f, \
      dan_vk_rn_q2k_avx2f, dan_vk_rn_q3k_avx2f, dan_vk_rn_iq4xs_avx2f}
 #define DAN_VK_RN_VNNI_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_b32_vnni_f, dan_vk_rn_q4k_vnni, dan_vk_rn_q4k_vnni, dan_vk_rn_q6k_vnni_f, dan_vk_rn_b32_vnni_f, NULL, NULL, dan_vk_rn_b32_vnni_f, \
