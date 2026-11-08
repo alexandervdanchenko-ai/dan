@@ -232,10 +232,15 @@ jobs:
 
   ustanovka:
     name: Установка в Windows по инструкции
+    needs: llama
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-windows-x64
+          path: llama-vypusk
       - name: Установка (Windows PowerShell, как в README)
         # в шагах PowerShell 5.1 только латиница: служебный файл шага он читает без учёта UTF-8
         shell: powershell
@@ -267,6 +272,38 @@ jobs:
           subprocess.run([sys.executable, "dan.py", "собрать", os.path.join("примеры", "факториал.dan")],
                          cwd=папка, check=True)
           subprocess.run([os.path.join(папка, "примеры", "факториал.exe")], cwd=папка, check=True)
+      - name: Библиотека llama.cpp этой версии
+        # сценарий установки берёт её из выпуска; у ещё не выпущенной версии выпуска нет, поэтому
+        # кладётся та же библиотека из задания «Библиотека llama.cpp» в папку данных пользователя
+        shell: python
+        run: |
+          import glob, os, shutil, zipfile
+          папка = os.path.join(os.environ["LOCALAPPDATA"], "Dan", "llama")
+          shutil.rmtree(папка, ignore_errors=True)
+          with zipfile.ZipFile(glob.glob(os.path.join("llama-vypusk", "llama-*-windows-x64.zip"))[0]) as з:
+              з.extractall(папка)
+          print(sorted(os.listdir(папка)))
+      - name: Установленный Дан собирает программы новых версий и программы каталога
+        # компилятор на Дане из семени (semya\dan.exe) в папке, куда сценарий установки загрузил проект
+        # (ветка main) и где он собрал этот компилятор; проверка - из этого запроса: плотные
+        # массивы, векторные ядра, «параллельно для», модуль «модели» на крошечной модели GGUF,
+        # «dan модели проверить», все программы и сообщения об ошибках каталога
+        shell: python
+        env:
+          DAN_FOLDER: ${{ runner.temp }}\проекты\Дан
+          DAN_HOME: ${{ runner.temp }}\проекты\Дан
+          PYTHONUTF8: "1"
+        run: |
+          import os, subprocess, sys
+          папка = os.environ["DAN_FOLDER"]
+          р = subprocess.run([sys.executable, os.path.join("поставка", "проверить.py"),
+                              os.path.join(папка, "semya", "dan.exe"), "--без-поставки"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+          print(р.stdout, р.stderr)
+          if р.returncode:
+              текст = (р.stdout + р.stderr)[-8000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print("::error title=Проверка установки::" + текст)
+          sys.exit(р.returncode)
 
   llama:
     # библиотека llama.cpp для модуля «модели» на четырёх системах (из кэша, если версия не менялась)
@@ -329,7 +366,7 @@ jobs:
     name: Поставка для Windows (установщик без Python)
     needs: llama
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       PYTHONUTF8: "1"
     steps:
@@ -346,6 +383,8 @@ jobs:
         shell: bash
         run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
       - name: Установка без окон и проверка установленного Дана
+        # проверить.py: программы каталога, программы с возможностями 1.5 и новее (поставка/программы),
+        # модель GGUF и «dan модели проверить» - установленным dan.exe без Python и компилятора C в PATH
         shell: python
         run: |
           import glob, os, subprocess, sys, winreg
