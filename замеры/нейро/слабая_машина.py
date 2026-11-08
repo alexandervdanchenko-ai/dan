@@ -1,0 +1,183 @@
+"""Замер на слабой машине: движок «нейро» (библиотека/нейро.dan) и llama.cpp в одних и тех же пределах -
+4 ядра и 4 ГБ памяти (ROADMAP.md, главная цель: модели на минимальном железе).
+
+    python замеры/нейро/слабая_машина.py папка_llama дан модель.gguf [модель.gguf ...] [--ядер=4] [--память=4G]
+                                         [--токенов=32] [--итог=файл.md] [--без_пределов]
+
+Каждый запуск идёт в своей группе systemd (systemd-run --scope под sudo: MemoryMax, без подкачки,
+AllowedCPUs - первые ядра, и taskset); «--без_пределов» - без них (проверка сценария). Для каждой модели и каждого движка:
+  - скорость порождения (токенов в секунду, без обработки запроса) - медиана трёх запусков;
+  - скорость чтения длинного запроса (токенов в секунду, пакетом);
+  - пиковая память группы (memory.peak: веса, отображённые в память, кэш ключей и значений, рабочие
+    массивы) и наибольший размер в памяти процесса (Maximum resident set size), доля предела;
+  - жадный ответ: сколько первых токенов совпало у Дана и llama.cpp (кэш f16 у обоих по умолчанию).
+Контекст обоих движков - 2048 токенов (SVERKA_KONTEKST). Если запуск не уложился в предел (убит при
+нехватке памяти), в таблице - «не влезла».
+"""
+
+import os
+import statistics
+import subprocess
+import sys
+import tempfile
+
+ЗДЕСЬ = os.path.dirname(os.path.abspath(__file__))
+ЗАПРОС = "<|im_start|>user\nНапиши короткое стихотворение о море.<|im_end|>\n<|im_start|>assistant\n"
+ЗАПРОС_MISTRAL = "[INST] Напиши короткое стихотворение о море. [/INST]"
+ДЛИННЫЙ = ("The quick brown fox jumps over the lazy dog, and the dog does not mind at all. " * 6
+           + "Москва - столица России, а Париж - столица Франции; обе стоят на реках. " * 6)
+
+
+def разобрать(текст):
+    итог = {}
+    for строка in текст.splitlines():
+        ключ, _, значение = строка.partition(":")
+        if _:
+            итог.setdefault(ключ.strip(), []).append(значение.strip())
+    return итог
+
+
+def в_мб(текст):
+    """«3.9G», «812.5M», «1024K», «123456» (байты) -> МБ"""
+    т = текст.strip().upper().rstrip("B")
+    множ = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1048576.0}
+    if т and т[-1] in множ:
+        return float(т[:-1]) * множ[т[-1]]
+    return float(т) / 1048576
+
+
+# обёртка внутри группы: запускает программу, затем пишет наибольший RSS детей (КБ) и, если группа своя,
+# memory.peak и oom_kill группы (cgroup v2)
+ОБЁРТКА = """import resource, subprocess, sys
+код = subprocess.call(sys.argv[3:])
+итог = [str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)]
+if sys.argv[2] == "1":
+    г = open("/proc/self/cgroup").read().strip().split(":")[-1]
+    for файл in ("memory.peak", "memory.events"):
+        try:
+            итог.append(open("/sys/fs/cgroup" + г + "/" + файл).read().replace("\\n", " "))
+        except OSError:
+            итог.append("")
+open(sys.argv[1], "w").write("\\n".join(итог))
+sys.exit(код)
+"""
+
+
+def в_пределах(команда, окружение, ядер, память, пределы=True):
+    """Запуск в своей группе systemd с пределами (пределы=ложь - просто так, для проверки сценария):
+    (вывод программы, пик памяти группы МБ, наибольший RSS МБ, убит ли при нехватке памяти)."""
+    папка = tempfile.mkdtemp(prefix="dan_slabaya_")
+    обёртка = os.path.join(папка, "obertka.py")
+    отчёт = os.path.join(папка, "otchet.txt")
+    with open(обёртка, "w", encoding="utf-8") as ф:
+        ф.write(ОБЁРТКА)
+    внутри = [sys.executable, "-I", обёртка, отчёт, "1" if пределы else "0", *команда]
+    if пределы:
+        полная = ["sudo", "systemd-run", "--scope", "--quiet", "-p", "MemoryMax=" + память, "-p", "MemorySwapMax=0",
+                  "-p", "AllowedCPUs=0-%d" % (ядер - 1), "--uid=%d" % os.getuid(), "--gid=%d" % os.getgid(),
+                  "env", *["%s=%s" % (к, з) for к, з in окружение.items()], "taskset", "-c", "0-%d" % (ядер - 1), *внутри]
+        р = subprocess.run(полная, capture_output=True, timeout=7200)
+    else:
+        р = subprocess.run(внутри, capture_output=True, timeout=7200, env={**os.environ, **окружение})
+    вывод = р.stdout.decode("utf-8", "replace")
+    пик, rss, убит = None, None, р.returncode != 0
+    if os.path.exists(отчёт):
+        with open(отчёт, encoding="utf-8") as ф:
+            части = ф.read().split("\n")
+        if части and части[0].isdigit():
+            rss = int(части[0]) / 1024
+        if len(части) > 1 and части[1].strip().isdigit():
+            пик = int(части[1]) / 1048576
+        if len(части) > 2:
+            с = части[2].split()
+            if "oom_kill" in с and с.index("oom_kill") + 1 < len(с):
+                убит = убит or с[с.index("oom_kill") + 1] != "0"
+    if р.returncode != 0:
+        sys.stderr.write(р.stderr.decode("utf-8", "replace")[-2000:])
+    return разобрать(вывод), пик, rss, убит
+
+
+def главная():
+    арг = [а for а in sys.argv[1:] if not а.startswith("--")]
+    ключи = dict(а[2:].split("=", 1) for а in sys.argv[1:] if а.startswith("--") and "=" in а)
+    llama, дан, модели = os.path.abspath(арг[0]), арг[1], [os.path.abspath(м) for м in арг[2:]]
+    ядер = int(ключи.get("ядер", "4"))
+    память = ключи.get("память", "4G")
+    предел_мб = в_мб(память)
+    токенов = int(ключи.get("токенов", "32"))
+    пределы = "--без_пределов" not in sys.argv
+    папка = tempfile.mkdtemp(prefix="dan_slabaya_")
+    сверка = os.path.join(папка, "sverka_llama")
+    subprocess.run(["gcc", "-std=c11", "-O2", os.path.join(ЗДЕСЬ, "сверка_llama.c"), "-o", сверка, "-ldl"], check=True)
+    программа = os.path.join(папка, "dvizhok.dan")
+    with open(os.path.join(ЗДЕСЬ, "движок.dan"), encoding="utf-8") as ф, open(программа, "w", encoding="utf-8") as в:
+        в.write(ф.read())
+    subprocess.run([дан, "собрать", программа], check=True)
+    движок = программа[:-4]
+    файлы = {}
+    for имя, текст in (("chat", ЗАПРОС), ("inst", ЗАПРОС_MISTRAL), ("long", ДЛИННЫЙ)):
+        файлы[имя] = os.path.join(папка, имя + ".txt")
+        with open(файлы[имя], "wb") as ф:
+            ф.write(текст.encode("utf-8"))
+    библ = os.path.join(llama, "libllama.so")
+    общее = {"SVERKA_KONTEKST": "2048"}
+    окр_llama = {**общее, "LD_LIBRARY_PATH": llama}
+    окр_дан = {**общее, "DAN_POTOKI": str(ядер)}
+    if "DAN_HOME" in os.environ:
+        окр_дан["DAN_HOME"] = os.environ["DAN_HOME"]
+    таблица = ["| Модель | Файл, МБ | Движок | Порождение, токенов/с | Запрос, токенов/с | Пик памяти группы, МБ | "
+               "Доля предела | Наиб. RSS, МБ | Жадный ответ, совпало |",
+               "|---|---|---|---|---|---|---|---|---|"]
+    подробно = []
+
+    def ячейка(х, ф="%.1f"):
+        return ф % х if х is not None else "-"
+
+    for модель in модели:
+        имя = os.path.basename(модель)
+        размер = os.path.getsize(модель) / 1048576
+        запрос = файлы["inst"] if "mistral" in имя.lower() else файлы["chat"]
+        print("==", имя, int(размер), "МБ", flush=True)
+        итоги = {}
+        for движ, команда_ответа, команда_запроса, окр in (
+                ("Дан", [движок, модель, запрос, str(токенов)], [движок, модель, файлы["long"], "2"], окр_дан),
+                ("llama.cpp", [сверка, библ, модель, запрос, str(токенов), str(ядер), "f16"],
+                 [сверка, библ, модель, файлы["long"], "2", str(ядер), "f16"], окр_llama)):
+            скорости, пики, rss, ответ, убит = [], [], [], None, False
+            for _ in range(3):
+                в, пик, р, у = в_пределах(команда_ответа, окр, ядер, память, пределы)
+                убит = убит or у or "скорость" not in в
+                if "скорость" in в:
+                    скорости.append(float(в["скорость"][0]))
+                    ответ = в["ответ"][0].split() if "ответ" in в else []
+                пики.append(пик or 0)
+                rss.append(р or 0)
+            в, пик, р, у = в_пределах(команда_запроса, окр, ядер, память, пределы)
+            чтение = float(в["запрос"][0]) if "запрос" in в else None
+            пики.append(пик or 0)
+            rss.append(р or 0)
+            итоги[движ] = (скорости, чтение, max(пики) or None, max(rss) or None, ответ, убит or у)
+            подробно.append(f"{имя} {движ}: скорости {скорости}, запрос {чтение}, пики {пики}, rss {rss}, "
+                            f"убит {убит or у}")
+        о1, о2 = итоги["Дан"][4] or [], итоги["llama.cpp"][4] or []
+        общих = 0
+        while общих < min(len(о1), len(о2)) and о1[общих] == о2[общих]:
+            общих += 1
+        for движ in ("Дан", "llama.cpp"):
+            скорости, чтение, пик, rss, ответ, убит = итоги[движ]
+            нет = "не влезла" if убит and not скорости else None
+            таблица.append(f"| {имя} | {размер:.0f} | {движ} | "
+                           + (нет or ячейка(statistics.median(скорости) if скорости else None)) + " | "
+                           + ячейка(чтение, "%.0f") + " | " + ячейка(пик, "%.0f") + " | "
+                           + (ячейка(пик / предел_мб, "%.2f") if пик else "-") + " | " + ячейка(rss, "%.0f") + " | "
+                           + (f"{общих}/{len(о2)}" if движ == "Дан" else "-") + " |")
+    итог = (f"Предел: {ядер} ядра, {память} памяти (без подкачки), токенов ответа: {токенов}, контекст 2048, кэш f16"
+            + "\n\n" + "\n".join(таблица) + "\n\n```\n" + "\n".join(подробно) + "\n```\n")
+    print(итог)
+    if "итог" in ключи:
+        with open(ключи["итог"], "a", encoding="utf-8") as ф:
+            ф.write("## Слабая машина: Дан и llama.cpp в пределах " + f"{ядер} ядер и {память}\n\n" + итог)
+
+
+if __name__ == "__main__":
+    главная()
