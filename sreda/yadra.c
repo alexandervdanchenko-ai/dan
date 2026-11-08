@@ -1053,13 +1053,40 @@ static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_
 #define DAN_VK_FMA32(a, b, c) vfmaq_f32(c, a, b)
 #define DAN_VK_FMA64(a, b, c) vfmaq_f64(c, a, b)
 
+/* 4 of the 16 vectors of lanes: the products of 16 numbers from offset o.
+   The empty asm ties the next loads to the end of this group: otherwise gcc
+   and clang load all 32 vectors of an iteration at once and keep a part of
+   the lanes on the stack (a store and a load per iteration), and the kernel
+   was slower than plain C (on Neoverse-N2 21 GB/s against 26). The order of
+   the sums does not change. */
+#define DAN_VK_NEON_G4(s0, s1, s2, s3, o) do { \
+    s0 = vaddq_f32(s0, vmulq_f32(vld1q_f32(pa + (o)), vld1q_f32(pb + (o)))); \
+    s1 = vaddq_f32(s1, vmulq_f32(vld1q_f32(pa + (o) + 4), vld1q_f32(pb + (o) + 4))); \
+    s2 = vaddq_f32(s2, vmulq_f32(vld1q_f32(pa + (o) + 8), vld1q_f32(pb + (o) + 8))); \
+    s3 = vaddq_f32(s3, vmulq_f32(vld1q_f32(pa + (o) + 12), vld1q_f32(pb + (o) + 12))); \
+    __asm__("" : "+r"(pa), "+r"(pb), "+w"(s0), "+w"(s1), "+w"(s2), "+w"(s3)); \
+} while (0)
+
+/* 64 lanes of a float dot product over n (a multiple of 64) numbers, from the lanes in s */
+#define DAN_VK_NEON_DOT64(s) do { \
+    float32x4_t s0 = s[0], s1 = s[1], s2 = s[2], s3 = s[3], s4 = s[4], s5 = s[5], s6 = s[6], s7 = s[7]; \
+    float32x4_t s8 = s[8], s9 = s[9], s10 = s[10], s11 = s[11], s12 = s[12], s13 = s[13], s14 = s[14], s15 = s[15]; \
+    const float *pa = a, *pb = b; \
+    for (int64_t k_ = 0; k_ + 64 <= n; k_ += 64, pa += 64, pb += 64) { \
+        DAN_VK_NEON_G4(s0, s1, s2, s3, 0); \
+        DAN_VK_NEON_G4(s4, s5, s6, s7, 16); \
+        DAN_VK_NEON_G4(s8, s9, s10, s11, 32); \
+        DAN_VK_NEON_G4(s12, s13, s14, s15, 48); \
+    } \
+    s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3; s[4] = s4; s[5] = s5; s[6] = s6; s[7] = s7; \
+    s[8] = s8; s[9] = s9; s[10] = s10; s[11] = s11; s[12] = s12; s[13] = s13; s[14] = s14; s[15] = s15; \
+} while (0)
+
 static float dan_vk_dot_f32_neon(const float *a, const float *b, int64_t n) {
     float32x4_t s[16];
     for (int j = 0; j < 16; j++) s[j] = vdupq_n_f32(0.0f);
-    int64_t k = 0;
-    for (; k + 64 <= n; k += 64)
-        for (int j = 0; j < 16; j++)
-            s[j] = vaddq_f32(s[j], vmulq_f32(vld1q_f32(a + k + 4 * j), vld1q_f32(b + k + 4 * j)));
+    DAN_VK_NEON_DOT64(s);
+    int64_t k = n / 64 * 64;
     for (int j = 0; j < 8; j++) s[j] = vaddq_f32(s[j], s[j + 8]);
     for (int j = 0; j < 4; j++) s[j] = vaddq_f32(s[j], s[j + 4]);
     for (int j = 0; j < 2; j++) s[j] = vaddq_f32(s[j], s[j + 2]);
@@ -1242,9 +1269,7 @@ DAN_VK_Q8_DOT_NEON(dan_vk_q8_dot_neon, , dan_vk_q8_part_neon, dan_vk_q8_block_ne
 static void dan_vk_dot32_acc_neon(const float *a, const float *b, int64_t n, float *acc) {
     float32x4_t s[16];
     for (int j = 0; j < 16; j++) s[j] = vld1q_f32(acc + 4 * j);
-    for (int64_t k = 0; k + 64 <= n; k += 64)
-        for (int j = 0; j < 16; j++)
-            s[j] = vaddq_f32(s[j], vmulq_f32(vld1q_f32(a + k + 4 * j), vld1q_f32(b + k + 4 * j)));
+    DAN_VK_NEON_DOT64(s);
     for (int j = 0; j < 16; j++) vst1q_f32(acc + 4 * j, s[j]);
 }
 static void dan_vk_h2f_neon(const uint16_t *h, float *f, int64_t n) {
