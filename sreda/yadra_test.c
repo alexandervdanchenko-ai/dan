@@ -336,7 +336,7 @@ static void test_kvanty(void) {
               (unsigned long long)h2[f]);
     test_q8k();
     enum { MAXB = 33 };
-    static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 33};
+    static const int64_t nb[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 16, 17, 33};
     for (int f = 0; f < DAN_NFMT; f++) {
         int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f];
         uint8_t *w = malloc((size_t)(MAXB * bytes));
