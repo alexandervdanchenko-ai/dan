@@ -1,0 +1,55 @@
+# Проверка выпуска глазами пользователя Linux и macOS (поставка/проверить_выпуск.py): на чистых
+# машинах скачивает файлы со страницы выпуска и сверяет их с SHA256SUMS.txt, выполняет команды
+# установки из README (git clone по метке выпуска, sh semya/sobrat.sh), проверяет «semya/dan
+# --версия», ставит библиотеку llama.cpp командой «semya/dan модели установить» и собирает
+# программы поставка/программы (плотные массивы, «параллельно для», модуль «модели»).
+#
+# Запускается сценарием «Выпуск» после создания страницы выпуска, а также вручную для любой метки:
+#   gh api -X POST repos/<владелец>/dan/actions/workflows/proverka_vypuska.yml/dispatches -f ref=main -f inputs[metka]=v1.6.1
+# или отправкой ветки с названием proverka-vypuska-zapusk... (метка - из versiya.py этой ветки).
+name: Проверка выпуска
+
+on:
+  workflow_call:
+    inputs:
+      metka:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      metka:
+        description: "метка выпуска, например v1.6.1 (пусто - номер из versiya.py)"
+        required: false
+        default: ""
+  push:
+    branches: ["proverka-vypuska-zapusk*"]
+
+permissions:
+  contents: read
+
+jobs:
+  polzovatel:
+    name: Выпуск глазами пользователя (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      # только сценарий проверки, README и gguf_malaya.py; сам Дан загружается командами README
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Скачать, сверить, установить по README, собрать программы
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          METKA: ${{ inputs.metka }}
+          PYTHONUTF8: "1"
+        run: |
+          python поставка/проверить_выпуск.py $METKA --папка="$RUNNER_TEMP/vypusk" | tee itog.txt
+          code=${PIPESTATUS[0]}
+          { echo '```'; tail -40 itog.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $code

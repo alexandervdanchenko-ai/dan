@@ -37,10 +37,10 @@ dan собрать программа.dan
 
 ## Установка в Linux и macOS
 
-Нужны git и компилятор C (gcc или clang). Компилятор Дана собирается из семени одной командой, Python не нужен:
+Нужны git и компилятор C (gcc или clang). Первая команда загружает выпуск 1.6.1, компилятор Дана собирается из семени одной командой, Python не нужен:
 
 ```
-git clone https://github.com/alexandervdanchenko-ai/dan.git
+git clone --branch v1.6.1 --depth 1 https://github.com/alexandervdanchenko-ai/dan.git
 cd dan
 sh semya/sobrat.sh
 semya/dan запустить примеры/факториал.dan
