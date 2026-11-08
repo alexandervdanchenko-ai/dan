@@ -2403,10 +2403,10 @@ DAN_VK_AVX2 static inline void dan_vk_rn_q2k_avx2(const uint8_t *const *wb, cons
         for (int k = 0; k < DAN_VK_RN_V; k++) M[r * DAN_VK_RN_V + k] = _mm256_madd_epi16(mn, bs[k]);
     }
 }
-DAN_VK_RNK_X86(dan_vk_rn_q2k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1, dan_vk_rn_q2k_vnni)
-DAN_VK_RNK_X86(dan_vk_rn_q2k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 1, dan_vk_rn_q2k_avx2)
-DAN_VK_RNK_X86(dan_vk_rn_q3k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_q3k_vnni)
-DAN_VK_RNK_X86(dan_vk_rn_iq4xs_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_iq4xs_vnni)
+DAN_VK_RNK4_X86(dan_vk_rn_q2k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, 1, dan_vk_rn_q2k_vnni)
+DAN_VK_RNK4_X86(dan_vk_rn_q2k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, 1, dan_vk_rn_q2k_avx2)
+DAN_VK_RNK4_X86(dan_vk_rn_q3k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, 0, dan_vk_rn_q3k_vnni)
+DAN_VK_RNK4_X86(dan_vk_rn_iq4xs_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, 0, dan_vk_rn_iq4xs_vnni)
 
 /* Q3_K на AVX2: числа q + 4 не больше 7, 16-битные суммы всех 4 шагов половины не больше
    4 * 2 * 7 * 128 - одно умножение на масштабы на половину (у ядра Q6_K - на 2 шага) */
@@ -2429,7 +2429,7 @@ DAN_VK_AVX2 static inline void dan_vk_rn_q3k_avx2(const uint8_t *const *wb, cons
             T[r * DAN_VK_RN_V + k] = _mm256_sub_epi32(T[r * DAN_VK_RN_V + k], _mm256_madd_epi16(sc, xs[k]));
     }
 }
-DAN_VK_RNK_X86(dan_vk_rn_q3k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_q3k_avx2)
+DAN_VK_RNK4_X86(dan_vk_rn_q3k_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, 0, dan_vk_rn_q3k_avx2)
 
 /* IQ4_XS на AVX2: числа единиц kv + 128 (до 241) не годятся для vpmaddubsw (сумма пары
    переполнила бы 16 бит), поэтому число берётся со знаком (kv = u ^ 0x80): |kv| на y со знаком
@@ -2459,7 +2459,7 @@ DAN_VK_AVX2 static inline void dan_vk_rn_iq4xs_avx2(const uint8_t *const *wb, co
         }
     }
 }
-DAN_VK_RNK_X86(dan_vk_rn_iq4xs_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, DAN_VK_RN_V, 0, dan_vk_rn_iq4xs_avx2)
+DAN_VK_RNK4_X86(dan_vk_rn_iq4xs_avx2f, DAN_VK_AVX2F16, DAN_VK_RN_R_AVX2, 0, dan_vk_rn_iq4xs_avx2)
 
 /* Q8_0 на AVX2: числа единиц q + 128 переполнили бы 16-битные суммы пары, поэтому, как у
    IQ4_XS, |q| (у -128 - 128 без знака) на y со знаком q, пара не больше 2 * 128 * 127, и
