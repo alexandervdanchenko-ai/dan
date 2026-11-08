@@ -67,7 +67,7 @@ import re
     (["sreda/baza.c"], ["test_sqlite", "test_sam.ТестыТаблицСреды"]),
     (["sreda/okna.c", "sreda/okna_veb.c"], ["test_okna", "test_sam.ТестыТаблицСреды"]),
     (["sreda/pdf.c"], ["test_pdf", "test_sam.ТестыТаблицСреды"]),
-    (["sreda/yadra.c", "sreda/yadra_test.c", "sreda/yadra_etalon.h"], ["test_yadra"]),
+    (["sreda/yadra.c", "sreda/yadra_test.c", "sreda/yadra_etalon.h", "sreda/yadra_ggml.c"], ["test_yadra"]),
     # примеры документации с записью, которую разбирает только компилятор на Дане
     (["сам/разбор.dan", "сам/лексер.dan"], ["test_dokumentaciya"]),
     (["yadra.py"], ТАБЛИЦЫ + ["test_yadra"]),

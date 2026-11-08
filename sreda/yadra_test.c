@@ -195,6 +195,151 @@ static void test_q8(void) {
     free(w); free(xv); free(wd); free(xd); free(y1); free(y2); free(wq); free(xq);
 }
 
+/* ---- weights of llama.cpp ---- */
+
+static const char *const kv_names[4] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K"};
+
+static void kv_dequant(int fmt, const uint8_t *in, float *out, int64_t blocks) {
+    switch (fmt) {
+    case 0: dan_vk_q40_dequantize(in, out, blocks); break;
+    case 1: dan_vk_q4k_dequantize(in, out, blocks); break;
+    case 2: dan_vk_q5k_dequantize(in, out, blocks); break;
+    default: dan_vk_q6k_dequantize(in, out, blocks); break;
+    }
+}
+
+/* the vector in 8 bits for the format: bytes of Q8_0 or blocks of Q8_K */
+static void *kv_quantize_x(int fmt, const float *x, int64_t n) {
+    if (fmt == 0) {
+        uint8_t *q = malloc((size_t)(n / 32 * 34) + 1);
+        dan_vk_q8_quantize(x, q, n);
+        return q;
+    }
+    dan_q8k *q = malloc((size_t)(n / 256) * sizeof(dan_q8k) + 1);
+    dan_vk_q8k_quantize(x, q, n);
+    return q;
+}
+static void kv_dequantize_x(int fmt, const void *q, double *x, int64_t n) {
+    if (fmt == 0) {
+        for (int64_t b = 0; b < n / 32; b++) {
+            const uint8_t *o = (const uint8_t *)q + b * 34;
+            for (int i = 0; i < 32; i++) x[b * 32 + i] = (double)dan_vk_half(o) * (int8_t)o[2 + i];
+        }
+        return;
+    }
+    const dan_q8k *k = (const dan_q8k *)q;
+    for (int64_t i = 0; i < n; i++) x[i] = (double)k[i / 256].d * k[i / 256].qs[i % 256];
+}
+
+static uint64_t kv_hash = 14695981039346656037ull;   /* of the results of the matrices: the same for any number of threads */
+
+static void test_q8k(void) {
+    float x[512];
+    dan_q8k q[2];
+    for (int i = 0; i < 512; i++) x[i] = (float)rnd() * (i < 256 ? 1e3f : 1e-3f);
+    x[17] = -2e3f;   /* the greatest by modulus: becomes -127 (as in ggml, the sign goes to the scale) */
+    dan_vk_q8k_quantize(x, q, 512);
+    for (int b = 0; b < 2; b++) {
+        for (int j = 0; j < 16; j++) {
+            int s = 0;
+            for (int i = 0; i < 16; i++) s += q[b].qs[16 * j + i];
+            CHECK(q[b].bsums[j] == s, "Q8_K: сумма части %d", j);
+        }
+        for (int i = 0; i < 256; i++)
+            CHECK(fabsf(q[b].d * q[b].qs[i] - x[256 * b + i]) <= fabsf(q[b].d) * 0.5001f, "Q8_K: число %d", i);
+    }
+    CHECK(q[0].qs[17] == -127 && q[0].d > 0, "Q8_K: наибольшее %d", q[0].qs[17]);
+    for (int i = 0; i < 256; i++) x[i] = i % 3 ? 1e-41f : 0.0f;   /* the scale does not fit a float */
+    for (int i = 256; i < 512; i++) x[i] = 0.0f;
+    dan_vk_q8k_quantize(x, q, 512);
+    for (int b = 0; b < 2; b++) {
+        CHECK(q[b].d == 0.0f, "Q8_K: нулевой блок");
+        for (int i = 0; i < 256; i++) CHECK(q[b].qs[i] == 0, "Q8_K: нулевой блок");
+    }
+}
+
+static void test_kvanty(void) {
+    rng = 88172645463325252ull;   /* the same inputs whatever the tests before took */
+    /* the numbers of the blocks: those of ggml (hashes in sreda/yadra_etalon.h) */
+    uint64_t h[4];
+    etalon_kvant_hashes(kv_dequant, h);
+    for (int f = 0; f < 4; f++)
+        CHECK(h[f] == etalon_kvanty_ggml[f], "%s: числа блоков не те, что даёт ggml (%016llx)", kv_names[f], (unsigned long long)h[f]);
+    test_q8k();
+    enum { MAXB = 33 };
+    static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 33};
+    for (int f = 0; f < 4; f++) {
+        int64_t bytes = etalon_kvant_bytes[f], n = etalon_kvant_n[f];
+        uint8_t *w = malloc((size_t)(MAXB * bytes));
+        float *x = malloc((size_t)(MAXB * n) * 4), *wd = malloc((size_t)(MAXB * n) * 4);
+        double *xd = malloc((size_t)(MAXB * n) * 8);
+        for (int pass = 0; pass < 3; pass++) {
+            etalon_kvant_blocks(f, w, MAXB, 555 + (uint64_t)(10 * f + pass));
+            for (int64_t i = 0; i < MAXB * n; i++) x[i] = (float)(rnd() * (pass == 1 ? 1e4 : 1.0));
+            if (pass == 2) for (int64_t i = 0; i < n; i++) x[i] = 0.0f;   /* a zero block of the vector */
+            void *xq = kv_quantize_x(f, x, MAXB * n);
+            kv_dequant(f, w, wd, MAXB);
+            kv_dequantize_x(f, xq, xd, MAXB * n);
+            for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+                float r = dan_vk_fmt_dot(&dan_vk_plain, f, w, xq, nb[s]);
+                double e = 0, mag = 0;
+                for (int64_t i = 0; i < nb[s] * n; i++) { e += (double)wd[i] * xd[i]; mag += fabs((double)wd[i] * xd[i]); }
+                CHECK(fabs(r - e) <= 1e-5 * mag + 1e-30, "%s, %d блоков: %.9g, а через деквантование %.9g", kv_names[f],
+                      (int)nb[s], r, e);
+                for (int v = 0; v < nvariants; v++)
+                    CHECK(same32(dan_vk_fmt_dot(variants[v], f, w, xq, nb[s]), r), "%s %s, %d блоков", variants[v]->name,
+                          kv_names[f], (int)nb[s]);
+            }
+            free(xq);
+        }
+        free(w); free(x); free(wd); free(xd);
+    }
+    /* matrices on the pool: every variant the bits of C; the results go into
+       kv_hash, which test_yadra.py compares for DAN_POTOKI = 1..8 */
+    int64_t rows = 600, cols = 2304;
+    for (int f = 0; f < 4; f++) {
+        int64_t bytes = etalon_kvant_bytes[f], n = etalon_kvant_n[f], blocks = rows * cols / n;
+        uint8_t *w = malloc((size_t)(blocks * bytes));
+        float *x = malloc((size_t)cols * 4), *y1 = malloc((size_t)rows * 4), *y2 = malloc((size_t)rows * 4);
+        float *wd = malloc((size_t)(rows * cols) * 4);
+        double *xd = malloc((size_t)cols * 8);
+        etalon_kvant_blocks(f, w, blocks, 777 + (uint64_t)f);
+        /* scales of a usual size, so that the rows are compared with a tolerance */
+        for (int64_t b = 0; b < blocks; b++) {
+            uint16_t hd = dan_f32_to_f16((float)(0.001 + 0.01 * fabs(rnd()))), hm = dan_f32_to_f16((float)(0.01 * fabs(rnd())));
+            memcpy(w + b * bytes + (f == 3 ? 208 : 0), &hd, 2);
+            if (f == 1 || f == 2) memcpy(w + b * bytes + 2, &hm, 2);
+        }
+        for (int64_t i = 0; i < cols; i++) x[i] = (float)rnd();
+        void *xq = kv_quantize_x(f, x, cols);
+        kv_dequant(f, w, wd, blocks);
+        kv_dequantize_x(f, xq, xd, cols);
+        dan_vk_cur = &dan_vk_plain;
+        dan_vk_matvec_fmt(f, w, xq, y1, rows, cols);
+        for (int64_t i = 0; i < rows; i++) {
+            double e = 0, mag = 0, e0 = 0;
+            for (int64_t j = 0; j < cols; j++) {
+                e += (double)wd[i * cols + j] * xd[j];
+                mag += fabs((double)wd[i * cols + j] * xd[j]);
+                e0 += (double)wd[i * cols + j] * x[j];
+            }
+            CHECK(fabs(y1[i] - e) <= 1e-5 * mag, "%s матрица, строка %d: %g и %g", kv_names[f], (int)i, y1[i], e);
+            /* and the vector before quantization: the error of 8 bits */
+            CHECK(fabs(y1[i] - e0) <= 0.02 * mag, "%s матрица, строка %d: %g и %g без квантования", kv_names[f], (int)i, y1[i], e0);
+        }
+        for (int v = 0; v < nvariants; v++) {
+            dan_vk_cur = variants[v];
+            dan_vk_matvec_fmt(f, w, xq, y2, rows, cols);
+            CHECK(memcmp(y1, y2, (size_t)rows * 4) == 0, "%s matvec %s", variants[v]->name, kv_names[f]);
+        }
+        kv_hash = etalon_fnv(kv_hash, y1, (size_t)rows * 4);
+        free(xq); free(w); free(x); free(y1); free(y2); free(wd); free(xd);
+    }
+    /* recorded on x86-64 and checked on ARM (qemu): the same on every processor */
+    CHECK(kv_hash == 0x0ac57fdfafdce8d2ull, "матрицы весов llama.cpp: биты не те, что были записаны (%016llx)",
+          (unsigned long long)kv_hash);
+}
+
 static void test_matvec(void) {
     int64_t rows = 517, cols = 300;
     float *w = malloc(rows * cols * 4), *x = malloc(cols * 4), *y1 = malloc(rows * 4), *y2 = malloc(rows * 4);
@@ -437,6 +582,65 @@ static double now(void) {
 
 static volatile float sink;
 
+/* reading of weights from memory: a matrix with rows of 4096 numbers that
+   fills DAN_ZAMER_MB megabytes (1024 by default: more than the caches) by a
+   vector, for every format; GB/s of weights (GB - 10^9 bytes), the best of
+   three passes */
+static void bench_weights(void) {
+    const char *e = getenv("DAN_ZAMER_MB");
+    long mb = e ? strtol(e, NULL, 10) : 0;
+    if (mb <= 0) mb = 1024;
+    size_t total = (size_t)mb << 20;
+    enum { COLS = 4096, NF = 6 };
+    static const char *const fmts[NF] = {"q4_0", "q4k", "q5k", "q6k", "q8_0", "f32"};
+    static const int row_bytes[NF] = {COLS / 32 * 18, COLS / 256 * 144, COLS / 256 * 176, COLS / 256 * 210, COLS / 32 * 34, COLS * 4};
+    uint8_t *buf = malloc(total);
+    float *y = malloc((total / (COLS / 32 * 18) + 1) * 4), x[COLS];
+    if (!buf || !y) { printf("нет памяти для замера весов\n"); free(buf); free(y); return; }
+    uint64_t r = 12345;
+    for (size_t i = 0; i + 8 <= total; i += 8) { r ^= r << 13; r ^= r >> 7; r ^= r << 17; memcpy(buf + i, &r, 8); }
+    for (int i = 0; i < COLS; i++) x[i] = (float)rnd();
+    uint8_t *x8 = malloc(COLS / 32 * 34);
+    dan_q8k *xk = malloc(COLS / 256 * sizeof(dan_q8k));
+    dan_vk_q8_quantize(x, x8, COLS);
+    dan_vk_q8k_quantize(x, xk, COLS);
+    double gbs[8][NF];
+    uint16_t hd = dan_f32_to_f16(0.01f);
+    for (int f = 0; f < NF; f++) {
+        int64_t rows = (int64_t)(total / (size_t)row_bytes[f]);
+        /* scales of a usual size (random halves could be subnormal: slow on some processors) */
+        if (f < 5) {
+            int bb = f == 0 ? 18 : f == 1 ? 144 : f == 2 ? 176 : f == 3 ? 210 : 34;
+            int64_t blocks = rows * row_bytes[f] / bb;
+            for (int64_t b = 0; b < blocks; b++) {
+                memcpy(buf + b * bb + (f == 3 ? 208 : 0), &hd, 2);
+                if (f == 1 || f == 2) memcpy(buf + b * bb + 2, &hd, 2);
+            }
+        } else {
+            for (size_t i = 0; i < total / 4; i++) ((float *)buf)[i] = (float)(i % 1000) * 0.001f - 0.5f;
+        }
+        for (int v = 0; v < nvariants; v++) {
+            dan_vk_cur = variants[v];
+            double best = 1e30;
+            for (int pass = 0; pass < 3; pass++) {
+                double t0 = now();
+                if (f < 4) dan_vk_matvec_fmt(f, buf, f == 0 ? (const void *)x8 : (const void *)xk, y, rows, COLS);
+                else if (f == 4) dan_vk_matvec_q8(buf, x8, y, rows, COLS);
+                else dan_vk_matvec_f32((const float *)buf, x, y, rows, COLS);
+                double t = now() - t0;
+                if (t < best) best = t;
+            }
+            gbs[v][f] = (double)rows * row_bytes[f] / best * 1e-9;
+        }
+    }
+    for (int v = 0; v < nvariants; v++) {
+        printf("%-8s чтение весов (%ld МБ), ГБ/с:", variants[v]->name, mb);
+        for (int f = 0; f < NF; f++) printf(" %s %.1f;", fmts[f], gbs[v][f]);
+        printf("\n");
+    }
+    free(buf); free(y); free(x8); free(xk);
+}
+
 /* measurements: GFLOP/s by variant; «замер» or «zamer» (Windows) as the first argument */
 static void bench(void) {
     enum { DN = 4096, MV = 4096, MM = 1024 };
@@ -481,6 +685,8 @@ static void bench(void) {
                2.0 * MV * MV / t_mv * 1e-9, 4.0 * MV * MV / t_mv * 1e-9, 2.0 * MV * MV / t_q8 * 1e-9,
                34.0 / 32 * MV * MV / t_q8 * 1e-9, 2.0 * MM * MM * MM / t_mm * 1e-9);
     }
+    free(a); free(b); free(w); free(x); free(y); free(A); free(B); free(C); free(wq); free(xq);
+    bench_weights();
 }
 
 /* The bits recorded in the tests are those without flushing subnormal numbers
@@ -513,9 +719,11 @@ int main(int argc, char **argv) {
     test_pool();
     test_norms();
     test_sums();
+    test_kvanty();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", variants[v]->name);
     dan_vk_cur = NULL;
-    printf("; выбран: %s; потоков: %d\n", dan_vk_name(), dan_pool_threads());
+    printf("; выбран: %s; потоков: %d; хеш весов llama.cpp: %016llx\n", dan_vk_name(), dan_pool_threads(),
+           (unsigned long long)kv_hash);
     return failures ? 1 : 0;
 }
