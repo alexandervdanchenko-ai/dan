@@ -76,6 +76,7 @@ import re
     # перенос выражения после знака действия в конце строки
     (["сам/лексер.dan", "сам/формат.dan", "сам/разбор.dan"], ["test_perenos_stroki"]),
     (["сам/проверка.dan", "сам/дан.dan", "сам/сервер.dan", "сам/объяснение.dan", "kody.py"], ["test_pustoy_obrabotchik"]),
+    (["сам/проверка.dan", "kody.py"], ["test_perenos_stroki"]),
     (["сам/дан.dan", "semya/sobrat.sh"], ["test_papka_dana"]),
     # передача значения в вызов под «!» без копии
     (["сам/порождение.dan"], ["test_rezultat_bez_kopii"]),
