@@ -67,7 +67,7 @@ class ТестыВыполнения(unittest.TestCase):
             finally:
                 if п.poll() is None:
                     п.kill()
-            self.assertEqual(вывод_.decode(), "да\n")
+            self.assertEqual(вывод_.decode().replace("\r\n", "\n"), "да\n")      # в Windows перевод строки - \r\n
 
 
 if __name__ == "__main__":
