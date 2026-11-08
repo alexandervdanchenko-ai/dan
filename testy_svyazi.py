@@ -73,6 +73,9 @@ import re
     (["yadra.py"], ТАБЛИЦЫ + ["test_yadra"]),
     # локальные языковые модели через llama.cpp (модуль «модели»)
     (["modeli.py"], ТАБЛИЦЫ + ["test_modeli"]),
+    # вывод без перевода строки («напечатать»)
+    (["vyvod.py"], ТАБЛИЦЫ + ["test_vyvod"]),
+    (["сам/порождение.dan", "сам/проверка.dan"], ["test_vyvod"]),
     (["sreda/modeli.c", "gguf_malaya.py", "сам/порождение.dan", "сам/дан.dan"], ["test_modeli"]),
     # движок «нейро» на Дане и его сверка с llama.cpp
     (["gguf_malaya.py", "замеры/нейро/*", "sreda/yadra.c", "sreda/massivy.c"], ["test_neyro"]),
