@@ -46,6 +46,7 @@
 #endif
 #if !defined(_WIN32) && !defined(__wasi__)
 #include <pthread.h>
+#include <sched.h>
 #endif
 #include <stdatomic.h>
 
@@ -1643,12 +1644,39 @@ static struct {
     dan_pool_mx busy;   /* held by the thread that runs a job */
     dan_pool_mx mx;
     dan_pool_cv start, done;
-    uint64_t generation;
-    int left;           /* parts not finished */
+    _Atomic uint64_t generation;  /* a new job: written under mx (release), read by spinning workers */
+    _Atomic int left;   /* parts not finished */
+    int sleeping;       /* workers waiting on «start» (under mx) */
     int64_t n;
     dan_pool_fn fn;
     void *ctx;
 } dan_pool;
+
+/* A worker that finished its part, and the thread that waits for the parts,
+   first wait actively for a short while (the next job of a model layer usually
+   comes in microseconds) and only then sleep on the condition variable: waking
+   a sleeping thread costs tens of microseconds per job. The active wait is
+   bounded (DAN_POOL_SPIN polls: pause instructions, then giving the processor
+   to other threads), so idle threads go to sleep, and there is none when the
+   pool has more threads than processors. It does not change what a job computes. */
+#define DAN_POOL_SPIN 2048
+#define DAN_POOL_SPIN_PAUSE 256
+static int dan_pool_spin;   /* polls before sleeping: DAN_POOL_SPIN, or 0 if threads > processors */
+static inline void dan_pool_relax(int i) {
+    if (i >= DAN_POOL_SPIN_PAUSE && i % 16 == 15) {
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+        return;
+    }
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#endif
+}
 
 static int dan_pool_cpus(void) {
 #ifdef _WIN32
@@ -1686,14 +1714,27 @@ static void *dan_pool_worker(void *arg)
     int part = (int)(intptr_t)arg;
     uint64_t seen = 0;
     for (;;) {
-        dan_pool_lock(&dan_pool.mx);
-        while (dan_pool.generation == seen) dan_pool_wait(&dan_pool.start, &dan_pool.mx);
-        seen = dan_pool.generation;
-        dan_pool_unlock(&dan_pool.mx);
+        uint64_t g = atomic_load_explicit(&dan_pool.generation, memory_order_acquire);
+        for (int i = 0; g == seen && i < dan_pool_spin; i++) {
+            dan_pool_relax(i);
+            g = atomic_load_explicit(&dan_pool.generation, memory_order_acquire);
+        }
+        if (g == seen) {
+            dan_pool_lock(&dan_pool.mx);
+            dan_pool.sleeping++;
+            while ((g = atomic_load_explicit(&dan_pool.generation, memory_order_acquire)) == seen)
+                dan_pool_wait(&dan_pool.start, &dan_pool.mx);
+            dan_pool.sleeping--;
+            dan_pool_unlock(&dan_pool.mx);
+        }
+        seen = g;
         dan_pool_part(part);
-        dan_pool_lock(&dan_pool.mx);
-        if (--dan_pool.left == 0) dan_pool_wake_all(&dan_pool.done);
-        dan_pool_unlock(&dan_pool.mx);
+        if (atomic_fetch_sub_explicit(&dan_pool.left, 1, memory_order_acq_rel) == 1) {
+            /* the last part: wake the waiting thread if it sleeps (under mx, so the wake is not lost) */
+            dan_pool_lock(&dan_pool.mx);
+            dan_pool_wake_all(&dan_pool.done);
+            dan_pool_unlock(&dan_pool.mx);
+        }
     }
 #ifdef _WIN32
     return 0;
@@ -1711,6 +1752,7 @@ static void dan_pool_start(void) {
         if (v >= 1) t = (int)v;       /* set explicitly: exactly N threads, even above the core count */
     }
     if (t > DAN_POOL_MAX) t = DAN_POOL_MAX;
+    dan_pool_spin = t <= dan_pool_cpus() ? DAN_POOL_SPIN : 0;
     dan_pool_mx_init(&dan_pool.mx);
     dan_pool_cv_init(&dan_pool.start);
     dan_pool_cv_init(&dan_pool.done);
@@ -1770,18 +1812,23 @@ static void dan_pool_run(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx)
         dan_pool_inside = 0;
         return;
     }
-    dan_pool_lock(&dan_pool.mx);
     dan_pool.n = n;
     dan_pool.fn = fn;
     dan_pool.ctx = ctx;
-    dan_pool.left = t - 1;
-    dan_pool.generation++;
-    dan_pool_wake_all(&dan_pool.start);
+    atomic_store_explicit(&dan_pool.left, t - 1, memory_order_relaxed);
+    dan_pool_lock(&dan_pool.mx);
+    /* release: n, fn, ctx and left are seen by a worker that sees the new generation */
+    atomic_fetch_add_explicit(&dan_pool.generation, 1, memory_order_release);
+    if (dan_pool.sleeping > 0) dan_pool_wake_all(&dan_pool.start);
     dan_pool_unlock(&dan_pool.mx);
     dan_pool_part(0);
-    dan_pool_lock(&dan_pool.mx);
-    while (dan_pool.left > 0) dan_pool_wait(&dan_pool.done, &dan_pool.mx);
-    dan_pool_unlock(&dan_pool.mx);
+    for (int i = 0; atomic_load_explicit(&dan_pool.left, memory_order_acquire) > 0 && i < dan_pool_spin; i++)
+        dan_pool_relax(i);
+    if (atomic_load_explicit(&dan_pool.left, memory_order_acquire) > 0) {
+        dan_pool_lock(&dan_pool.mx);
+        while (atomic_load_explicit(&dan_pool.left, memory_order_acquire) > 0) dan_pool_wait(&dan_pool.done, &dan_pool.mx);
+        dan_pool_unlock(&dan_pool.mx);
+    }
     dan_pool_unlock(&dan_pool.busy);
 }
 
