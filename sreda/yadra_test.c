@@ -732,6 +732,68 @@ static void few_parts(void *ctx, int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) dan_pool_run(1000, 1, check_inside, NULL);   /* inside: one whole call */
 }
 
+/* rows of floats by several vectors (матвеки): the bits of dot_f32 of each
+   row and vector in every variant (and with DAN_YADRA_STROKI=0); a matrix of
+   a few rows by a matrix (матмат of the weights of a group of heads by the
+   values): the bits of plain C */
+static uint64_t rng4 = 1618033988749894ull;
+static double rnd4(void) {
+    rng4 ^= rng4 << 13; rng4 ^= rng4 >> 7; rng4 ^= rng4 << 17;
+    return (double)(rng4 >> 11) / 9007199254740992.0 * 2.0 - 1.0;
+}
+
+static void test_stroki(void) {
+    static const int64_t colss[] = {1, 7, 63, 64, 65, 128, 130, 200};
+    static const int64_t nvs[] = {1, 2, 3, 4, 5, 7, 8, 9, 16, 17};
+    static const int64_t rowss[] = {1, 5, 33};
+    for (size_t ci = 0; ci < sizeof colss / sizeof *colss; ci++)
+        for (size_t ri = 0; ri < sizeof rowss / sizeof *rowss; ri++)
+            for (size_t ni = 0; ni < sizeof nvs / sizeof *nvs; ni++) {
+                int64_t cols = colss[ci], rows = rowss[ri], nv = nvs[ni];
+                float *w = malloc((size_t)(rows * cols) * 4), *x = malloc((size_t)(nv * cols) * 4);
+                float *y = malloc((size_t)(rows * nv) * 4), *e = malloc((size_t)(rows * nv) * 4);
+                for (int64_t i = 0; i < rows * cols; i++) w[i] = (float)(rnd4() * (i % 5 == 0 ? 1e3 : 1.0));
+                for (int64_t i = 0; i < nv * cols; i++) x[i] = (float)rnd4();
+                /* a row of zeros by a vector of negative numbers: the sum of -0 products */
+                for (int64_t i = 0; i < cols; i++) { w[i] = 0.0f; x[i] = -1.0f - (float)i; }
+                for (int64_t v = 0; v < nv; v++)
+                    for (int64_t i = 0; i < rows; i++) e[v * rows + i] = dan_vk_dot_f32_c(w + i * cols, x + v * cols, cols);
+                for (int v = 0; v < nvariants; v++)
+                    for (int off = 0; off < 2; off++) {
+                        dan_vk_stroki = !off;   /* as DAN_YADRA_STROKI=0 */
+                        dan_vk_cur = variants[v];
+                        memset(y, 0xff, (size_t)(rows * nv) * 4);
+                        dan_vk_rows_f32(w, x, y, rows, cols, nv);
+                        CHECK(memcmp(y, e, (size_t)(rows * nv) * 4) == 0, "%s матвеки %lldx%lld на %lld векторов%s", labels[v],
+                              (long long)rows, (long long)cols, (long long)nv, off ? " (DAN_YADRA_STROKI=0)" : "");
+                    }
+                free(w); free(x); free(y); free(e);
+            }
+    dan_vk_stroki = 1;
+    static const int64_t ns[] = {1, 15, 16, 17, 64, 100, 128, 130};
+    static const int64_t ks[] = {1, 2, 37, 300};
+    for (int64_t m = 1; m <= DAN_VK_FEW + 1; m++)
+        for (size_t ni = 0; ni < sizeof ns / sizeof *ns; ni++)
+            for (size_t ki = 0; ki < sizeof ks / sizeof *ks; ki++) {
+                int64_t n = ns[ni], k = ks[ki];
+                float *A = malloc((size_t)(m * k) * 4), *B = malloc((size_t)(k * n) * 4);
+                float *C = malloc((size_t)(m * n) * 4), *R = malloc((size_t)(m * n) * 4);
+                for (int64_t i = 0; i < m * k; i++) A[i] = (float)fabs(rnd4());
+                for (int64_t i = 0; i < k * n; i++) B[i] = (float)(rnd4() * (i % 7 == 0 ? 100.0 : 1.0));
+                A[0] = 0.0f;
+                for (int64_t j = 0; j < n; j++) B[j] = -1.0f;   /* 0 * -1 = -0 first: the sum starts from +0 */
+                dan_vk_mm_f32_c(A, B, R, m, n, k, 0, n);
+                for (int v = 0; v < nvariants; v++) {
+                    dan_vk_cur = variants[v];
+                    memset(C, 0xff, (size_t)(m * n) * 4);
+                    dan_vk_matmat_f32(A, B, C, m, n, k);
+                    CHECK(memcmp(C, R, (size_t)(m * n) * 4) == 0, "%s матмат %lld строк x %lld x %lld", labels[v], (long long)m,
+                          (long long)n, (long long)k);
+                }
+                free(A); free(B); free(C); free(R);
+            }
+}
+
 static void test_pool(void) {
     static const int64_t sizes[] = {1, 2, 3, 17, 1000, 100003};
     marks = calloc(100003, sizeof(int64_t));
@@ -1111,6 +1173,7 @@ int main(int argc, char **argv) {
     test_rn();
     test_mnogo();
     test_malye();
+    test_stroki();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;

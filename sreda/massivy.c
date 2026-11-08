@@ -297,15 +297,19 @@ static dan_arr *dan_arr_copy(const dan_arr *a) {
 
 /* the place *pp is about to change the array: if the array is held elsewhere too,
    or its elements are not its own, the place gets its own copy */
-static dan_arr *dan_arr_mut(dan_arr **pp) {
+static dan_arr *dan_arr_mut_copy(dan_arr **pp) {
     dan_arr *a = *pp;
-    if (a->h.rc > 1 || a->ro) {
-        dan_arr *r = dan_arr_copy(a);
-        r->h.rc = 1;
-        dan_arr_release(a);
-        *pp = r;
-        return r;
-    }
+    dan_arr *r = dan_arr_copy(a);
+    r->h.rc = 1;
+    dan_arr_release(a);
+    *pp = r;
+    return r;
+}
+/* the check is inlined: a loop that writes the array element by element (м[к] = ...) calls it at
+   every element, and the copy is made at most once */
+static inline dan_arr *dan_arr_mut(dan_arr **pp) {
+    dan_arr *a = *pp;
+    if (a->h.rc > 1 || a->ro) return dan_arr_mut_copy(pp);
     return a;
 }
 
