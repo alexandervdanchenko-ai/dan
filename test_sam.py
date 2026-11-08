@@ -1236,6 +1236,12 @@ class ТестыСамосборки(unittest.TestCase):
                      *sorted(glob.glob(os.path.join(ПАПКА, "каталог", "ошибки", "*.dan")))[:12]]:
             for команда in ("токены", "дерево"):
                 with self.subTest(файл=os.path.basename(путь), команда=команда):
+                    if команда == "дерево" and sam_kompilyator.требует_компилятор_на_дане(прочитать(путь)):
+                        # модуль после заморозки (нейро, модели): дерево строит только компилятор на Дане
+                        код, вывод_, _ = self.дан(self.первая, команда, путь)
+                        self.assertEqual(код, 0, вывод_)
+                        self.assertTrue(вывод_.startswith("Программа\n"))
+                        continue
                     нужно = subprocess.run([sys.executable, os.path.join(ПАПКА, "dan.py"), команда, путь],
                                            capture_output=True, timeout=300, env=self.среда)
                     код, вывод_, _ = self.дан(self.первая, команда, путь)
