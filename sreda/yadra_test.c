@@ -31,6 +31,12 @@ static double rnd2(void) {
     return (double)(rng2 >> 11) / 9007199254740992.0 * 2.0 - 1.0;
 }
 
+static uint64_t rng3 = 3141592653589793ull;   /* for the formats Q2_K, Q3_K, IQ4_XS: the inputs of the recorded hashes stay */
+static double rnd3(void) {
+    rng3 ^= rng3 << 13; rng3 ^= rng3 >> 7; rng3 ^= rng3 << 17;
+    return (double)(rng3 >> 11) / 9007199254740992.0 * 2.0 - 1.0;
+}
+
 static int same32(float a, float b) { return memcmp(&a, &b, 4) == 0; }
 static int same64(double a, double b) { return memcmp(&a, &b, 8) == 0; }
 
@@ -206,7 +212,16 @@ static void test_q8(void) {
 
 /* ---- weights of llama.cpp ---- */
 
-static const char *const kv_names[DAN_NFMT] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q4_1", "Q5_1", "Q8_0"};
+static const char *const kv_names[DAN_NFMT] = {"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q5_0", "Q4_1", "Q5_1", "Q8_0", "Q2_K", "Q3_K",
+                                               "IQ4_XS"};
+
+/* the offsets of d and of dmin (or m; -1 - none) in a block */
+static int kv_doff(int f) { return f == DAN_FMT_Q6K ? 208 : f == DAN_FMT_Q2K ? 80 : f == DAN_FMT_Q3K ? 108 : 0; }
+static int kv_moff(int f) {
+    return f == DAN_FMT_Q4K || f == DAN_FMT_Q5K || f == DAN_FMT_Q41 || f == DAN_FMT_Q51 ? 2 : f == DAN_FMT_Q2K ? 82 : -1;
+}
+/* the numbers of the inputs: the formats after Q6_K take them from rnd2, Q2_K and later from rnd3 */
+static double kv_rnd(int f, int first) { return f >= DAN_FMT_Q2K ? rnd3() : f < 4 && first ? rnd() : rnd2(); }
 
 static void kv_dequant(int fmt, const uint8_t *in, float *out, int64_t blocks) {
     dan_vk_fmt_dequantize(fmt, in, out, blocks);
@@ -215,6 +230,7 @@ static void kv_dequant(int fmt, const uint8_t *in, float *out, int64_t blocks) {
 /* random blocks of the format (Q8_0 - random bytes and a half scale) */
 static void kv_blocks(int fmt, uint8_t *w, int64_t blocks, uint64_t seed) {
     if (fmt < ETALON_KVANT_FORMATS) { etalon_kvant_blocks(fmt, w, blocks, seed); return; }
+    if (fmt >= DAN_FMT_Q2K) { etalon_kvant2_blocks(fmt - DAN_FMT_Q2K, w, blocks, seed); return; }
     etalon_rng = seed;
     for (int64_t i = 0; i < blocks * DAN_Q8_BYTES; i++) {
         etalon_rng ^= etalon_rng << 13; etalon_rng ^= etalon_rng >> 7; etalon_rng ^= etalon_rng << 17;
@@ -246,6 +262,11 @@ static void kv_dequantize_x(int fmt, const void *q, double *x, int64_t n) {
 
 static uint64_t kv_hash = 14695981039346656037ull;   /* of the results of the matrices: the same for any number of threads */
 static uint64_t kv_hash2 = 14695981039346656037ull;
+static uint64_t kv_hash3 = 14695981039346656037ull;   /* Q2_K, Q3_K, IQ4_XS */
+
+static void kv_dequant2(int fmt, const uint8_t *in, float *out, int64_t blocks) {
+    dan_vk_fmt_dequantize(DAN_FMT_Q2K + fmt, in, out, blocks);
+}
 
 static void test_q8k(void) {
     float x[512];
@@ -308,6 +329,11 @@ static void test_kvanty(void) {
     etalon_kvant_hashes(kv_dequant, h);
     for (int f = 0; f < ETALON_KVANT_FORMATS; f++)
         CHECK(h[f] == etalon_kvanty_ggml[f], "%s: числа блоков не те, что даёт ggml (%016llx)", kv_names[f], (unsigned long long)h[f]);
+    uint64_t h2[ETALON_KVANT2_FORMATS];
+    etalon_kvant2_hashes(kv_dequant2, h2);
+    for (int f = 0; f < ETALON_KVANT2_FORMATS; f++)
+        CHECK(h2[f] == etalon_kvanty2_ggml[f], "%s: числа блоков не те, что даёт ggml (%016llx)", kv_names[DAN_FMT_Q2K + f],
+              (unsigned long long)h2[f]);
     test_q8k();
     enum { MAXB = 33 };
     static const int64_t nb[] = {0, 1, 7, 8, 9, 16, 17, 33};
@@ -320,7 +346,7 @@ static void test_kvanty(void) {
             kv_blocks(f, w, MAXB, 555 + (uint64_t)(10 * f + pass));
             /* the formats after Q6_K and the other 3 vectors take numbers not from rnd: the inputs of kv_hash stay */
             for (int64_t i = 0; i < 4 * MAXB * n; i++)
-                x[i] = (float)((f < 4 && i < MAXB * n ? rnd() : rnd2()) * (pass == 1 ? 1e4 : 1.0));
+                x[i] = (float)(kv_rnd(f, i < MAXB * n) * (pass == 1 ? 1e4 : 1.0));
             if (pass == 2) for (int64_t i = 0; i < n; i++) x[i] = 0.0f;   /* a zero block of the vector */
             /* 4 vectors one after another, as the matrix by vectors has them; the first - for the row kernel */
             uint8_t *xq = kv_quantize_x(f, x, 4 * MAXB * n);
@@ -366,12 +392,12 @@ static void test_kvanty(void) {
         kv_blocks(f, w, blocks, 777 + (uint64_t)f);
         /* scales of a usual size, so that the rows are compared with a tolerance */
         for (int64_t b = 0; b < blocks; b++) {
-            double r1 = f < 4 ? rnd() : rnd2(), r2 = f < 4 ? rnd() : rnd2();
+            double r1 = kv_rnd(f, 1), r2 = kv_rnd(f, 1);
             uint16_t hd = dan_f32_to_f16((float)(0.001 + 0.01 * fabs(r1))), hm = dan_f32_to_f16((float)(0.01 * fabs(r2)));
-            memcpy(w + b * bytes + (f == DAN_FMT_Q6K ? 208 : 0), &hd, 2);
-            if (f == DAN_FMT_Q4K || f == DAN_FMT_Q5K || f == DAN_FMT_Q41 || f == DAN_FMT_Q51) memcpy(w + b * bytes + 2, &hm, 2);
+            memcpy(w + b * bytes + kv_doff(f), &hd, 2);
+            if (kv_moff(f) >= 0) memcpy(w + b * bytes + kv_moff(f), &hm, 2);
         }
-        for (int64_t i = 0; i < cols * NV; i++) x[i] = (float)(f < 4 && i < cols ? rnd() : rnd2());
+        for (int64_t i = 0; i < cols * NV; i++) x[i] = (float)kv_rnd(f, i < cols);
         void *xq = kv_quantize_x(f, x, cols);
         kv_dequant(f, w, wd, blocks);
         kv_dequantize_x(f, xq, xd, cols);
@@ -403,7 +429,8 @@ static void test_kvanty(void) {
         kv_matmul(f, w, x, rows, cols, NV, ys);
         kv_matmul(f, w, x, rows, cols, 1, ys);
         if (f < 4) kv_hash = etalon_fnv(kv_hash, y1, (size_t)rows * 4);
-        else kv_hash2 = etalon_fnv(kv_hash2, ys, (size_t)(rows * NV) * 4);
+        else if (f < DAN_FMT_Q2K) kv_hash2 = etalon_fnv(kv_hash2, ys, (size_t)(rows * NV) * 4);
+        else kv_hash3 = etalon_fnv(kv_hash3, ys, (size_t)(rows * NV) * 4);
         free(xq); free(w); free(x); free(y1); free(y2); free(ys); free(wd); free(xd);
     }
     /* recorded on x86-64 and checked on ARM (qemu): the same on every processor */
@@ -411,6 +438,8 @@ static void test_kvanty(void) {
           (unsigned long long)kv_hash);
     CHECK(kv_hash2 == 0x5058fce2fff5086aull, "матрицы весов Q5_0, Q4_1, Q5_1, Q8_0: биты не те, что были записаны (%016llx)",
           (unsigned long long)kv_hash2);
+    CHECK(kv_hash3 == 0xd9118f424316faf7ull, "матрицы весов Q2_K, Q3_K, IQ4_XS: биты не те, что были записаны (%016llx)",
+          (unsigned long long)kv_hash3);
 }
 
 
@@ -429,7 +458,7 @@ static void test_rn(void) {
         uint8_t *xp = malloc((size_t)(VMAX * us));
         float *x = malloc((size_t)(VMAX * MAXB * n) * 4);
         kv_blocks(f, w, RMAX * MAXB, 991 + (uint64_t)f);
-        for (int64_t i = 0; i < VMAX * MAXB * n; i++) x[i] = (float)(rnd2() * (i % 7 == 3 ? 100.0 : 1.0));
+        for (int64_t i = 0; i < VMAX * MAXB * n; i++) x[i] = (float)(kv_rnd(f, 0) * (i % 7 == 3 ? 100.0 : 1.0));
         uint8_t *xq = kv_quantize_x(f, x, VMAX * MAXB * n);
         for (int v = 0; v < nvariants; v++) {
             const dan_vk_table *t = variants[v];
@@ -466,7 +495,7 @@ static void test_rn(void) {
             uint8_t *w = malloc((size_t)(blocks * bytes));
             float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4);
             kv_blocks(f, w, blocks, 4242 + (uint64_t)(f * 10 + nv));
-            for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)rnd2();
+            for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)kv_rnd(f, 0);
             for (int64_t k = 0; k < nv; k++) {
                 void *xk = kv_quantize_x(f, x + k * cols, cols);
                 dan_vk_cur = &dan_vk_plain;
@@ -903,7 +932,8 @@ static void bench_weights(void) {
    «zamer_paket» as the first argument */
 static void bench_batch(void) {
     enum { ROWS = 4096, COLS = 4096, NV = 256 };
-    static const int fmts[] = {DAN_FMT_Q40, DAN_FMT_Q4K, DAN_FMT_Q5K, DAN_FMT_Q6K, DAN_FMT_Q50, DAN_FMT_Q80};
+    static const int fmts[] = {DAN_FMT_Q40, DAN_FMT_Q4K, DAN_FMT_Q5K, DAN_FMT_Q6K, DAN_FMT_Q50, DAN_FMT_Q80,
+                               DAN_FMT_Q2K, DAN_FMT_Q3K, DAN_FMT_IQ4XS};
     float *x = malloc((size_t)COLS * NV * 4), *y = malloc((size_t)ROWS * NV * 4);
     for (int64_t i = 0; i < (int64_t)COLS * NV; i++) x[i] = (float)rnd();
     printf("потоков: %d\n", dan_pool_threads());
@@ -914,8 +944,8 @@ static void bench_batch(void) {
         kv_blocks(f, w, blocks, 31 + (uint64_t)f);
         uint16_t hd = dan_f32_to_f16(0.01f);
         for (int64_t b = 0; b < blocks; b++) {
-            memcpy(w + b * bytes + (f == DAN_FMT_Q6K ? 208 : 0), &hd, 2);
-            if (f == DAN_FMT_Q4K || f == DAN_FMT_Q5K) memcpy(w + b * bytes + 2, &hd, 2);
+            memcpy(w + b * bytes + kv_doff(f), &hd, 2);
+            if (f == DAN_FMT_Q4K || f == DAN_FMT_Q5K || f == DAN_FMT_Q2K) memcpy(w + b * bytes + kv_moff(f), &hd, 2);
         }
         uint8_t *xq = kv_quantize_x(f, x, (int64_t)COLS * NV);
         for (int v = 0; v < nvariants; v++) {
@@ -1084,7 +1114,7 @@ int main(int argc, char **argv) {
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;
-    printf("; выбран: %s; потоков: %d; хеш весов llama.cpp: %016llx %016llx\n", dan_vk_name(), dan_pool_threads(),
-           (unsigned long long)kv_hash, (unsigned long long)kv_hash2);
+    printf("; выбран: %s; потоков: %d; хеш весов llama.cpp: %016llx %016llx %016llx\n", dan_vk_name(), dan_pool_threads(),
+           (unsigned long long)kv_hash, (unsigned long long)kv_hash2, (unsigned long long)kv_hash3);
     return failures ? 1 : 0;
 }

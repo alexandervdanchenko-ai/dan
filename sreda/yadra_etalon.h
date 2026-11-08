@@ -123,3 +123,38 @@ static void etalon_kvant_hashes(etalon_dequant_fn dequant, uint64_t out[ETALON_K
 /* filled in from ggml by sreda/yadra_ggml.c («печать») */
 static const uint64_t etalon_kvanty_ggml[ETALON_KVANT_FORMATS] = {0x31a03d62345957d2ull, 0x7ed0a9ea476c4c1cull, 0x4ed495776db8ec2dull, 0x88762c8b76053e5dull,
     0x572f49526ea26a59ull, 0x0c4f9a73532bcd33ull, 0x67b1256109f26e01ull};
+
+/* Q2_K, Q3_K и IQ4_XS (добавлены позже; блоки и хеши форматов выше не меняются):
+   случайные байты, масштабы в половинной точности как выше (d, у Q2_K и dmin) */
+#define ETALON_KVANT2_FORMATS 3
+static const int etalon_kvant2_bytes[ETALON_KVANT2_FORMATS] = {84, 110, 136};
+static const int etalon_kvant2_d[ETALON_KVANT2_FORMATS] = {80, 108, 0};
+
+static void etalon_kvant2_blocks(int fmt, uint8_t *out, int64_t blocks, uint64_t seed) {
+    etalon_rng = seed;
+    int64_t b = etalon_kvant2_bytes[fmt];
+    for (int64_t i = 0; i < blocks * b; i++) {
+        etalon_rng ^= etalon_rng << 13; etalon_rng ^= etalon_rng >> 7; etalon_rng ^= etalon_rng << 17;
+        out[i] = (uint8_t)(etalon_rng >> 32);
+    }
+    for (int64_t i = 0; i < blocks; i++) {
+        uint8_t *o = out + i * b;
+        uint16_t h = etalon_half();
+        memcpy(o + etalon_kvant2_d[fmt], &h, 2);
+        if (fmt == 0) { h = etalon_half(); memcpy(o + 82, &h, 2); }   /* dmin */
+    }
+}
+
+/* хеши чисел ETALON_KVANT_BLOCKS блоков каждого формата (fmt - номер 0..2 в этом списке) */
+static void etalon_kvant2_hashes(etalon_dequant_fn dequant, uint64_t out[ETALON_KVANT2_FORMATS]) {
+    static uint8_t in[ETALON_KVANT_BLOCKS * 136];
+    static float y[ETALON_KVANT_BLOCKS * 256];
+    for (int f = 0; f < ETALON_KVANT2_FORMATS; f++) {
+        etalon_kvant2_blocks(f, in, ETALON_KVANT_BLOCKS, etalon_kvant_seed + 100 + (uint64_t)f);
+        dequant(f, in, y, ETALON_KVANT_BLOCKS);
+        out[f] = etalon_fnv(14695981039346656037ull, y, (size_t)ETALON_KVANT_BLOCKS * 256 * 4);
+    }
+}
+
+/* из ggml (sreda/yadra_ggml.c «печать»): llama.cpp b12190, gcc -O2 -ffp-contract=off на x86-64 */
+static const uint64_t etalon_kvanty2_ggml[ETALON_KVANT2_FORMATS] = {0xd040577c8cc612a5ull, 0x1a375ffcc516705full, 0x537b97323b4188b8ull};
