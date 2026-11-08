@@ -140,13 +140,12 @@ def добавить_файлы():
         shutil.copy(os.path.join(ЗНАЧКИ, имя), ПАПКА)
     в_html(os.path.join(КОРЕНЬ, "справочник.md"), os.path.join(ПАПКА, "справочник.html"), "Справочник языка Дан")
     в_html(os.path.join(КОРЕНЬ, "spec.md"), os.path.join(ПАПКА, "описание_языка.html"), "Описание языка Дан")
-    # страницы о модулях стандартной библиотеки из их описаний «///»
-    import dokumentaciya
-    модули = []
-    for путь in sorted(glob.glob(os.path.join(КОРЕНЬ, "библиотека", "*.dan"))):
-        with open(путь, encoding="utf-8") as ф:
-            модули.append(dokumentaciya.извлечь(ф.read(), "библиотека/" + os.path.basename(путь)))
-    dokumentaciya.создать(модули, os.path.join(ПАПКА, "документация_библиотеки"))
+    # страницы о модулях стандартной библиотеки из их описаний «///» - командой «документация» dan.exe
+    # поставки: модули, написанные после заморозки (нейро, модели), разбирает только компилятор на Дане
+    dan = os.path.join(ПАПКА, "dan.exe" if os.name == "nt" else "dan")
+    среда = {к: з for к, з in os.environ.items() if к != "DAN_HOME"}
+    subprocess.run([dan, "документация", "библиотека", "--в=" + os.path.join(ПАПКА, "документация_библиотеки")],
+                   check=True, cwd=КОРЕНЬ, env=среда)
 
 
 def добавить_учебник_и_редактор():
