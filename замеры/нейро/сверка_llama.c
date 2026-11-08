@@ -114,6 +114,17 @@ int main(int argc, char **argv) {
 
     void (*log_set)(void (*)(int, const char *, void *), void *) = need("llama_log_set");
     if (!getenv("DAN_LLAMA_LOG")) log_set(quiet, NULL);
+    /* сборка с вариантами для процессора (ggml-cpu-*.so отдельными файлами, как в поставке Дана):
+       варианты загружаются из папки библиотеки, как в sreda/modeli.c */
+    void (*load_from)(const char *) = (void (*)(const char *))dlsym(lib, "ggml_backend_load_all_from_path");
+    void (*load_all)(void) = (void (*)(void))dlsym(lib, "ggml_backend_load_all");
+    char folder[4096];
+    snprintf(folder, sizeof folder, "%s", path);
+    char *cut = strrchr(folder, '/');
+    if (cut) *cut = 0;
+    else snprintf(folder, sizeof folder, ".");
+    if (load_from) load_from(folder);
+    else if (load_all) load_all();
     ((void (*)(void))need("llama_backend_init"))();
     struct model_params mp = ((struct model_params (*)(void))need("llama_model_default_params"))();
     mp.n_gpu_layers = 0;
