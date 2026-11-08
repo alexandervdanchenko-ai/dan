@@ -823,7 +823,7 @@ static void bench_weights(void) {
         }
     }
     for (int v = 0; v < nvariants; v++) {
-        printf("%-8s чтение весов (%ld МБ), ГБ/с:", variants[v]->name, mb);
+        printf("%-10s чтение весов (%ld МБ), ГБ/с:", labels[v], mb);
         for (int f = 0; f < NF; f++) printf(" %s %.1f;", fmts[f], gbs[v][f]);
         printf("\n");
     }
@@ -868,7 +868,7 @@ static void bench_batch(void) {
                 if (t < best[rn]) best[rn] = t;
             }
             double ops = (double)ROWS * COLS * NV * 1e-9;
-            printf("%-8s пакет %s: строки на векторы %.1f, строка на 4 вектора %.1f млрд умножений/с\n", variants[v]->name,
+            printf("%-10s пакет %s: строки на векторы %.1f, строка на 4 вектора %.1f млрд умножений/с\n", labels[v],
                    kv_names[f], ops / best[1], ops / best[0]);
         }
         free(w); free(xq);
@@ -919,9 +919,9 @@ static void bench(void) {
             dan_vk_matmat_f32_fast(A, B, C, MM, MM, MM);
             if (now() - t0 < t_mf) t_mf = now() - t0;
         }
-        printf("%-8s приближённо: матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * MM * MM * MM / t_mf * 1e-9);
-        printf("%-8s скалярное %.1f ГФлопс; матрица на вектор %.1f ГФлопс (%.1f ГБ/с); q8 %.1f ГФлопс (%.1f ГБ/с); "
-               "матрица на матрицу %.1f ГФлопс\n", variants[v]->name, 2.0 * DN * reps / t_dot * 1e-9,
+        printf("%-10s приближённо: матрица на матрицу %.1f ГФлопс\n", labels[v], 2.0 * MM * MM * MM / t_mf * 1e-9);
+        printf("%-10s скалярное %.1f ГФлопс; матрица на вектор %.1f ГФлопс (%.1f ГБ/с); q8 %.1f ГФлопс (%.1f ГБ/с); "
+               "матрица на матрицу %.1f ГФлопс\n", labels[v], 2.0 * DN * reps / t_dot * 1e-9,
                2.0 * MV * MV / t_mv * 1e-9, 4.0 * MV * MV / t_mv * 1e-9, 2.0 * MV * MV / t_q8 * 1e-9,
                34.0 / 32 * MV * MV / t_q8 * 1e-9, 2.0 * MM * MM * MM / t_mm * 1e-9);
     }
