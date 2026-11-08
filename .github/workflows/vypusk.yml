@@ -5,6 +5,8 @@
 # их скачивает «dan модели установить»); создаются метка версии и страница выпуска с файлами
 # для скачивания.
 # Если выпуск уже есть, его описание и файлы обновляются.
+# После создания страницы выпуска задание «Проверка выпуска» (proverka_vypuska.yml) скачивает
+# его файлы на чистых Linux x86-64 и ARM и macOS и ставит Дан ровно по README.
 name: Выпуск
 
 on:
@@ -25,6 +27,8 @@ jobs:
     needs: llama
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      metka: ${{ steps.vypusk.outputs.metka }}
     env:
       PYTHONUTF8: "1"
     steps:
@@ -41,6 +45,7 @@ jobs:
         shell: bash
         run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
       - name: Создать или обновить выпуск
+        id: vypusk
         shell: python
         env:
           GH_TOKEN: ${{ github.token }}
@@ -101,3 +106,12 @@ jobs:
               gh("release", "create", метка, *файлы, "--target", os.environ["GITHUB_SHA"],
                  "--title", "Дан " + версия, "--notes-file", описание, *вид)
           print("выпуск", метка, "готов:", ", ".join(os.path.basename(ф) for ф in файлы))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as фф:
+              фф.write(f"metka={метка}\n")
+
+  proverka:
+    name: Проверка выпуска
+    needs: vypusk
+    uses: ./.github/workflows/proverka_vypuska.yml
+    with:
+      metka: ${{ needs.vypusk.outputs.metka }}
