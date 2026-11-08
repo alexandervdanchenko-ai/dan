@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
     void *model = ((void *(*)(const char *, struct model_params))need("llama_model_load_from_file"))(argv[2], mp);
     if (!model) { fprintf(stderr, "модель не загрузилась\n"); return 3; }
     struct context_params cp = ((struct context_params (*)(void))need("llama_context_default_params"))();
-    cp.n_ctx = 2048;
+    cp.n_ctx = getenv("SVERKA_KONTEKST") ? (uint32_t)atoi(getenv("SVERKA_KONTEKST")) : 2048;   /* контекст: по умолчанию 2048 */
     cp.n_threads = cp.n_threads_batch = threads;
     cp.no_perf = true;
     if (!f16) {

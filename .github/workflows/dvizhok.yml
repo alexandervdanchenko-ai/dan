@@ -8,6 +8,9 @@
 # «скорость памяти / объём весов» по эталону замеры/память. Таблица - в итоге задания;
 # из неё обновляется раздел «Движок на Дане» в замеры/результаты.md.
 #
+# Задание slabaya - замер на слабой машине (ARM, 4 ядра и 4 ГБ, модели в 2-4 бита): ветки
+# dvizhok-zamer-slabaya-... (только оно) и запуск вручную.
+#
 # Запуск вручную:
 #   gh api -X POST repos/<владелец>/dan/actions/workflows/dvizhok.yml/dispatches -f ref=<ветка>
 # или отправкой ветки с названием dvizhok-zamer-... (так замеряется ещё не слитое изменение).
@@ -30,6 +33,7 @@ on:
 jobs:
   dvizhok:
     name: Движок против llama.cpp (Linux ${{ matrix.arch }})
+    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') }}
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +119,7 @@ jobs:
     # без черновика и llama-speculative-simple (если соберётся). Таблица - в итоге задания; из неё
     # обновляется раздел «Спекулятивная генерация» в замеры/результаты.md.
     name: Спекулятивная генерация (Linux x86-64)
+    if: ${{ !startsWith(github.ref_name, 'dvizhok-zamer-slabaya') }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -171,3 +176,73 @@ jobs:
               --токенов="$TOKENOV" --к=1,2,3,4,6,8 --llama="$PWD/llama-chernovik" \
               --llama-черновик="$PWD/llama-chernovik/llama-speculative-simple" --итог="$GITHUB_STEP_SUMMARY"
           done
+
+  slabaya:
+    # Слабая машина (ROADMAP.md, главная цель): ARM, задача ограничена 4 ядрами и 4 ГБ памяти без подкачки
+    # (systemd-run --scope: MemoryMax=4G, MemorySwapMax=0, AllowedCPUs, и taskset). Mistral 7B Instruct v0.2
+    # (Apache 2.0) в Q2_K и Q3_K_M - влезает ли в 4 ГБ вместе с кэшем; Qwen2.5 1.5B Instruct (Apache 2.0) в
+    # Q4_K_M, Q3_K_M и IQ4_XS. Qwen2.5 3B не берётся: её лицензия Qwen Research не открытая. Движок на Дане
+    # против llama.cpp той же версии в тех же пределах: скорость порождения и чтения запроса, пиковая память
+    # группы, доля предела, совпадение жадного ответа. Таблица - в итоге задания; из неё обновляется раздел
+    # «Поток 24В» в замеры/результаты.md.
+    name: Слабая машина - 4 ядра и 4 ГБ (Linux ARM)
+    # только для веток dvizhok-zamer-slabaya* и запуска вручную: замер долгий
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'dvizhok-zamer-slabaya')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: "1"
+      TOKENOV: "32"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Машина
+        run: |
+          echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ, подкачка: $(free -g | awk '/Swap/ {print $2}') ГБ"
+          cpu="$(lscpu | grep -m1 -i 'model name' | sed 's/.*: *//')"
+          echo "процессор: $cpu; cgroup: $(stat -fc %T /sys/fs/cgroup); $(systemctl --version | head -1)"
+          echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
+          echo "cpu=$(echo "$cpu" | tr -c 'A-Za-z0-9' '-')" >> "$GITHUB_ENV"
+      - name: Кэш llama.cpp
+        id: kesh
+        uses: actions/cache@v4
+        with:
+          path: llama-slabaya
+          key: llama-slabaya-${{ env.metka }}-${{ runner.os }}-${{ env.cpu }}-${{ hashFiles('.github/workflows/dvizhok.yml') }}
+      - name: Сборка llama.cpp
+        if: steps.kesh.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 --branch "$metka" https://github.com/ggml-org/llama.cpp llama-src
+          cmake -S llama-src -B llama-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_COMMON=OFF -DLLAMA_CURL=OFF
+          cmake --build llama-build --config Release -j "$(nproc)" --target llama
+          mkdir -p llama-slabaya
+          cp -a llama-build/bin/*.so* llama-slabaya/
+      - name: Модели
+        run: |
+          mkdir -p modeli
+          m=https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2
+          q=https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct
+          curl -sSfL --retry 3 -o modeli/mistral7b-q2k.gguf "$m.Q2_K.gguf"
+          curl -sSfL --retry 3 -o modeli/mistral7b-q3km.gguf "$m.Q3_K_M.gguf"
+          curl -sSfL --retry 3 -o modeli/qwen1.5b-q4km.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+          curl -sSfL --retry 3 -o modeli/qwen1.5b-q3km.gguf "$q-Q3_K_M.gguf" || echo "нет Q3_K_M"
+          curl -sSfL --retry 3 -o modeli/qwen1.5b-iq4xs.gguf "$q-IQ4_XS.gguf" || echo "нет IQ4_XS"
+          ls -la modeli
+      - name: Компилятор из семени
+        run: sh semya/sobrat.sh
+      - name: Ядра Q2_K, Q3_K, IQ4_XS (матрица весов на вектор и на 256 векторов)
+        run: |
+          gcc -std=c11 -O3 -ffp-contract=off -w sreda/yadra_test.c -o yadra_test -lm -pthread
+          ./yadra_test | tail -1
+          DAN_POTOKI=4 ./yadra_test zamer_paket | grep -E "потоков|Q2_K|Q3_K|IQ4_XS|Q4_K" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Замер в пределах 4 ядер и 4 ГБ
+        env:
+          DAN_HOME: ${{ github.workspace }}
+        run: |
+          python замеры/нейро/слабая_машина.py "$PWD/llama-slabaya" semya/dan modeli/*.gguf --ядер=4 --память=4G \
+            --токенов="$TOKENOV" --итог="$GITHUB_STEP_SUMMARY"
