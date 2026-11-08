@@ -339,6 +339,21 @@ static dan_arr *dan_arr_slice(dan_arr *a, int64_t from, int64_t to, int line) {
     return r;
 }
 
+/* м[а..б] inside a step of «параллельно для» for a shared array м: the same
+   elements as dan_arr_slice, but the part does not hold м (no owner), so the
+   counter of м, shared by all steps, is not changed. The check lets such a part
+   go only straight into a vector function, which does not keep it; м itself is
+   held by the program for the whole loop. */
+static dan_arr *dan_arr_borrow(dan_arr *a, int64_t from, int64_t to, int line) {
+    if (from < 0 || from > a->len) dan_index_error(from, a->len, line);
+    if (to < from - 1 || to >= a->len) dan_index_error(to, a->len, line);
+    if ((from * dan_arr_bits[a->kind]) % 8) return dan_arr_slice(a, from, to, line);   /* its own copy */
+    dan_arr *r = dan_arr_head(a->kind, to - from + 1);
+    r->data = a->data + from * dan_arr_bits[a->kind] / 8;
+    r->ro = 1;
+    return r;
+}
+
 static bool dan_arr_eq(const dan_arr *a, const dan_arr *b) {
     if (a->len != b->len) return false;
     bool f = a->kind <= DAN_AF16;
