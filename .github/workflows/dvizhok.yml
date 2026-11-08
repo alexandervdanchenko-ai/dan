@@ -1,0 +1,90 @@
+# Движок «нейро» на настоящих моделях (необязательный сценарий, не входит в проверку):
+# скачивает небольшие модели GGUF с открытой лицензией (TinyLlama 1.1B Chat - Apache 2.0,
+# Qwen2.5 0.5B Instruct - Apache 2.0) в Q8_0 и Q4_K_M, собирает llama.cpp закреплённой
+# версии (modeli.ВЕРСИЯ_LLAMA) и сверяет с ней движок на Дане: токены набора строк, логиты,
+# жадный ответ; печатает скорость движка и llama.cpp при одинаковом числе потоков и предел
+# «скорость памяти / объём весов» по эталону замеры/память. Таблица - в итоге задания;
+# из неё обновляется раздел «Движок на Дане» в замеры/результаты.md.
+#
+# Запуск вручную:
+#   gh api -X POST repos/<владелец>/dan/actions/workflows/dvizhok.yml/dispatches -f ref=<ветка>
+# или отправкой ветки с названием dvizhok-zamer-... (так замеряется ещё не слитое изменение).
+name: Движок на настоящих моделях
+
+on:
+  push:
+    branches: ["dvizhok-zamer*"]
+  workflow_dispatch:
+    inputs:
+      modeli:
+        description: "модели через пробел: tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km"
+        required: false
+        default: "tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km"
+      tokenov:
+        description: "токенов жадного ответа"
+        required: false
+        default: "32"
+
+jobs:
+  dvizhok:
+    name: Движок против llama.cpp (Linux x86-64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      PYTHONUTF8: "1"
+      MODELI: ${{ github.event.inputs.modeli || 'tinyllama-q8 tinyllama-q4km qwen-q8 qwen-q4km' }}
+      TOKENOV: ${{ github.event.inputs.tokenov || '32' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Машина
+        run: |
+          echo "ядер: $(nproc), память: $(free -g | awk '/Mem/ {print $2}') ГБ"
+          grep -m1 "model name" /proc/cpuinfo
+          echo "metka=$(python -c 'import modeli; print(modeli.ВЕРСИЯ_LLAMA)')" >> "$GITHUB_ENV"
+      - name: Кэш llama.cpp
+        id: kesh
+        uses: actions/cache@v4
+        with:
+          path: llama-dvizhok
+          key: llama-dvizhok-${{ env.metka }}-${{ runner.os }}-${{ hashFiles('.github/workflows/dvizhok.yml') }}
+      - name: Сборка llama.cpp
+        if: steps.kesh.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 --branch "$metka" https://github.com/ggml-org/llama.cpp llama-src
+          cmake -S llama-src -B llama-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_COMMON=OFF -DLLAMA_CURL=OFF
+          cmake --build llama-build --config Release -j "$(nproc)" --target llama
+          mkdir -p llama-dvizhok
+          cp -a llama-build/bin/*.so* llama-dvizhok/
+          ls -la llama-dvizhok
+      - name: Модели
+        run: |
+          mkdir -p modeli
+          for m in $MODELI; do
+            case $m in
+              tinyllama-q8) u=https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf ;;
+              tinyllama-q4km) u=https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf ;;
+              qwen-q8) u=https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf ;;
+              qwen-q4km) u=https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf ;;
+              *) echo "неизвестная модель $m"; exit 1 ;;
+            esac
+            curl -sSfL --retry 3 -o "modeli/$m.gguf" "$u"
+            ls -la "modeli/$m.gguf"
+          done
+      - name: Компилятор из семени
+        run: sh semya/sobrat.sh
+      - name: Эталон скорости чтения памяти
+        run: |
+          semya/dan собрать замеры/память/память.dan
+          замеры/память/память 2 1 9 | tee pamyat.txt
+          echo "pamyat=$(grep 'скорость чтения' pamyat.txt | grep -o '[0-9.]*' | head -1)" >> "$GITHUB_ENV"
+      - name: Сверка и скорость
+        env:
+          DAN_HOME: ${{ github.workspace }}
+        run: |
+          python замеры/нейро/сверка.py "$PWD/llama-dvizhok" semya/dan modeli/*.gguf --потоков="$(nproc)" \
+            --токенов="$TOKENOV" --память="$pamyat" --итог="$GITHUB_STEP_SUMMARY"
