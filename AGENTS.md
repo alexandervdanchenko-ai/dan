@@ -66,7 +66,7 @@ gh run list --branch моя-ветка                                     # п�
 gh api -X PUT repos/<владелец>/dan/pulls/<номер>/merge -f merge_method=rebase                   # слить после зелёной проверки
 ```
 
-Если `main` ушёл вперёд, перед слиянием - `git rebase origin/main`, `git push --force-with-lease` и новая проверка.
+Проверка ветки запускается, когда открыт запрос на слияние (на отправку в ветку без запроса её нет), и отменяется следующей отправкой в тот же запрос. Если `main` ушёл вперёд, перед слиянием - `git rebase origin/main`, `git push --force-with-lease` и новая проверка.
 
 Не запускайте тесты, пока меняете файлы той же копии репозитория: результаты будут случайными. Сборку под Windows можно проверить так: `x86_64-w64-mingw32-gcc -std=c11 -Werror=implicit-function-declaration` на коде из `python dan.py си программа.dan`.
 

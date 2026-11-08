@@ -3,10 +3,17 @@
 # на предупреждении, которого нет в анализ/известные_предупреждения.txt.
 name: Статический анализ
 
+# Ветки проверяются один раз - через запрос на слияние; на отправку проверка идёт только в main.
+# Новая отправка в тот же запрос отменяет его прежнюю, устаревшую проверку (в main не отменяется).
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analiz:
