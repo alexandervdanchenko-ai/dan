@@ -72,6 +72,10 @@ static void find_variants(void) {
         const dan_vk_table *t;
         if (dan_vk_supported(names[i], &t)) variants[nvariants++] = t;
     }
+#ifdef DAN_VK_ARM
+    /* with i8mm «dotprod» is the table with smmla: the one without it too */
+    if (nvariants && variants[nvariants - 1] == &dan_vk_dotprod_i8mm) variants[nvariants++] = &dan_vk_dotprod;
+#endif
 }
 
 static void test_dot(void) {
@@ -436,12 +440,12 @@ static void test_rn(void) {
                 for (int r = 0; r < R; r++) {
                     memset(u1 + r * us, 0x55, (size_t)us);
                     memset(u2 + r * us, 0x55, (size_t)us);
-                    t->unpack(f, w + r * MAXB * bytes, b, u1 + r * us, t->rn_signed);
-                    dan_vk_rn_unpack_c(f, w + r * MAXB * bytes, b, u2 + r * us, t->rn_signed);
+                    t->unpack(f, w + r * MAXB * bytes, b, u1 + r * us, t->rn_mode);
+                    dan_vk_rn_unpack_c(f, w + r * MAXB * bytes, b, u2 + r * us, t->rn_mode);
                     CHECK(memcmp(u1 + r * us, u2 + r * us, (size_t)(dan_vk_rn_units(f, b) * DAN_VK_RN_UNIT)) == 0,
                           "%s: строки %s развёрнуты не так, как в C (%d блоков)", t->name, kv_names[f], (int)b);
                 }
-                for (int k = 0; k < NV; k++) dan_vk_rn_prep(f, xq + k * xs, b, xp + k * us, t->rn_signed);
+                for (int k = 0; k < NV; k++) dan_vk_rn_prep(f, xq + k * xs, b, xp + k * us, t->rn_mode);
                 float out[64];
                 t->rn[f](u1, us, xp, us, b, out);
                 for (int r = 0; r < R; r++)
