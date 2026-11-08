@@ -1659,6 +1659,62 @@ DAN_VK_RNK_X86(dan_vk_rn_q4k_vnni, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1
 DAN_VK_RNK_X86(dan_vk_rn_q6k_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_q6k_vnni)
 DAN_VK_RNB_X86(dan_vk_rn_b32_vnni_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, dan_vk_rn_b32_vnni)
 
+/* -- AVX-512 VNNI on 512 bits: two steps by one vpdpbusd (the halves of a
+   register - steps i and i + 1 - added at the end of the part: the integer
+   sums are the same). On AMD Zen 5 (full 512-bit units); on the processors
+   of Intel and on Zen 4 the 256-bit kernels are faster or the same
+   (замеры/результаты.md) -- */
+#define DAN_VK_RNZ_STEPS(OFF, N) \
+    { \
+        __m512i az[DAN_VK_RN_R_VNNI][DAN_VK_RN_V]; \
+        for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) for (int k = 0; k < DAN_VK_RN_V; k++) az[r][k] = _mm512_setzero_si512(); \
+        for (int i = 0; i < (N); i += 2) { \
+            __m512i wv[DAN_VK_RN_R_VNNI]; \
+            for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) wv[r] = _mm512_loadu_si512((const void *)(wb[r] + (OFF) + 32 * i)); \
+            for (int k = 0; k < DAN_VK_RN_V; k++) { \
+                __m512i yv = _mm512_loadu_si512((const void *)(xb[k] + (OFF) + 32 * i)); \
+                for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) az[r][k] = _mm512_dpbusd_epi32(az[r][k], wv[r], yv); \
+            } \
+        } \
+        for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) \
+            for (int k = 0; k < DAN_VK_RN_V; k++) \
+                acc[r][k] = _mm256_add_epi32(_mm512_castsi512_si256(az[r][k]), _mm512_extracti64x4_epi64(az[r][k], 1)); \
+    }
+DAN_VK_VNNI static inline void dan_vk_rn_k4_vnniz(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
+    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
+    DAN_VK_RNZ_STEPS(0, 8)
+    for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) {
+        __m256i sc = DAN_VK_LD(wb[r] + DAN_VK_RN_SC), m = DAN_VK_LD(wb[r] + DAN_VK_RN_SC + 32);
+        for (int k = 0; k < DAN_VK_RN_V; k++) {
+            T[r * DAN_VK_RN_V + k] = _mm256_mullo_epi32(acc[r][k], sc);
+            M[r * DAN_VK_RN_V + k] = _mm256_mullo_epi32(m, DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32));
+        }
+    }
+}
+DAN_VK_VNNI static inline void dan_vk_rn_q6k_vnniz(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *T, __m256i *M) {
+    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
+    (void)M;
+    for (int n = 0; n < 2; n++) {
+        DAN_VK_RNZ_STEPS(128 * n, 4)
+        for (int r = 0; r < DAN_VK_RN_R_VNNI; r++) {
+            __m256i sc = DAN_VK_LD(wb[r] + DAN_VK_RN_SC + 32 * n);
+            for (int k = 0; k < DAN_VK_RN_V; k++) {
+                __m256i t = _mm256_mullo_epi32(_mm256_sub_epi32(acc[r][k], DAN_VK_LD(xb[k] + DAN_VK_RN_SC + 32 * n)), sc);
+                T[r * DAN_VK_RN_V + k] = n ? _mm256_add_epi32(T[r * DAN_VK_RN_V + k], t) : t;
+            }
+        }
+    }
+}
+DAN_VK_VNNI static inline void dan_vk_rn_b32_vnniz(const uint8_t *const *wb, const uint8_t *const *xb, __m256i *S) {
+    __m256i acc[DAN_VK_RN_R_VNNI][DAN_VK_RN_V];
+    DAN_VK_RNZ_STEPS(0, 8)
+    for (int r = 0; r < DAN_VK_RN_R_VNNI; r++)
+        for (int k = 0; k < DAN_VK_RN_V; k++) S[r * DAN_VK_RN_V + k] = acc[r][k];
+}
+DAN_VK_RNK_X86(dan_vk_rn_q4k_vnniz, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 1, dan_vk_rn_k4_vnniz)
+DAN_VK_RNK_X86(dan_vk_rn_q6k_vnniz_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_q6k_vnniz)
+DAN_VK_RNB_X86(dan_vk_rn_b32_vnniz_f, DAN_VK_VNNI, DAN_VK_RN_R_VNNI, DAN_VK_RN_V, dan_vk_rn_b32_vnniz)
+
 /* -- AVX2: 16-bit sums of G steps, then multiplied by MUL16(r) -- */
 #define DAN_VK_RNA_STEPS(OFF, N, G, MUL16) \
     for (int r = 0; r < DAN_VK_RN_R_AVX2; r++) for (int k = 0; k < DAN_VK_RN_V; k++) acc[r][k] = _mm256_setzero_si256(); \
@@ -1833,6 +1889,8 @@ DAN_VK_AVX2F16 static void dan_vk_rn_unpack_x86(int fmt, const uint8_t *w, int64
     {dan_vk_rn_q40_avx2f, dan_vk_rn_q4k_avx2f, dan_vk_rn_q5k_avx2f, dan_vk_rn_q6k_avx2f, dan_vk_rn_q50_avx2f, NULL, NULL, NULL}
 #define DAN_VK_RN_VNNI_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
     {dan_vk_rn_b32_vnni_f, dan_vk_rn_q4k_vnni, dan_vk_rn_q4k_vnni, dan_vk_rn_q6k_vnni_f, dan_vk_rn_b32_vnni_f, NULL, NULL, dan_vk_rn_b32_vnni_f}
+#define DAN_VK_RN_VNNIZ_TAIL , DAN_VK_RN_R_VNNI, DAN_VK_RN_V, 0, dan_vk_rn_unpack_x86, \
+    {dan_vk_rn_b32_vnniz_f, dan_vk_rn_q4k_vnniz, dan_vk_rn_q4k_vnniz, dan_vk_rn_q6k_vnniz_f, dan_vk_rn_b32_vnniz_f, NULL, NULL, dan_vk_rn_b32_vnniz_f}
 
 /* ---- AMX: 16 rows by 16 vectors by tiles (Intel Xeon of 2023 and later, Linux) ----
 
@@ -2220,6 +2278,11 @@ static const dan_vk_table dan_vk_avx512_vnni = {"avx512", dan_vk_dot_f32_avx512,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
                                          DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL};
+/* avx512 with VNNI on 512 bits (AMD Zen 5): the kernels of rows by vectors two steps at a time */
+static const dan_vk_table dan_vk_avx512_zen5 = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
+                                           dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
+                                           dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNIZ_TAIL};
 #ifdef DAN_VK_AMX_ON
 /* avx512 with VNNI and AMX: a matrix by many vectors by tiles */
 static const dan_vk_table dan_vk_avx512_amx = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
@@ -3254,6 +3317,21 @@ static int dan_vk_has_dotprod(void) {
 
 static _Atomic(const dan_vk_table *) dan_vk_cur;
 
+#ifdef DAN_VK_X86
+/* AMD Zen 5 and later (family 0x1A): units of 512 bits */
+static int dan_vk_zen5(void) {
+    __builtin_cpu_init();
+    if (!__builtin_cpu_is("amd")) return 0;
+    unsigned a = 0, b, c, d;
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+#endif
+    unsigned fam = (a >> 8) & 0xF;
+    if (fam == 0xF) fam += (a >> 20) & 0xFF;
+    return fam >= 0x1A;
+}
+#endif
+
 /* 1 if the processor can run the variant with this name */
 static int dan_vk_supported(const char *name, const dan_vk_table **t) {
     if (strcmp(name, "c") == 0) { *t = &dan_vk_plain; return 1; }
@@ -3269,6 +3347,7 @@ static int dan_vk_supported(const char *name, const dan_vk_table **t) {
 #ifdef DAN_VK_AMX_ON
     if ((strcmp(name, "avx512") == 0 || strcmp(name, "amx") == 0) && vnni && dan_vk_amx_ok()) { *t = &dan_vk_avx512_amx; return 1; }
 #endif
+    if (((strcmp(name, "avx512") == 0 && dan_vk_zen5()) || strcmp(name, "avx512z") == 0) && vnni) { *t = &dan_vk_avx512_zen5; return 1; }
     if ((strcmp(name, "avx512") == 0 || strcmp(name, "avx512vnni") == 0) && vnni) { *t = &dan_vk_avx512_vnni; return 1; }
     if (strcmp(name, "avx512") == 0 && avx512) { *t = &dan_vk_avx512; return 1; }
 #endif

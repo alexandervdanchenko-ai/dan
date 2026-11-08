@@ -68,7 +68,7 @@ static const char *labels[8];   /* the names asked for (several tables are named
 static int nvariants;
 
 static void find_variants(void) {
-    static const char *const names[] = {"c", "avx2", "avx512vnni", "avx512", "neon", "dotprod"};
+    static const char *const names[] = {"c", "avx2", "avx512vnni", "avx512z", "avx512", "neon", "dotprod"};
     for (int i = 0; i < (int)(sizeof names / sizeof *names); i++) {
         const dan_vk_table *t;
         if (!dan_vk_supported(names[i], &t)) continue;
