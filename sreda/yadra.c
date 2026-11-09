@@ -2346,8 +2346,9 @@ DAN_VK_AVX2 static inline __m256i dan_vk_iq4xs_parts_avx2(const uint8_t *w, cons
 }
 
 /* по 8 блоков, как DAN_VK_KDOT_AVX2: d по смещению DOFF, dmin (MINS) - по MOFF, хвост - PF */
-#define DAN_VK_KDOT2_AVX2(NAME, PARTS, WB, DOFF, MINS, MOFF, PF) \
-DAN_VK_AVX2F16 static float NAME(const uint8_t *w, const void *xv, int64_t blocks) { \
+#define DAN_VK_KDOT2_AVX2(NAME, PARTS, WB, DOFF, MINS, MOFF, PF) DAN_VK_KDOT2_X86(NAME, DAN_VK_AVX2F16, PARTS, WB, DOFF, MINS, MOFF, PF)
+#define DAN_VK_KDOT2_X86(NAME, ATTR, PARTS, WB, DOFF, MINS, MOFF, PF) \
+ATTR static float NAME(const uint8_t *w, const void *xv, int64_t blocks) { \
     const dan_q8k *x = (const dan_q8k *)xv; \
     __m256 acc = _mm256_setzero_ps(); \
     int64_t i = 0; \
@@ -2411,8 +2412,9 @@ DAN_VK_AVX2 static inline __m256 dan_vk_lanes8_fin(const __m256 *a) {
 }
 /* PARTS(w, y, &mins) - целая часть блока (VEC: наименьшие вектором частичных сумм, иначе int32_t);
    d по смещению DOFF, dmin (MINS) - по MOFF */
-#define DAN_VK_ROWS8_AVX2(NAME, PARTS, WB, DOFF, MINS, MOFF, VEC) \
-DAN_VK_AVX2F16 static void NAME(const uint8_t *w, int64_t row, const void *xv, int64_t blocks, float *out) { \
+#define DAN_VK_ROWS8_AVX2(NAME, PARTS, WB, DOFF, MINS, MOFF, VEC) DAN_VK_ROWS8_X86(NAME, DAN_VK_AVX2F16, PARTS, WB, DOFF, MINS, MOFF, VEC)
+#define DAN_VK_ROWS8_X86(NAME, ATTR, PARTS, WB, DOFF, MINS, MOFF, VEC) \
+ATTR static void NAME(const uint8_t *w, int64_t row, const void *xv, int64_t blocks, float *out) { \
     const dan_q8k *x = (const dan_q8k *)xv; \
     __m256 acc[8]; \
     for (int j = 0; j < 8; j++) acc[j] = _mm256_setzero_ps(); \
@@ -2445,6 +2447,46 @@ DAN_VK_ROWS8_AVX2(dan_vk_iq4xs_rows8_avx2, dan_vk_iq4xs_parts_avx2, DAN_IQ4XS_BY
 DAN_VK_ROWS8_AVX2(dan_vk_q4k_rows8_avx2, dan_vk_q4k_parts_avx2, DAN_Q4K_BYTES, 0, 1, 2, 0)
 DAN_VK_ROWS8_AVX2(dan_vk_q5k_rows8_avx2, dan_vk_q5k_parts_avx2, DAN_Q5K_BYTES, 0, 1, 2, 0)
 DAN_VK_ROWS8_AVX2(dan_vk_q6k_rows8_avx2, dan_vk_q6k_parts_avx2, DAN_Q6K_BYTES, 208, 0, 0, 0)
+/* ---- строка IQ4_XS на AVX-512 VNNI (варианты avx512 с VNNI) ----
+   Числа - kv + 128 без знака из таблицы (vpshufb на 512 битах, 64 числа - две части), на числа
+   вектора одной vpdpbusd; суммы части - на её масштаб (vpmulld), сдвиг 128 * сумма частей вектора
+   на масштабы снимается один раз на блок (vpmaddwd по суммам 16 чисел Q8_K). Целая сумма блока та
+   же, что у ядра AVX2, - те же биты. */
+DAN_VK_VNNI static inline __m256i dan_vk_iq4xs_parts_vnni(const uint8_t *w, const dan_q8k *y, int32_t *extra) {
+    uint16_t h;
+    uint32_t l;
+    memcpy(&h, w + 2, 2);
+    memcpy(&l, w + 4, 4);
+    __m256i lo = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32((int)l), _mm256_setr_epi32(0, 4, 8, 12, 16, 20, 24, 28)),
+                                  _mm256_set1_epi32(0xF));
+    __m256i hi = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32(h), _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14)),
+                                  _mm256_set1_epi32(3));
+    __m256i sc = _mm256_sub_epi32(_mm256_or_si256(lo, _mm256_slli_epi32(hi, 4)), _mm256_set1_epi32(32));
+    __m512i sc512 = _mm512_castsi256_si512(sc);
+    const __m512i kv = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(const void *)dan_vk_iq4nl_u));
+    const __m256i m4 = _mm256_set1_epi8(0xF);
+    __m512i T = _mm512_setzero_si512();
+    for (int k = 0; k < 4; k++) {   /* части 2k и 2k + 1: 64 числа */
+        __m256i q = _mm256_loadu_si256((const __m256i *)(const void *)(w + 8 + 32 * k));
+        __m256i a = _mm256_and_si256(q, m4), b = _mm256_and_si256(_mm256_srli_epi16(q, 4), m4);
+        __m512i ix = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_permute2x128_si256(a, b, 0x20)),
+                                        _mm256_permute2x128_si256(a, b, 0x31), 1);
+        __m512i u = _mm512_shuffle_epi8(kv, ix);
+        __m512i d = _mm512_dpbusd_epi32(_mm512_setzero_si512(), u, _mm512_loadu_si512((const void *)(y->qs + 64 * k)));
+        __m512i s = _mm512_permutexvar_epi32(_mm512_set_epi32(2 * k + 1, 2 * k + 1, 2 * k + 1, 2 * k + 1, 2 * k + 1, 2 * k + 1,
+                                                              2 * k + 1, 2 * k + 1, 2 * k, 2 * k, 2 * k, 2 * k, 2 * k, 2 * k, 2 * k, 2 * k),
+                                             sc512);
+        T = _mm512_add_epi32(T, _mm512_mullo_epi32(d, s));
+    }
+    /* сдвиг: 128 * сумма по частям b масштаба b на суммы двух групп по 16 чисел вектора */
+    __m256i sp = _mm256_or_si256(_mm256_and_si256(sc, _mm256_set1_epi32(0xFFFF)), _mm256_slli_epi32(sc, 16));
+    __m256i bias = _mm256_madd_epi16(sp, _mm256_loadu_si256((const __m256i *)(const void *)y->bsums));
+    *extra = 0;
+    return _mm256_sub_epi32(_mm256_add_epi32(_mm512_castsi512_si256(T), _mm512_extracti64x4_epi64(T, 1)), _mm256_slli_epi32(bias, 7));
+}
+DAN_VK_KDOT2_X86(dan_vk_iq4xs_dot_vnni, DAN_VK_VNNI, dan_vk_iq4xs_parts_vnni, DAN_IQ4XS_BYTES, 0, 0, 0, dan_vk_iq4xs_p)
+DAN_VK_ROWS8_X86(dan_vk_iq4xs_rows8_vnni, DAN_VK_VNNI, dan_vk_iq4xs_parts_vnni, DAN_IQ4XS_BYTES, 0, 0, 0, 0)
+
 /* Q8_0: блоки по 32, d блока вектора - половинное число */
 DAN_VK_AVX2F16 static void dan_vk_q80_rows8_avx2(const uint8_t *w, int64_t row, const void *xv, int64_t blocks, float *out) {
     const uint8_t *x = (const uint8_t *)xv;
@@ -3175,6 +3217,7 @@ static int dan_vk_sm_avx2(int fmt, int nv, const uint8_t *w, int64_t blocks, con
 }
 
 #define DAN_VK_LOWBIT_AVX2 dan_vk_q2k_dot_avx2, dan_vk_q3k_dot_avx2, dan_vk_iq4xs_dot_avx2
+#define DAN_VK_LOWBIT_VNNI dan_vk_q2k_dot_avx2, dan_vk_q3k_dot_avx2, dan_vk_iq4xs_dot_vnni
 
 /* AVX2 (and avx512 without VNNI) */
 #define DAN_VK_AVX2_EXTRA dan_vk_q50_dot_avx2, dan_vk_q41_dot_avx2, dan_vk_q51_dot_avx2, \
@@ -3326,18 +3369,18 @@ static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_
 static const dan_vk_table dan_vk_avx512_vnni = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_AVX2};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
 /* avx512 with VNNI on 512 bits (AMD Zen 5): the kernels of rows by vectors two steps at a time */
 static const dan_vk_table dan_vk_avx512_zen5 = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNIZ_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_AVX2};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNIZ_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
 #ifdef DAN_VK_AMX_ON
 /* avx512 with VNNI and AMX: a matrix by many vectors by tiles */
 static const dan_vk_table dan_vk_avx512_amx = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, dan_vk_matmul_amx, dan_vk_sm_vnni, DAN_VK_LOWBIT_AVX2};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, dan_vk_matmul_amx, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
 #endif
 #endif
 
@@ -5436,6 +5479,7 @@ typedef void (*dan_vk_rows8_fn)(const uint8_t *, int64_t, const void *, int64_t,
 static dan_vk_rows8_fn dan_vk_rows8(const dan_vk_table *t, int fmt) {
 #ifdef DAN_VK_X86
     if (fmt == DAN_FMT_Q80) return t->q8_dot == dan_vk_q8_dot_avx2 ? dan_vk_q80_rows8_avx2 : NULL;
+    if (fmt == DAN_FMT_IQ4XS && t->iq4xs_dot == dan_vk_iq4xs_dot_vnni) return dan_vk_iq4xs_rows8_vnni;
     if (t->q4k_dot == dan_vk_q4k_dot_avx2)
         switch (fmt) {
         case DAN_FMT_Q2K: return dan_vk_q2k_rows8_avx2;
