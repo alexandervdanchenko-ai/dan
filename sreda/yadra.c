@@ -5923,7 +5923,43 @@ static void dan_vk_layernorm_f64(double *y, const double *x, const double *w, co
 /* ---- 8-bit weights (Q8_0 of GGUF: per block a 16-bit float scale d and
    32 numbers q; value = d * q) ---- */
 
-/* x (n numbers, n a multiple of 32) -> n / 32 blocks of 34 bytes */
+/* x (n numbers, n a multiple of 32) -> n / 32 blocks of 34 bytes. На x86-64 - командами SSE2 (есть у
+   любого x86-64): наибольший модуль - maxps (те же сравнения a > amax), произведение v * id - то же
+   умножение, ограничение -127..127 - minps/maxps, округление - cvtps2dq до ближайшего чётного, как lrintf
+   (режим округления по умолчанию); NaN - в 0, как ниже. Байты те же, что у кода C (замеры/результаты.md,
+   «Поток 26В»: перевод вектора в 8 бит был 5% времени чтения запроса Qwen2.5 0.5B Q8_0 на EPYC 7763). */
+#ifdef DAN_VK_X86
+static void dan_vk_q8_quantize(const float *x, uint8_t *out, int64_t n) {
+    const __m128 sign = _mm_set1_ps(-0.0f), lo = _mm_set1_ps(-127.0f), hi = _mm_set1_ps(127.0f);
+    for (int64_t b = 0; b < n / DAN_Q8_BLOCK; b++) {
+        const float *v = x + b * DAN_Q8_BLOCK;
+        uint8_t *o = out + b * DAN_Q8_BYTES;
+        __m128 m = _mm_setzero_ps();
+        /* maxps(a, m) - a, если a > m, иначе m: как «если a > amax», NaN не становится наибольшим */
+        for (int i = 0; i < DAN_Q8_BLOCK; i += 4) m = _mm_max_ps(_mm_andnot_ps(sign, _mm_loadu_ps(v + i)), m);
+        float mv[4];
+        _mm_storeu_ps(mv, m);
+        float amax = 0.0f;
+        for (int i = 0; i < 4; i++) if (mv[i] > amax) amax = mv[i];
+        float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+        if (!isfinite(id) || !isfinite(d)) { d = 0.0f; id = 0.0f; }   /* scale below or above the range */
+        uint16_t h = dan_f32_to_f16(d);
+        memcpy(o, &h, 2);
+        const __m128 vid = _mm_set1_ps(id);
+        __m128i r[8];
+        for (int k = 0; k < 8; k++) {
+            __m128 q = _mm_mul_ps(_mm_loadu_ps(v + 4 * k), vid);
+            __m128 ok = _mm_cmpord_ps(q, q);
+            q = _mm_and_ps(_mm_min_ps(_mm_max_ps(q, lo), hi), ok);   /* NaN -> 0 */
+            r[k] = _mm_cvtps_epi32(q);
+        }
+        __m128i a = _mm_packs_epi16(_mm_packs_epi32(r[0], r[1]), _mm_packs_epi32(r[2], r[3]));
+        __m128i c = _mm_packs_epi16(_mm_packs_epi32(r[4], r[5]), _mm_packs_epi32(r[6], r[7]));
+        _mm_storeu_si128((__m128i *)(void *)(o + 2), a);
+        _mm_storeu_si128((__m128i *)(void *)(o + 18), c);
+    }
+}
+#else
 static void dan_vk_q8_quantize(const float *x, uint8_t *out, int64_t n) {
     for (int64_t b = 0; b < n / DAN_Q8_BLOCK; b++) {
         const float *v = x + b * DAN_Q8_BLOCK;
@@ -5943,6 +5979,7 @@ static void dan_vk_q8_quantize(const float *x, uint8_t *out, int64_t n) {
         }
     }
 }
+#endif
 
 /* back to numbers */
 static void dan_vk_q8_dequantize(const uint8_t *in, float *x, int64_t n) {
@@ -5980,15 +6017,57 @@ static void dan_vk_q8k_quantize(const float *x, dan_q8k *y, int64_t n) {
     for (int64_t b = 0; b < n / DAN_QK; b++, x += DAN_QK) {
         dan_q8k *o = y + b;
         float max = 0.0f, amax = 0.0f;
+#ifdef DAN_VK_X86
+        /* наибольший модуль - maxps (числа конечны), затем первое число с этим модулем - его знак,
+           как в цикле ниже (первое из равных по модулю) */
+        {
+            const __m128 sign = _mm_set1_ps(-0.0f);
+            __m128 m = _mm_setzero_ps();
+            for (int j = 0; j < DAN_QK; j += 4) m = _mm_max_ps(_mm_andnot_ps(sign, _mm_loadu_ps(x + j)), m);
+            float mv[4];
+            _mm_storeu_ps(mv, m);
+            for (int j = 0; j < 4; j++) if (mv[j] > amax) amax = mv[j];
+            if (amax != 0.0f)
+                for (int j = 0; j < DAN_QK; j++)
+                    if (fabsf(x[j]) == amax) { max = x[j]; break; }
+        }
+#else
         for (int j = 0; j < DAN_QK; j++) {
             float ax = fabsf(x[j]);
             if (ax > amax) { amax = ax; max = x[j]; }
         }
+#endif
         float iscale = amax != 0.0f ? -127.0f / max : 0.0f;
         if (!isfinite(iscale) || iscale == 0.0f) {
             memset(o, 0, sizeof *o);
             continue;
         }
+#ifdef DAN_VK_X86
+        /* v = iscale * x, |v| <= 127,5: cvtps2dq - ближайшее целое, у равноудалённых - чётное, как
+           прибавление 1,5 * 2^23 ниже; больше 127 - 127 (packs насыщает так же, чисел меньше -128 нет) */
+        {
+            const __m128 vs = _mm_set1_ps(iscale);
+            const __m128i c127 = _mm_set1_epi32(127);
+            for (int j = 0; j < DAN_QK; j += 16) {
+                __m128i r[4];
+                for (int k = 0; k < 4; k++) {
+                    __m128i t = _mm_cvtps_epi32(_mm_mul_ps(vs, _mm_loadu_ps(x + j + 4 * k)));
+                    __m128i gt = _mm_cmpgt_epi32(t, c127);
+                    r[k] = _mm_or_si128(_mm_andnot_si128(gt, t), _mm_and_si128(gt, c127));
+                }
+                __m128i q = _mm_packs_epi16(_mm_packs_epi32(r[0], r[1]), _mm_packs_epi32(r[2], r[3]));
+                _mm_storeu_si128((__m128i *)(void *)(o->qs + j), q);
+                /* сумма 16 чисел: знаковые байты в 16 бит и попарно */
+                __m128i lo16 = _mm_srai_epi16(_mm_unpacklo_epi8(q, q), 8), hi16 = _mm_srai_epi16(_mm_unpackhi_epi8(q, q), 8);
+                __m128i s32 = _mm_madd_epi16(_mm_add_epi16(lo16, hi16), _mm_set1_epi16(1));
+                s32 = _mm_add_epi32(s32, _mm_shuffle_epi32(s32, 0x4E));
+                s32 = _mm_add_epi32(s32, _mm_shuffle_epi32(s32, 0xB1));
+                o->bsums[j / 16] = (int16_t)_mm_cvtsi128_si32(s32);
+            }
+            o->d = 1.0f / iscale;
+            continue;
+        }
+#endif
         for (int j = 0; j < DAN_QK; j++) {
             /* nearest integer, ties to even: |v| <= 127.5 */
             float v = iscale * x[j], t = v + 12582912.0f;
