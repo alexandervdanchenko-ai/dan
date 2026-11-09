@@ -508,9 +508,9 @@ static void test_rn(void) {
     }
 }
 
-/* матрица на вектор кусками по 8 строк (ядра 8 строк на x86): каждый вариант - биты ядра строки C
-   при любом числе блоков строки (одни блоки хвоста, ровно 8, 8 и хвост) и строк, не кратном 8 */
-static void test_rows8(void) {
+/* матрица на вектор: каждый вариант - биты ядра строки C при любом числе блоков строки (одни
+   блоки хвоста, ровно 8, 8 и хвост) */
+static void test_matvec_bloki(void) {
     static const int64_t nb[] = {1, 2, 3, 5, 6, 7, 8, 9, 14, 16, 17, 35};
     for (int f = 0; f < DAN_NFMT; f++) {
         int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f];
@@ -834,21 +834,6 @@ static void test_pool(void) {
         dan_pool_run(n, 1, mark, NULL);
         for (int64_t i = 0; i < n; i++) CHECK(marks[i] == 1, "пул: n = %d, элемент %d - %d раз", (int)n, (int)i, (int)marks[i]);
     }
-    /* куски по очереди (dan_pool_run_rows): каждое число ровно один раз, вперемешку с обычными частями */
-    for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++)
-        for (int64_t mp = 1; mp <= 7; mp += 6) {
-            int64_t n = sizes[s];
-            memset(marks, 0, n * sizeof(int64_t));
-            dan_pool_run_rows(n, mp, mark, NULL);
-            for (int64_t i = 0; i < n; i++)
-                CHECK(marks[i] == 1, "пул кусками: n = %d, элемент %d - %d раз", (int)n, (int)i, (int)marks[i]);
-            memset(marks, 0, n * sizeof(int64_t));
-            dan_pool_run(n, 1, mark, NULL);
-            for (int64_t i = 0; i < n; i++) CHECK(marks[i] == 1, "пул после кусков: n = %d, элемент %d", (int)n, (int)i);
-        }
-    memset(marks, 0, 1000 * sizeof(int64_t));
-    dan_pool_run_rows(1000, 1, nested, NULL);
-    for (int i = 0; i < 1000; i++) CHECK(marks[i] == 1, "пул внутри пула кусками");
     memset(marks, 0, 1000 * sizeof(int64_t));
     dan_pool_run(1000, 1, nested, NULL);
     for (int i = 0; i < 1000; i++) CHECK(marks[i] == 1, "пул внутри пула");
@@ -1220,7 +1205,7 @@ int main(int argc, char **argv) {
     test_mnogo();
     test_malye();
     test_stroki();
-    test_rows8();
+    test_matvec_bloki();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
     dan_vk_cur = NULL;
