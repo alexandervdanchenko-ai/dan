@@ -221,6 +221,11 @@ typedef struct {
     float (*q2k_dot)(const uint8_t *, const void *, int64_t);
     float (*q3k_dot)(const uint8_t *, const void *, int64_t);
     float (*iq4xs_dot)(const uint8_t *, const void *, int64_t);
+    /* раскладка строк по 16 (поток 26А): ядро групп строк в раскладке на
+       векторы по формату (tile, xp, xs, blocks, out; NULL - нет) и
+       раскладка 16 строк одного блока (fmt, p[16], o) */
+    void (*tl[DAN_NFMT])(const uint8_t *, const uint8_t *, int64_t, int64_t, float *);
+    void (*tl_unpack)(int, const uint8_t *const *, uint8_t *);
 } dan_vk_table;
 
 static void dan_vk_dot32_acc_c(const float *a, const float *b, int64_t n, float *acc) {
@@ -898,6 +903,170 @@ static void dan_vk_rn_prep(int fmt, const uint8_t *x, int64_t blocks, uint8_t *o
             dan_vk_put32(o + DAN_VK_RN_SC + 4 * L, shift * s);
             dan_vk_putf(o + DAN_VK_RN_D + 4 * L, dan_vk_half(p));
         }
+    }
+}
+
+/* ---- раскладка строк по 16 (поток 26А) ----
+
+   Ядра строк на векторы на AVX-512 VNNI с раскладкой, как у «tiled»-ядер
+   llama.cpp: дорожка регистра из 16 чисел по 32 бита - строка, а не часть
+   блока. Шестнадцать строк одного блока раскладываются в единицу: шаг s (64
+   байта) - числа 4s..4s+3 каждой из 16 строк (строка r - байты 4r..4r+3), и
+   одна команда vpdpbusd умножает четыре числа 16 строк на четыре числа
+   вектора, размноженные по дорожкам. Сумма блока для каждой строки и вектора
+   оказывается в своей дорожке: не нужно складывать дорожки частей, масштабы
+   частей и d строк - тоже по дорожкам.
+
+   Числа строк - со знаком (vpdpbusd: байты вектора без знака, строки - со
+   знаком), числа вектора сдвинуты на 128 (x + 128). Сдвиг снимает число
+   строки C, посчитанное при раскладке: 128, умноженное на сумму чисел строки
+   (с масштабами частей). Числа строки в единице:
+   Q8_0 - q; Q2_K - sc * q (масштаб части уже умножен: 0..45); Q3_K - минус
+   (sc - 32) * q (-128..124: (sc - 32) * q бывает и 128), сумма блока - C
+   минус сумма ядра; IQ4_XS - kv; Q4_K, Q5_K - q; Q6_K - q - 32.
+   У Q4_K, Q5_K, IQ4_XS, Q6_K сумма части умножается на масштаб части в
+   дорожках (vpmulld), у Q2_K и Q3_K масштаб уже в числах. Наименьшие (Q2_K,
+   Q4_K, Q5_K) - vpdpwssd: пары наименьших соседних частей строки на пары
+   сумм частей вектора.
+
+   Единица 16 строк одного блока (у Q8_0 блок - 32 числа, у остальных 256):
+   числа (ступеней по 64 байта: 8 или 64), масштабы частей (int32 по
+   дорожкам, у Q4_K, Q5_K, IQ4_XS - 8 частей, у Q6_K - 16), пары наименьших
+   (int16, у Q2_K - 8 пар, у Q4_K и Q5_K - 4), C (int32), d и dmin (float).
+   Единица вектора: блок K - 256 байтов x + 128, 16 сумм частей по 16
+   (int16, как в Q8_K), 8 сумм частей по 32, d; блок Q8_0 - 32 байта x + 128
+   и d.
+
+   Целые суммы блока точны и равны суммам ядра строки C, числа блока
+   получаются теми же действиями с плавающей точкой в том же порядке, и
+   блоки складываются в 8 дорожках, как у ядра строки: биты те же. Раскладка
+   делается при каждом умножении на пакет (как у llama.cpp «tiled»): веса
+   остаются отображёнными из файла, лишней памяти на модель нет (буфер -
+   строки одной группы, замеры/результаты.md, поток 26А). */
+
+static int dan_vk_tl_steps(int fmt) { return fmt == DAN_FMT_Q80 ? 8 : 64; }
+static int dan_vk_tl_nsc(int fmt) {
+    return fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K || fmt == DAN_FMT_IQ4XS ? 8 : fmt == DAN_FMT_Q6K ? 16 : 0;
+}
+static int dan_vk_tl_nmp(int fmt) { return fmt == DAN_FMT_Q2K ? 8 : fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K ? 4 : 0; }
+static int dan_vk_tl_mins(int fmt) { return fmt == DAN_FMT_Q2K || fmt == DAN_FMT_Q4K || fmt == DAN_FMT_Q5K; }
+/* смещения в единице 16 строк: масштабы, пары наименьших, C, d, dmin; размер */
+static int dan_vk_tl_sc(int fmt) { return 64 * dan_vk_tl_steps(fmt); }
+static int dan_vk_tl_mp(int fmt) { return dan_vk_tl_sc(fmt) + 64 * dan_vk_tl_nsc(fmt); }
+static int dan_vk_tl_c(int fmt) { return dan_vk_tl_mp(fmt) + 64 * dan_vk_tl_nmp(fmt); }
+static int dan_vk_tl_d(int fmt) { return dan_vk_tl_c(fmt) + 64; }
+static int dan_vk_tl_size(int fmt) { return dan_vk_tl_d(fmt) + (dan_vk_tl_mins(fmt) ? 128 : 64); }
+/* единица вектора: байты одного блока */
+#define DAN_VK_TL_XK 320
+#define DAN_VK_TL_X8 64
+#define DAN_VK_TL_XBS 256   /* суммы частей по 16 */
+#define DAN_VK_TL_XB32 288  /* суммы частей по 32 */
+#define DAN_VK_TL_XD 304    /* d (у Q8_0 - 32) */
+static int dan_vk_tl_xu(int fmt) { return fmt == DAN_FMT_Q80 ? DAN_VK_TL_X8 : DAN_VK_TL_XK; }
+
+/* числа строки в раскладке (со знаком, см. выше), масштабы (sc - по частям, у
+   Q2_K и Q3_K - 0), наименьшие частей, d и dmin одного блока формата */
+static void dan_vk_tl_nat_c(int fmt, const uint8_t *p, int8_t *nat, int32_t *sc, int32_t *mn, float *d, float *dm) {
+    *dm = 0.0f;
+    if (fmt == DAN_FMT_Q80) {
+        for (int i = 0; i < 32; i++) nat[i] = (int8_t)p[2 + i];
+        *d = dan_vk_half(p);
+        return;
+    }
+    if (fmt == DAN_FMT_Q2K) {
+        for (int e = 0; e < 256; e++)
+            nat[e] = (int8_t)((p[e / 16] & 0xF) * ((p[16 + 32 * (e / 128) + e % 32] >> (2 * (e / 32 % 4))) & 3));
+        for (int j = 0; j < 16; j++) mn[j] = p[j] >> 4;
+        *d = dan_vk_half(p + 80);
+        *dm = dan_vk_half(p + 82);
+    } else if (fmt == DAN_FMT_Q3K) {
+        int8_t s[16];
+        dan_vk_q3k_scales(p + 96, s);
+        for (int e = 0; e < 256; e++) nat[e] = (int8_t)(-(s[e / 16] * dan_vk_q3k_q(p, e / 128, e / 32 % 4, e % 32)));
+        *d = dan_vk_half(p + 108);
+    } else if (fmt == DAN_FMT_IQ4XS) {
+        int8_t s[8];
+        dan_vk_iq4xs_scales(p, s);
+        for (int e = 0; e < 256; e++) {
+            uint8_t b = p[8 + 16 * (e / 32) + e % 16];
+            nat[e] = dan_vk_iq4nl[e % 32 < 16 ? b & 0xF : b >> 4];
+        }
+        for (int j = 0; j < 8; j++) sc[j] = s[j];
+        *d = dan_vk_half(p);
+    } else if (fmt == DAN_FMT_Q6K) {
+        const uint8_t *ql = p, *qh = p + 128;
+        for (int n = 0; n < 2; n++, ql += 64, qh += 32)
+            for (int l = 0; l < 32; l++) {
+                nat[128 * n + l] = (int8_t)(((ql[l] & 0xF) | ((qh[l] & 3) << 4)) - 32);
+                nat[128 * n + l + 32] = (int8_t)(((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32);
+                nat[128 * n + l + 64] = (int8_t)(((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32);
+                nat[128 * n + l + 96] = (int8_t)(((ql[l + 32] >> 4) | ((qh[l] >> 6) << 4)) - 32);
+            }
+        for (int j = 0; j < 16; j++) sc[j] = ((const int8_t *)p)[192 + j];
+        *d = dan_vk_half(p + 208);
+    } else {   /* Q4_K, Q5_K */
+        uint8_t s[8], m[8];
+        dan_vk_k4_scales(p + 4, s, m);
+        const uint8_t *q = p + (fmt == DAN_FMT_Q5K ? 48 : 16), *qh = p + 16;
+        for (int c = 0; c < 4; c++)
+            for (int l = 0; l < 32; l++) {
+                int h0 = fmt == DAN_FMT_Q5K ? ((qh[l] >> (2 * c)) & 1) << 4 : 0;
+                int h1 = fmt == DAN_FMT_Q5K ? ((qh[l] >> (2 * c + 1)) & 1) << 4 : 0;
+                nat[64 * c + l] = (int8_t)((q[32 * c + l] & 0xF) | h0);
+                nat[64 * c + 32 + l] = (int8_t)((q[32 * c + l] >> 4) | h1);
+            }
+        for (int j = 0; j < 8; j++) { sc[j] = s[j]; mn[j] = m[j]; }
+        *d = dan_vk_half(p);
+        *dm = dan_vk_half(p + 2);
+    }
+}
+
+/* 16 строк (p[r] - блок строки r) в единицу раскладки o: образец на C */
+static void dan_vk_tl_unpack_c(int fmt, const uint8_t *const *p, uint8_t *o) {
+    int steps = dan_vk_tl_steps(fmt), nsc = dan_vk_tl_nsc(fmt), nmp = dan_vk_tl_nmp(fmt);
+    int part = nsc ? 4 * steps / nsc : 4 * steps;
+    for (int r = 0; r < 16; r++) {
+        int8_t nat[256];
+        int32_t sc[16] = {0}, mn[16] = {0};
+        float d, dm;
+        dan_vk_tl_nat_c(fmt, p[r], nat, sc, mn, &d, &dm);
+        for (int s = 0; s < steps; s++) memcpy(o + 64 * s + 4 * r, nat + 4 * s, 4);
+        int32_t c = 0;
+        for (int e = 0; e < 4 * steps; e++) c += (nsc ? sc[e / part] : 1) * nat[e];
+        for (int j = 0; j < nsc; j++) dan_vk_put32(o + dan_vk_tl_sc(fmt) + 64 * j + 4 * r, sc[j]);
+        for (int j = 0; j < nmp; j++) {
+            int16_t pr[2] = {(int16_t)mn[2 * j], (int16_t)mn[2 * j + 1]};
+            memcpy(o + dan_vk_tl_mp(fmt) + 64 * j + 4 * r, pr, 4);
+        }
+        dan_vk_put32(o + dan_vk_tl_c(fmt) + 4 * r, 128 * c);
+        dan_vk_putf(o + dan_vk_tl_d(fmt) + 4 * r, d);
+        if (dan_vk_tl_mins(fmt)) dan_vk_putf(o + dan_vk_tl_d(fmt) + 64 + 4 * r, dm);
+    }
+}
+
+/* вектор в 8 битах (dan_vk_fmt_quantize_x) из «blocks» блоков в единицы раскладки */
+static void dan_vk_tl_prep(int fmt, const uint8_t *x, int64_t blocks, uint8_t *out) {
+    if (fmt == DAN_FMT_Q80) {
+        for (int64_t b = 0; b < blocks; b++) {
+            const uint8_t *p = x + b * DAN_Q8_BYTES;
+            uint8_t *o = out + b * DAN_VK_TL_X8;
+            for (int i = 0; i < 32; i++) o[i] = (uint8_t)(p[2 + i] ^ 0x80);
+            dan_vk_putf(o + 32, dan_vk_half(p));
+            memset(o + 36, 0, DAN_VK_TL_X8 - 36);
+        }
+        return;
+    }
+    for (int64_t b = 0; b < blocks; b++) {
+        const dan_q8k *y = (const dan_q8k *)(const void *)x + b;
+        uint8_t *o = out + b * DAN_VK_TL_XK;
+        for (int i = 0; i < 256; i++) o[i] = (uint8_t)((uint8_t)y->qs[i] ^ 0x80);
+        memcpy(o + DAN_VK_TL_XBS, y->bsums, 32);
+        for (int j = 0; j < 8; j++) {
+            int16_t s = (int16_t)(y->bsums[2 * j] + y->bsums[2 * j + 1]);
+            memcpy(o + DAN_VK_TL_XB32 + 2 * j, &s, 2);
+        }
+        dan_vk_putf(o + DAN_VK_TL_XD, y->d);
+        memset(o + DAN_VK_TL_XD + 4, 0, DAN_VK_TL_XK - DAN_VK_TL_XD - 4);
     }
 }
 
@@ -3144,6 +3313,308 @@ static int dan_vk_sm_avx2(int fmt, int nv, const uint8_t *w, int64_t blocks, con
     return 1;
 }
 
+/* -- раскладка строк по 16 на AVX-512 VNNI (поток 26А, «раскладка строк по 16» выше) -- */
+
+/* 16 x 16 чисел по 32 бита: строка r на входе - r[i], на выходе r[s] - числа s всех строк (дорожка - строка) */
+DAN_VK_VNNI static inline void dan_vk_tl_tr16(__m512i *r) {
+    __m512i t[16], u[16];
+    for (int i = 0; i < 8; i++) {
+        t[2 * i] = _mm512_unpacklo_epi32(r[2 * i], r[2 * i + 1]);
+        t[2 * i + 1] = _mm512_unpackhi_epi32(r[2 * i], r[2 * i + 1]);
+    }
+    for (int i = 0; i < 4; i++) {
+        u[4 * i] = _mm512_unpacklo_epi64(t[4 * i], t[4 * i + 2]);
+        u[4 * i + 1] = _mm512_unpackhi_epi64(t[4 * i], t[4 * i + 2]);
+        u[4 * i + 2] = _mm512_unpacklo_epi64(t[4 * i + 1], t[4 * i + 3]);
+        u[4 * i + 3] = _mm512_unpackhi_epi64(t[4 * i + 1], t[4 * i + 3]);
+    }
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 4; j++) {
+            t[8 * i + j] = _mm512_shuffle_i32x4(u[8 * i + j], u[8 * i + j + 4], 0x88);
+            t[8 * i + j + 4] = _mm512_shuffle_i32x4(u[8 * i + j], u[8 * i + j + 4], 0xDD);
+        }
+    for (int j = 0; j < 8; j++) {
+        r[j] = _mm512_shuffle_i32x4(t[j], t[j + 8], 0x88);
+        r[j + 8] = _mm512_shuffle_i32x4(t[j], t[j + 8], 0xDD);
+    }
+}
+
+#define DAN_VK_TL_LD(p) _mm256_loadu_si256((const __m256i *)(const void *)(p))
+#define DAN_VK_TL_ST(p, v) _mm256_storeu_si256((__m256i *)(void *)(p), (v))
+
+/* числа одного блока строки в раскладке (как dan_vk_tl_nat_c) командами SIMD */
+DAN_VK_VNNI static void dan_vk_tl_nat_vnni(int fmt, const uint8_t *p, int8_t *nat) {
+    const __m256i m4 = _mm256_set1_epi8(0x0F), m3 = _mm256_set1_epi8(3), m1 = _mm256_set1_epi8(1);
+    switch (fmt) {
+    case DAN_FMT_Q80:
+        memcpy(nat, p + 2, 32);
+        break;
+    case DAN_FMT_Q4K:
+        for (int c = 0; c < 4; c++) {
+            __m256i v = DAN_VK_TL_LD(p + 16 + 32 * c);
+            DAN_VK_TL_ST(nat + 64 * c, _mm256_and_si256(v, m4));
+            DAN_VK_TL_ST(nat + 64 * c + 32, _mm256_and_si256(_mm256_srli_epi16(v, 4), m4));
+        }
+        break;
+    case DAN_FMT_Q5K: {
+        __m256i qh = DAN_VK_TL_LD(p + 16);
+        for (int c = 0; c < 4; c++) {
+            __m256i v = DAN_VK_TL_LD(p + 48 + 32 * c);
+            __m256i h0 = _mm256_slli_epi16(_mm256_and_si256(_mm256_srl_epi16(qh, _mm_cvtsi32_si128(2 * c)), m1), 4);
+            __m256i h1 = _mm256_slli_epi16(_mm256_and_si256(_mm256_srl_epi16(qh, _mm_cvtsi32_si128(2 * c + 1)), m1), 4);
+            DAN_VK_TL_ST(nat + 64 * c, _mm256_or_si256(_mm256_and_si256(v, m4), h0));
+            DAN_VK_TL_ST(nat + 64 * c + 32, _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(v, 4), m4), h1));
+        }
+        break;
+    }
+    case DAN_FMT_Q6K: {
+        const __m256i k32 = _mm256_set1_epi8(32);
+        for (int n = 0; n < 2; n++) {
+            __m256i l0 = DAN_VK_TL_LD(p + 64 * n), l1 = DAN_VK_TL_LD(p + 64 * n + 32), qh = DAN_VK_TL_LD(p + 128 + 32 * n);
+            __m256i a = _mm256_or_si256(_mm256_and_si256(l0, m4), _mm256_slli_epi16(_mm256_and_si256(qh, m3), 4));
+            __m256i b = _mm256_or_si256(_mm256_and_si256(l1, m4), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh, 2), m3), 4));
+            __m256i c = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(l0, 4), m4),
+                                        _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh, 4), m3), 4));
+            __m256i d = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(l1, 4), m4),
+                                        _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh, 6), m3), 4));
+            DAN_VK_TL_ST(nat + 128 * n, _mm256_sub_epi8(a, k32));
+            DAN_VK_TL_ST(nat + 128 * n + 32, _mm256_sub_epi8(b, k32));
+            DAN_VK_TL_ST(nat + 128 * n + 64, _mm256_sub_epi8(c, k32));
+            DAN_VK_TL_ST(nat + 128 * n + 96, _mm256_sub_epi8(d, k32));
+        }
+        break;
+    }
+    case DAN_FMT_Q2K:
+        for (int n = 0; n < 2; n++) {
+            __m256i v = DAN_VK_TL_LD(p + 16 + 32 * n);
+            for (int j = 0; j < 4; j++) {
+                __m256i q = _mm256_and_si256(_mm256_srl_epi16(v, _mm_cvtsi32_si128(2 * j)), m3);
+                __m512i s = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16((int16_t)(p[8 * n + 2 * j] & 0xF))),
+                                               _mm256_set1_epi16((int16_t)(p[8 * n + 2 * j + 1] & 0xF)), 1);
+                DAN_VK_TL_ST(nat + 128 * n + 32 * j, _mm512_cvtepi16_epi8(_mm512_mullo_epi16(_mm512_cvtepu8_epi16(q), s)));
+            }
+        }
+        break;
+    case DAN_FMT_Q3K: {
+        int8_t sc[16];
+        dan_vk_q3k_scales(p + 96, sc);
+        __m256i hm = DAN_VK_TL_LD(p);
+        const __m256i k4 = _mm256_set1_epi8(4);
+        for (int n = 0; n < 2; n++) {
+            __m256i v = DAN_VK_TL_LD(p + 32 + 32 * n);
+            for (int j = 0; j < 4; j++) {
+                __m256i q2 = _mm256_and_si256(_mm256_srl_epi16(v, _mm_cvtsi32_si128(2 * j)), m3);
+                __m256i h = _mm256_and_si256(_mm256_srl_epi16(hm, _mm_cvtsi32_si128(4 * n + j)), m1);
+                __m256i q = _mm256_sub_epi8(_mm256_or_si256(q2, _mm256_slli_epi16(h, 2)), k4);
+                __m512i s = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16(sc[8 * n + 2 * j])),
+                                               _mm256_set1_epi16(sc[8 * n + 2 * j + 1]), 1);
+                __m512i pr = _mm512_sub_epi16(_mm512_setzero_si512(), _mm512_mullo_epi16(_mm512_cvtepi8_epi16(q), s));
+                DAN_VK_TL_ST(nat + 128 * n + 32 * j, _mm512_cvtepi16_epi8(pr));
+            }
+        }
+        break;
+    }
+    default: {   /* IQ4_XS */
+        const __m128i t = _mm_loadu_si128((const __m128i *)(const void *)dan_vk_iq4nl), k = _mm_set1_epi8(0x0F);
+        for (int b = 0; b < 8; b++) {
+            __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(p + 8 + 16 * b));
+            _mm_storeu_si128((__m128i *)(void *)(nat + 32 * b), _mm_shuffle_epi8(t, _mm_and_si128(v, k)));
+            _mm_storeu_si128((__m128i *)(void *)(nat + 32 * b + 16), _mm_shuffle_epi8(t, _mm_and_si128(_mm_srli_epi16(v, 4), k)));
+        }
+        break;
+    }
+    }
+}
+
+/* 16 строк (p[r] - блок строки r) в единицу раскладки o: те же байты, что у dan_vk_tl_unpack_c */
+DAN_VK_VNNI static void dan_vk_tl_unpack_vnni(int fmt, const uint8_t *const *p, uint8_t *o) {
+    _Alignas(64) int8_t nat[16][256];
+    int steps = dan_vk_tl_steps(fmt), nsc = dan_vk_tl_nsc(fmt), nmp = dan_vk_tl_nmp(fmt);
+    int osc = dan_vk_tl_sc(fmt), omp = dan_vk_tl_mp(fmt), od = dan_vk_tl_d(fmt);
+    for (int r = 0; r < 16; r++) {
+        const uint8_t *q = p[r];
+        dan_vk_tl_nat_vnni(fmt, q, nat[r]);
+        float d, dm = 0.0f;
+        switch (fmt) {
+        case DAN_FMT_Q80: d = dan_vk_half(q); break;
+        case DAN_FMT_Q2K:
+            for (int j = 0; j < 8; j++) {
+                int16_t pr[2] = {(int16_t)(q[2 * j] >> 4), (int16_t)(q[2 * j + 1] >> 4)};
+                memcpy(o + omp + 64 * j + 4 * r, pr, 4);
+            }
+            d = dan_vk_half(q + 80);
+            dm = dan_vk_half(q + 82);
+            break;
+        case DAN_FMT_Q3K: d = dan_vk_half(q + 108); break;
+        case DAN_FMT_Q6K:
+            for (int j = 0; j < 16; j++) dan_vk_put32(o + osc + 64 * j + 4 * r, ((const int8_t *)q)[192 + j]);
+            d = dan_vk_half(q + 208);
+            break;
+        case DAN_FMT_IQ4XS: {
+            int8_t s[8];
+            dan_vk_iq4xs_scales(q, s);
+            for (int j = 0; j < 8; j++) dan_vk_put32(o + osc + 64 * j + 4 * r, s[j]);
+            d = dan_vk_half(q);
+            break;
+        }
+        default: {   /* Q4_K, Q5_K */
+            uint8_t s[8], m[8];
+            dan_vk_k4_scales(q + 4, s, m);
+            for (int j = 0; j < 8; j++) dan_vk_put32(o + osc + 64 * j + 4 * r, s[j]);
+            for (int j = 0; j < 4; j++) {
+                int16_t pr[2] = {m[2 * j], m[2 * j + 1]};
+                memcpy(o + omp + 64 * j + 4 * r, pr, 4);
+            }
+            d = dan_vk_half(q);
+            dm = dan_vk_half(q + 2);
+            break;
+        }
+        }
+        dan_vk_putf(o + od + 4 * r, d);
+        if (dan_vk_tl_mins(fmt)) dan_vk_putf(o + od + 64 + 4 * r, dm);
+    }
+    (void)nmp;
+    /* числа: по 16 ступеней (у Q8_0 - 8 ступеней, верхняя половина пуста) */
+    for (int c = 0; c < (steps + 15) / 16; c++) {
+        __m512i v[16];
+        for (int r = 0; r < 16; r++)
+            v[r] = steps < 16 ? _mm512_castsi256_si512(DAN_VK_TL_LD(nat[r])) : _mm512_load_si512((const void *)(nat[r] + 64 * c));
+        if (steps < 16)
+            for (int r = 0; r < 16; r++) v[r] = _mm512_inserti64x4(v[r], _mm256_setzero_si256(), 1);
+        dan_vk_tl_tr16(v);
+        for (int s = 0; s < 16 && 16 * c + s < steps; s++) _mm512_storeu_si512((void *)(o + 64 * (16 * c + s)), v[s]);
+    }
+    /* C: 128 x сумма чисел строки (по частям - с масштабом части) */
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i c = _mm512_setzero_si512();
+    int sp = nsc ? steps / nsc : steps;
+    for (int j = 0; j < (nsc ? nsc : 1); j++) {
+        __m512i a = _mm512_setzero_si512();
+        for (int s = j * sp; s < (j + 1) * sp; s++) a = _mm512_dpbusd_epi32(a, one, _mm512_loadu_si512((const void *)(o + 64 * s)));
+        c = nsc ? _mm512_add_epi32(c, _mm512_mullo_epi32(a, _mm512_loadu_si512((const void *)(o + osc + 64 * j)))) : a;
+    }
+    _mm512_storeu_si512((void *)(o + dan_vk_tl_c(fmt)), _mm512_slli_epi32(c, 7));
+}
+
+/* ядра: DAN_VK_TL_R групп по 16 строк на DAN_VK_TL_V векторов; единицы
+   групп одного блока - подряд (tile + (b R + g) единиц), векторы - через xs
+   байтов; out[k 16 R + i] - строка i на вектор k */
+#ifndef DAN_VK_TL_R
+#define DAN_VK_TL_R 2
+#define DAN_VK_TL_V 4
+#endif
+
+DAN_VK_VNNI static inline __m512i dan_vk_tl_bc(const uint8_t *p) {
+    int32_t v;
+    memcpy(&v, p, 4);
+    return _mm512_set1_epi32(v);
+}
+DAN_VK_VNNI static inline __m512i dan_vk_tl_ld(const uint8_t *p) { return _mm512_loadu_si512((const void *)p); }
+
+/* суммы ступеней S0..S1 - 1 блока в A[r][k] */
+#define DAN_VK_TL_DP(A, S0, S1) \
+    for (int r = 0; r < DAN_VK_TL_R; r++) for (int k = 0; k < DAN_VK_TL_V; k++) A[r][k] = _mm512_setzero_si512(); \
+    _Pragma("GCC unroll 8") \
+    for (int s = (S0); s < (S1); s++) { \
+        __m512i W[DAN_VK_TL_R]; \
+        for (int r = 0; r < DAN_VK_TL_R; r++) W[r] = dan_vk_tl_ld(tw[r] + 64 * s); \
+        for (int k = 0; k < DAN_VK_TL_V; k++) { \
+            __m512i X = dan_vk_tl_bc(xv[k] + 4 * s); \
+            for (int r = 0; r < DAN_VK_TL_R; r++) A[r][k] = _mm512_dpbusd_epi32(A[r][k], X, W[r]); \
+        } \
+    }
+
+/* целые суммы блока: числа с масштабами (Q8_0, Q2_K: IS = A - C, Q3_K: C - A) */
+#define DAN_VK_TL_INTS_PLAIN(FMT, NEG) \
+    { \
+        __m512i A[DAN_VK_TL_R][DAN_VK_TL_V]; \
+        DAN_VK_TL_DP(A, 0, dan_vk_tl_steps(FMT)) \
+        for (int r = 0; r < DAN_VK_TL_R; r++) { \
+            __m512i C = dan_vk_tl_ld(tw[r] + dan_vk_tl_c(FMT)); \
+            for (int k = 0; k < DAN_VK_TL_V; k++) IS[r][k] = (NEG) ? _mm512_sub_epi32(C, A[r][k]) : _mm512_sub_epi32(A[r][k], C); \
+        } \
+    }
+/* суммы частей на масштабы частей (vpmulld): NP частей */
+#define DAN_VK_TL_INTS_MUL(FMT, NP) \
+    { \
+        __m512i A[DAN_VK_TL_R][DAN_VK_TL_V]; \
+        for (int r = 0; r < DAN_VK_TL_R; r++) for (int k = 0; k < DAN_VK_TL_V; k++) IS[r][k] = _mm512_setzero_si512(); \
+        for (int j = 0; j < (NP); j++) { \
+            DAN_VK_TL_DP(A, j * (64 / (NP)), (j + 1) * (64 / (NP))) \
+            for (int r = 0; r < DAN_VK_TL_R; r++) { \
+                __m512i S = dan_vk_tl_ld(tw[r] + dan_vk_tl_sc(FMT) + 64 * j); \
+                for (int k = 0; k < DAN_VK_TL_V; k++) IS[r][k] = _mm512_add_epi32(IS[r][k], _mm512_mullo_epi32(A[r][k], S)); \
+            } \
+        } \
+        for (int r = 0; r < DAN_VK_TL_R; r++) { \
+            __m512i C = dan_vk_tl_ld(tw[r] + dan_vk_tl_c(FMT)); \
+            for (int k = 0; k < DAN_VK_TL_V; k++) IS[r][k] = _mm512_sub_epi32(IS[r][k], C); \
+        } \
+    }
+/* наименьшие: NM пар частей строки на пары сумм частей вектора (смещение XO) */
+#define DAN_VK_TL_MINS(FMT, NM, XO) \
+    for (int r = 0; r < DAN_VK_TL_R; r++) \
+        for (int k = 0; k < DAN_VK_TL_V; k++) { \
+            __m512i m = _mm512_setzero_si512(); \
+            for (int j = 0; j < (NM); j++) \
+                m = _mm512_dpwssd_epi32(m, dan_vk_tl_ld(tw[r] + dan_vk_tl_mp(FMT) + 64 * j), dan_vk_tl_bc(xv[k] + (XO) + 4 * j)); \
+            IM[r][k] = m; \
+        }
+
+/* ядро формата FMT: INTS - целые суммы IS (и IM) блока */
+#define DAN_VK_TL_KERNEL(NAME, FMT, INTS) \
+DAN_VK_VNNI static void NAME(const uint8_t *tile, const uint8_t *xp, int64_t xs, int64_t blocks, float *out) { \
+    enum { R = DAN_VK_TL_R, V = DAN_VK_TL_V }; \
+    const int tu = dan_vk_tl_size(FMT), xu = dan_vk_tl_xu(FMT), od = dan_vk_tl_d(FMT), mins = dan_vk_tl_mins(FMT); \
+    const int xd = (FMT) == DAN_FMT_Q80 ? 32 : DAN_VK_TL_XD; \
+    __m512 accf[8][R][V], tail[R][V]; \
+    for (int l = 0; l < 8; l++) for (int r = 0; r < R; r++) for (int k = 0; k < V; k++) accf[l][r][k] = _mm512_setzero_ps(); \
+    for (int r = 0; r < R; r++) for (int k = 0; k < V; k++) tail[r][k] = _mm512_setzero_ps(); \
+    const int64_t full = blocks / 8 * 8; \
+    for (int64_t b = 0; b < blocks; b++) { \
+        const uint8_t *tw[R], *xv[V]; \
+        for (int r = 0; r < R; r++) tw[r] = tile + (b * R + r) * tu; \
+        for (int k = 0; k < V; k++) xv[k] = xp + k * xs + b * xu; \
+        __m512i IS[R][V], IM[R][V]; \
+        INTS \
+        (void)IM; \
+        for (int k = 0; k < V; k++) { \
+            float yd; \
+            memcpy(&yd, xv[k] + xd, 4); \
+            __m512 Y = _mm512_set1_ps(yd); \
+            for (int r = 0; r < R; r++) { \
+                __m512 t = _mm512_mul_ps(_mm512_mul_ps(Y, _mm512_loadu_ps((const float *)(const void *)(tw[r] + od))), \
+                                         _mm512_cvtepi32_ps(IS[r][k])); \
+                if (mins) { \
+                    __m512 bm = _mm512_mul_ps(Y, _mm512_loadu_ps((const float *)(const void *)(tw[r] + od + 64))); \
+                    t = _mm512_sub_ps(t, _mm512_mul_ps(bm, _mm512_cvtepi32_ps(IM[r][k]))); \
+                } \
+                if (b < full) accf[b & 7][r][k] = _mm512_add_ps(accf[b & 7][r][k], t); \
+                else tail[r][k] = _mm512_add_ps(tail[r][k], t); \
+            } \
+        } \
+        if (b + 1 == full) \
+            for (int r = 0; r < R; r++) \
+                for (int k = 0; k < V; k++) { \
+                    __m512 (*a)[R][V] = accf; \
+                    tail[r][k] = _mm512_add_ps(_mm512_add_ps(_mm512_add_ps(a[0][r][k], a[4][r][k]), _mm512_add_ps(a[2][r][k], a[6][r][k])), \
+                                               _mm512_add_ps(_mm512_add_ps(a[1][r][k], a[5][r][k]), _mm512_add_ps(a[3][r][k], a[7][r][k]))); \
+                } \
+    } \
+    for (int k = 0; k < V; k++) \
+        for (int r = 0; r < R; r++) _mm512_storeu_ps(out + k * 16 * R + 16 * r, tail[r][k]); \
+}
+DAN_VK_TL_KERNEL(dan_vk_tl_q80_vnni, DAN_FMT_Q80, DAN_VK_TL_INTS_PLAIN(DAN_FMT_Q80, 0))
+DAN_VK_TL_KERNEL(dan_vk_tl_q2k_vnni, DAN_FMT_Q2K, DAN_VK_TL_INTS_PLAIN(DAN_FMT_Q2K, 0) DAN_VK_TL_MINS(DAN_FMT_Q2K, 8, DAN_VK_TL_XBS))
+DAN_VK_TL_KERNEL(dan_vk_tl_q3k_vnni, DAN_FMT_Q3K, DAN_VK_TL_INTS_PLAIN(DAN_FMT_Q3K, 1))
+DAN_VK_TL_KERNEL(dan_vk_tl_iq4xs_vnni, DAN_FMT_IQ4XS, DAN_VK_TL_INTS_MUL(DAN_FMT_IQ4XS, 8))
+DAN_VK_TL_KERNEL(dan_vk_tl_q4k_vnni, DAN_FMT_Q4K, DAN_VK_TL_INTS_MUL(DAN_FMT_Q4K, 8) DAN_VK_TL_MINS(DAN_FMT_Q4K, 4, DAN_VK_TL_XB32))
+DAN_VK_TL_KERNEL(dan_vk_tl_q5k_vnni, DAN_FMT_Q5K, DAN_VK_TL_INTS_MUL(DAN_FMT_Q5K, 8) DAN_VK_TL_MINS(DAN_FMT_Q5K, 4, DAN_VK_TL_XB32))
+DAN_VK_TL_KERNEL(dan_vk_tl_q6k_vnni, DAN_FMT_Q6K, DAN_VK_TL_INTS_MUL(DAN_FMT_Q6K, 16))
+
+#define DAN_VK_TL_VNNI , {NULL, dan_vk_tl_q4k_vnni, dan_vk_tl_q5k_vnni, dan_vk_tl_q6k_vnni, NULL, NULL, NULL, dan_vk_tl_q80_vnni, \
+                          dan_vk_tl_q2k_vnni, dan_vk_tl_q3k_vnni, dan_vk_tl_iq4xs_vnni}, dan_vk_tl_unpack_vnni
+
 #define DAN_VK_LOWBIT_AVX2 dan_vk_q2k_dot_avx2, dan_vk_q3k_dot_avx2, dan_vk_iq4xs_dot_avx2
 #define DAN_VK_LOWBIT_VNNI dan_vk_q2k_dot_avx2, dan_vk_q3k_dot_avx2, dan_vk_iq4xs_dot_vnni
 
@@ -3297,18 +3768,18 @@ static const dan_vk_table dan_vk_avx512 = {"avx512", dan_vk_dot_f32_avx512, dan_
 static const dan_vk_table dan_vk_avx512_vnni = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI DAN_VK_TL_VNNI};
 /* avx512 with VNNI on 512 bits (AMD Zen 5): the kernels of rows by vectors two steps at a time */
 static const dan_vk_table dan_vk_avx512_zen5 = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNIZ_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNIZ_TAIL, NULL, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI DAN_VK_TL_VNNI};
 #ifdef DAN_VK_AMX_ON
 /* avx512 with VNNI and AMX: a matrix by many vectors by tiles */
 static const dan_vk_table dan_vk_avx512_amx = {"avx512", dan_vk_dot_f32_avx512, dan_vk_dot_f64_avx512, dan_vk_sum_f32_avx2, dan_vk_sum_f64_avx2,
                                            dan_vk_mm_f32_avx512, dan_vk_mm_f64_avx512, dan_vk_q8_block_avx512, dan_vk_q8_dot_avx2, dan_vk_dot32_acc_avx512, dan_vk_h2f_avx512, dan_vk_dot_f32_avx2_fast, dan_vk_dot_f64_avx2_fast, dan_vk_mm_f32_avx512_fast, dan_vk_mm_f64_avx512_fast,
                                            dan_vk_q40_dot_avx2, dan_vk_q4k_dot_avx2, dan_vk_q5k_dot_avx2, dan_vk_q6k_dot_avx2,
-                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, dan_vk_matmul_amx, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI};
+                                         DAN_VK_VNNI_EXTRA DAN_VK_RN_VNNI_TAIL, dan_vk_matmul_amx, dan_vk_sm_vnni, DAN_VK_LOWBIT_VNNI DAN_VK_TL_VNNI};
 #endif
 #endif
 
@@ -5868,6 +6339,77 @@ static int dan_vk_matmul_rn(int fmt, const uint8_t *w, const uint8_t *xq, float 
     return 1;
 }
 
+/* Раскладка строк по 16 (ядра t->tl, «раскладка строк по 16» выше): векторы
+   готовятся один раз (dan_vk_tl_prep, в пуле) и дополняются нулевыми
+   векторами до кратного DAN_VK_TL_V; каждая часть пула берёт группы по
+   16 DAN_VK_TL_R строк (последняя группа повторяет свою последнюю строку),
+   раскладывает строки группы в свой буфер и умножает их на все векторы.
+   DAN_YADRA_RASKLADKA=0 - без раскладки (для замеров). */
+typedef struct { const uint8_t *w, *x; uint8_t *xp; float *y; int64_t blocks, rows, nv, nvp, xs; int fmt; } dan_vk_tl_job;
+
+static void dan_vk_tl_prep_part(void *c, int64_t b, int64_t e) {
+    dan_vk_tl_job *j = (dan_vk_tl_job *)c;
+    int64_t xb = j->blocks * dan_vk_fmt_xbytes[j->fmt];
+    for (int64_t v = b; v < e; v++) dan_vk_tl_prep(j->fmt, j->x + v * xb, j->blocks, j->xp + v * j->xs);
+}
+
+#ifndef DAN_VK_TL_R
+#define DAN_VK_TL_R 1
+#define DAN_VK_TL_V 1
+#endif
+static void dan_vk_tl_job_part(void *c, int64_t b, int64_t e) {
+    dan_vk_tl_job *j = (dan_vk_tl_job *)c;
+    const dan_vk_table *t = dan_vk();
+    int fmt = j->fmt;
+    const int G = 16 * DAN_VK_TL_R, V = DAN_VK_TL_V;
+    int64_t wb = dan_vk_fmt_bytes[fmt], row = j->blocks * wb, tu = dan_vk_tl_size(fmt);
+    uint8_t *buf = (uint8_t *)malloc((size_t)(j->blocks * DAN_VK_TL_R * tu));
+    if (!buf) {   /* нет памяти на раскладку: строка на каждый вектор */
+        int64_t xb = j->blocks * dan_vk_fmt_xbytes[fmt];
+        for (int64_t i = b * G; i < e * G && i < j->rows; i++)
+            for (int64_t v = 0; v < j->nv; v++) j->y[v * j->rows + i] = dan_vk_fmt_dot(t, fmt, j->w + i * row, j->x + v * xb, j->blocks);
+        return;
+    }
+    float out[16 * DAN_VK_TL_R * DAN_VK_TL_V];
+    for (int64_t g = b; g < e; g++) {
+        int64_t r0 = g * G;
+        for (int64_t bl = 0; bl < j->blocks; bl++)
+            for (int h = 0; h < DAN_VK_TL_R; h++) {
+                const uint8_t *p[16];
+                for (int i = 0; i < 16; i++) {
+                    int64_t r = r0 + 16 * h + i < j->rows ? r0 + 16 * h + i : j->rows - 1;
+                    p[i] = j->w + r * row + bl * wb;
+                }
+                (t->tl_unpack ? t->tl_unpack : dan_vk_tl_unpack_c)(fmt, p, buf + (bl * DAN_VK_TL_R + h) * tu);
+            }
+        for (int64_t v = 0; v < j->nvp; v += V) {
+            t->tl[fmt](buf, j->xp + v * j->xs, j->xs, j->blocks, out);
+            for (int k = 0; k < V && v + k < j->nv; k++)
+                for (int i = 0; i < G && r0 + i < j->rows; i++) j->y[(v + k) * j->rows + r0 + i] = out[k * G + i];
+        }
+    }
+    free(buf);
+}
+
+/* 1 if done by the kernels of rows laid out by 16 */
+static int dan_vk_matmul_tl(int fmt, const uint8_t *w, const uint8_t *xq, float *y, int64_t rows, int64_t cols, int64_t nv) {
+    const dan_vk_table *t = dan_vk();
+    if (!t->tl[fmt] || nv < DAN_VK_TL_V || rows < 1 || cols < 1) return 0;
+    const char *s = getenv("DAN_YADRA_RASKLADKA");
+    if (s && atoi(s) == 0) return 0;
+    int64_t blocks = cols / dan_vk_fmt_n[fmt], xs = blocks * dan_vk_tl_xu(fmt);
+    int64_t nvp = (nv + DAN_VK_TL_V - 1) / DAN_VK_TL_V * DAN_VK_TL_V;
+    uint8_t *xp = (uint8_t *)malloc((size_t)(nvp * xs));
+    if (!xp) return 0;
+    memset(xp + nv * xs, 0, (size_t)((nvp - nv) * xs));
+    dan_vk_tl_job j = {w, xq, xp, y, blocks, rows, nv, nvp, xs, fmt};
+    dan_pool_run(nv, 1, dan_vk_tl_prep_part, &j);
+    int64_t G = 16 * DAN_VK_TL_R, groups = (rows + G - 1) / G, work = cols * nv * G;
+    dan_pool_run(groups, work >= 65536 ? 1 : 65536 / work, dan_vk_tl_job_part, &j);
+    free(xp);
+    return 1;
+}
+
 #ifdef DAN_VK_AMX_ON
 /* AMX (above): the vectors are prepared once by groups of 16 (padded with zero
    vectors, on the pool), each part of the pool takes groups of 16 rows (the
@@ -6062,6 +6604,7 @@ static void dan_vk_matmul_fmt(int fmt, const uint8_t *w, const uint8_t *xq, floa
         const dan_vk_table *t = dan_vk();
         if (t->many && t->many(fmt, w, xq, y, rows, cols, nv)) return;
         if (dan_vk_matmul_sm(fmt, w, xq, y, rows, cols, nv)) return;
+        if (dan_vk_matmul_tl(fmt, w, xq, y, rows, cols, nv)) return;
         if (dan_vk_matmul_rn(fmt, w, xq, y, rows, cols, nv)) return;
     }
     int64_t blocks = cols / dan_vk_fmt_n[fmt], xs = blocks * dan_vk_fmt_xbytes[fmt];
