@@ -74,13 +74,13 @@ static const char *labels[8];   /* the names asked for (several tables are named
 static int nvariants;
 
 static void find_variants(void) {
-    static const char *const names[] = {"c", "avx2", "avx512vnni", "avx512z", "avx512", "neon", "dotprod"};
+    static const char *const names[] = {"c", "avx2", "avx512vnni", "avx512z", "avx512", "neon", "dotprod", "i8mm"};
     for (int i = 0; i < (int)(sizeof names / sizeof *names); i++) {
         const dan_vk_table *t;
         if (!dan_vk_supported(names[i], &t)) continue;
         int seen = 0;
         for (int v = 0; v < nvariants; v++) seen |= variants[v] == t;
-        if (!seen) { labels[nvariants] = t->many ? "amx" : names[i]; variants[nvariants++] = t; }
+        if (!seen) { labels[nvariants] = t->many && strcmp(names[i], "avx512") == 0 ? "amx" : names[i]; variants[nvariants++] = t; }
     }
 }
 

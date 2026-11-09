@@ -13,7 +13,8 @@
    AMX for a matrix by many vectors. The environment variable
    DAN_YADRA=c|avx2|avx512|neon|dotprod asks for a variant (an unsupported one
    is ignored; avx512vnni, avx512z and amx - the kinds of avx512, for
-   measurements).
+   measurements). На ARM с i8mm вариант dotprod умножает Q8_0 на 8 и больше
+   векторов командой smmla (DAN_YADRA=dotprod - без неё, i8mm - с ней).
 
    Every variant gives exactly the same bits as plain C. The order of
    summation is fixed by this file, not by the processor: a dot product of
@@ -4549,6 +4550,119 @@ static const dan_vk_table dan_vk_dotprod = {"dotprod", dan_vk_dot_f32_neon, dan_
                                           dan_vk_q50_dot4_dotprod, dan_vk_q41_dot4_dotprod, dan_vk_q51_dot4_dotprod, dan_vk_q80_dot4_dotprod} DAN_VK_RN_DOTPROD_TAIL, NULL, NULL,
                                          dan_vk_q2k_dot_dotprod, dan_vk_q3k_dot_dotprod, dan_vk_iq4xs_dot_dotprod};
 
+#if defined(__clang__)
+#define DAN_VK_I8MM __attribute__((target("dotprod,i8mm")))
+#else
+#define DAN_VK_I8MM __attribute__((target("+dotprod+i8mm")))
+#endif
+
+/* ---- ARM с i8mm: Q8_0 на много векторов командой smmla ----
+
+   smmla умножает матрицу 2 x 8 байтов на 8 x 2 (две строки на два вектора по 8 чисел) и
+   прибавляет 4 суммы: вдвое больше произведений на команду, чем sdot. Строки и векторы
+   берутся парами: блок пары (DAN_VK_MMLA_RB байтов) - 4 куска по 16 байтов [первая: числа
+   8c..8c+7 блока | вторая: те же], затем 4 числа d: у пары строк - d0 d0 d1 d1, у пары
+   векторов - d0 d1 d0 d1, так что произведения d четырёх пар (строка, вектор) блока - одно
+   умножение в том же порядке, что у ядра строки (d строки на d вектора). Целая сумма блока
+   точна, p = d * сумма, дорожки и хвост - как у ядра строки Q8_0: каждое число то же.
+   Группа - 4 строки (2 пары) на 8 векторов (4 пары). */
+#define DAN_VK_MMLA_RB 80
+#define DAN_VK_MMLA_VG 8   /* векторов в группе */
+
+static int dan_vk_has_i8mm(void) {
+#if defined(__linux__)
+#ifndef HWCAP2_I8MM
+#define HWCAP2_I8MM (1 << 13)
+#endif
+    return (getauxval(AT_HWCAP2) & HWCAP2_I8MM) != 0;
+#elif defined(__APPLE__)
+    int v = 0;
+    size_t len = sizeof v;
+    if (sysctlbyname("hw.optional.arm.FEAT_I8MM", &v, &len, NULL, 0) != 0) return 0;
+    return v != 0;
+#else
+    return 0;
+#endif
+}
+
+/* пара блоков Q8_0 (p0, p1; второй может быть NULL - нули) в блок пары; rows - d0 d0 d1 d1, иначе d0 d1 d0 d1 */
+static void dan_vk_mmla_pair(const uint8_t *p0, const uint8_t *p1, int64_t blocks, int64_t stride, int rows, uint8_t *o) {
+    for (int64_t b = 0; b < blocks; b++, o += DAN_VK_MMLA_RB) {
+        const uint8_t *a = p0 ? p0 + b * stride : NULL, *c = p1 ? p1 + b * stride : NULL;
+        for (int k = 0; k < 4; k++) {
+            if (a) memcpy(o + 16 * k, a + 2 + 8 * k, 8); else memset(o + 16 * k, 0, 8);
+            if (c) memcpy(o + 16 * k + 8, c + 2 + 8 * k, 8); else memset(o + 16 * k + 8, 0, 8);
+        }
+        float d0 = a ? dan_vk_half(a) : 0.0f, d1 = c ? dan_vk_half(c) : 0.0f;
+        float d[4] = {d0, rows ? d0 : d1, rows ? d1 : d0, d1};
+        memcpy(o + 64, d, 16);
+    }
+}
+
+/* 4 строки (пары a0, a1) на 8 векторов (пары x, gs байтов между парами) по blocks блоков: out[r * 8 + v] */
+DAN_VK_I8MM static void dan_vk_mmla_k(const uint8_t *a0, const uint8_t *a1, const uint8_t *x, int64_t gs, int64_t blocks, float *out) {
+    float acc[8][32], res[32];
+    memset(acc, 0, sizeof acc);
+    const int64_t full = blocks / 8 * 8;
+    for (int64_t b = 0; b < blocks; b++) {
+        const uint8_t *pa[2] = {a0 + b * DAN_VK_MMLA_RB, a1 + b * DAN_VK_MMLA_RB};
+        const uint8_t *px[4];
+        for (int q = 0; q < 4; q++) px[q] = x + q * gs + b * DAN_VK_MMLA_RB;
+        int32x4_t s[2][4];
+        for (int p = 0; p < 2; p++)
+            for (int q = 0; q < 4; q++) s[p][q] = vdupq_n_s32(0);
+        for (int c = 0; c < 4; c++) {
+            int8x16_t A0 = vld1q_s8((const int8_t *)(const void *)(pa[0] + 16 * c));
+            int8x16_t A1 = vld1q_s8((const int8_t *)(const void *)(pa[1] + 16 * c));
+            for (int q = 0; q < 4; q++) {
+                int8x16_t X = vld1q_s8((const int8_t *)(const void *)(px[q] + 16 * c));
+                s[0][q] = vmmlaq_s32(s[0][q], A0, X);
+                s[1][q] = vmmlaq_s32(s[1][q], A1, X);
+            }
+        }
+        float *dst = b < full ? acc[b & 7] : res;
+        if (b == full) {
+            /* дорожки: (l, l + 4), (l, l + 2), (l, l + 1) - как у ядра строки */
+            for (int i = 0; i < 32; i += 4) {
+                float32x4_t a[8];
+                for (int l = 0; l < 8; l++) a[l] = vld1q_f32(&acc[l][i]);
+                vst1q_f32(&res[i], vaddq_f32(vaddq_f32(vaddq_f32(a[0], a[4]), vaddq_f32(a[2], a[6])),
+                                             vaddq_f32(vaddq_f32(a[1], a[5]), vaddq_f32(a[3], a[7]))));
+            }
+        }
+        for (int p = 0; p < 2; p++) {
+            float32x4_t dw = vld1q_f32((const float *)(const void *)(pa[p] + 64));
+            for (int q = 0; q < 4; q++) {
+                float32x4_t t = vmulq_f32(vmulq_f32(dw, vld1q_f32((const float *)(const void *)(px[q] + 64))), vcvtq_f32_s32(s[p][q]));
+                float *o = dst + 16 * p + 4 * q;
+                vst1q_f32(o, vaddq_f32(vld1q_f32(o), t));
+            }
+        }
+    }
+    if (blocks == full)
+        for (int i = 0; i < 32; i += 4) {
+            float32x4_t a[8];
+            for (int l = 0; l < 8; l++) a[l] = vld1q_f32(&acc[l][i]);
+            vst1q_f32(&res[i], vaddq_f32(vaddq_f32(vaddq_f32(a[0], a[4]), vaddq_f32(a[2], a[6])),
+                                         vaddq_f32(vaddq_f32(a[1], a[5]), vaddq_f32(a[3], a[7]))));
+        }
+    /* res: пара строк p, пара векторов q - [r0 v0, r0 v1, r1 v0, r1 v1] */
+    for (int p = 0; p < 2; p++)
+        for (int q = 0; q < 4; q++)
+            for (int i = 0; i < 2; i++)
+                for (int j = 0; j < 2; j++) out[(2 * p + i) * 8 + 2 * q + j] = res[16 * p + 4 * q + 2 * i + j];
+}
+
+static int dan_vk_matmul_mmla(int fmt, const uint8_t *w, const uint8_t *xq, float *y, int64_t rows, int64_t cols, int64_t nv);
+/* dotprod с i8mm: то же, а Q8_0 на 8 и больше векторов - командой smmla (имя варианта то же - «dotprod») */
+static const dan_vk_table dan_vk_dotprod_i8mm = {"dotprod", dan_vk_dot_f32_neon, dan_vk_dot_f64_neon, dan_vk_sum_f32_neon, dan_vk_sum_f64_neon,
+                                            dan_vk_mm_f32_neon, dan_vk_mm_f64_neon, dan_vk_q8_block_dotprod, dan_vk_q8_dot_dotprod, dan_vk_dot32_acc_neon, dan_vk_h2f_neon, dan_vk_dot_f32_neon_fast, dan_vk_dot_f64_neon_fast, dan_vk_mm_f32_neon_fast, dan_vk_mm_f64_neon_fast,
+                                            dan_vk_q40_dot_dotprod, dan_vk_q4k_dot_dotprod, dan_vk_q5k_dot_dotprod, dan_vk_q6k_dot_dotprod,
+                                         dan_vk_q50_dot_dotprod, dan_vk_q41_dot_dotprod, dan_vk_q51_dot_dotprod,
+                                         {dan_vk_q40_dot4_dotprod, dan_vk_q4k_dot4_dotprod, dan_vk_q5k_dot4_dotprod, dan_vk_q6k_dot4_dotprod,
+                                          dan_vk_q50_dot4_dotprod, dan_vk_q41_dot4_dotprod, dan_vk_q51_dot4_dotprod, dan_vk_q80_dot4_dotprod} DAN_VK_RN_DOTPROD_TAIL, dan_vk_matmul_mmla, NULL,
+                                         dan_vk_q2k_dot_dotprod, dan_vk_q3k_dot_dotprod, dan_vk_iq4xs_dot_dotprod};
+
 
 static int dan_vk_has_dotprod(void) {
 #if defined(__linux__)
@@ -4610,6 +4724,8 @@ static int dan_vk_supported(const char *name, const dan_vk_table **t) {
 #ifdef DAN_VK_ARM
     if (strcmp(name, "neon") == 0) { *t = &dan_vk_neon; return 1; }
     if (strcmp(name, "dotprod") == 0 && dan_vk_has_dotprod()) { *t = &dan_vk_dotprod; return 1; }
+    /* «i8mm» - dotprod со smmla, лучший вариант, где он есть */
+    if (strcmp(name, "i8mm") == 0 && dan_vk_has_dotprod() && dan_vk_has_i8mm()) { *t = &dan_vk_dotprod_i8mm; return 1; }
 #endif
     return 0;
 }
@@ -4617,10 +4733,10 @@ static int dan_vk_supported(const char *name, const dan_vk_table **t) {
 static const dan_vk_table *dan_vk(void) {
     const dan_vk_table *t = atomic_load_explicit(&dan_vk_cur, memory_order_relaxed);
     if (t) return t;
-    static const char *const best[] = {"avx512", "avx2", "dotprod", "neon", "c"};
+    static const char *const best[] = {"avx512", "avx2", "i8mm", "dotprod", "neon", "c"};
     const char *want = getenv("DAN_YADRA");
     if (!(want && dan_vk_supported(want, &t)))
-        for (int i = 0; i < 5; i++) if (dan_vk_supported(best[i], &t)) break;
+        for (int i = 0; i < 6; i++) if (dan_vk_supported(best[i], &t)) break;
     /* two threads may choose at once: both find the same table */
     atomic_store_explicit(&dan_vk_cur, t, memory_order_relaxed);
     return t;
@@ -5943,6 +6059,70 @@ static int dan_vk_matmul_amx(int fmt, const uint8_t *w, const uint8_t *xq, float
     dan_pool_run(groups, 1, dan_vk_amx_prep_part, &j);
     int64_t rgroups = (rows + 15) / 16, work = cols * nv * 16;
     dan_pool_run_rows(rgroups, work >= 65536 ? 1 : 65536 / work, dan_vk_amx_job_part, &j);
+    free(xp);
+    return 1;
+}
+#endif
+
+#ifdef DAN_VK_ARM
+/* Q8_0 на много векторов (i8mm): векторы готовятся парами один раз (на пуле, группы по 8 - нулевые
+   векторы после nv), каждая часть пула берёт группы по 4 строки, для каждой плитки векторов
+   раскладывает свои строки парами и умножает на все группы векторов плитки */
+#define DAN_VK_MMLA_TILE (512 * 1024)
+typedef struct { const uint8_t *w, *x; uint8_t *xp; float *y; int64_t blocks, rows, nv, groups, gs, tile; } dan_vk_mmla_job;
+
+static void dan_vk_mmla_prep_part(void *c, int64_t b, int64_t e) {
+    dan_vk_mmla_job *j = (dan_vk_mmla_job *)c;
+    int64_t xs = j->blocks * DAN_Q8_BYTES;
+    for (int64_t q = b; q < e; q++) {   /* пара векторов 2q, 2q + 1 */
+        const uint8_t *v0 = 2 * q < j->nv ? j->x + 2 * q * xs : NULL, *v1 = 2 * q + 1 < j->nv ? j->x + (2 * q + 1) * xs : NULL;
+        dan_vk_mmla_pair(v0, v1, j->blocks, DAN_Q8_BYTES, 0, j->xp + q * j->gs);
+    }
+}
+
+static void dan_vk_mmla_part(void *c, int64_t b, int64_t e) {
+    dan_vk_mmla_job *j = (dan_vk_mmla_job *)c;
+    int64_t row = j->blocks * DAN_Q8_BYTES;
+    uint8_t *a = (uint8_t *)malloc((size_t)(2 * j->gs));
+    if (!a) {   /* нет памяти: строка на каждый вектор */
+        const dan_vk_table *t = dan_vk();
+        for (int64_t i = 4 * b; i < 4 * e && i < j->rows; i++)
+            for (int64_t v = 0; v < j->nv; v++) j->y[v * j->rows + i] = t->q8_dot(j->w + i * row, j->x + v * row, j->blocks);
+        return;
+    }
+    float out[32];
+    for (int64_t g0 = 0; g0 < j->groups; g0 += j->tile) {
+        int64_t g1 = g0 + j->tile < j->groups ? g0 + j->tile : j->groups;
+        for (int64_t rg = b; rg < e; rg++) {
+            int64_t r0 = 4 * rg;
+            for (int p = 0; p < 2; p++) {
+                int64_t ra = r0 + 2 * p, rb = ra + 1;
+                dan_vk_mmla_pair(ra < j->rows ? j->w + ra * row : NULL, rb < j->rows ? j->w + rb * row : NULL, j->blocks, DAN_Q8_BYTES, 1,
+                               a + p * j->gs);
+            }
+            for (int64_t g = g0; g < g1; g++) {
+                dan_vk_mmla_k(a, a + j->gs, j->xp + 4 * g * j->gs, j->gs, j->blocks, out);
+                for (int r = 0; r < 4 && r0 + r < j->rows; r++)
+                    for (int v = 0; v < DAN_VK_MMLA_VG && DAN_VK_MMLA_VG * g + v < j->nv; v++)
+                        j->y[(DAN_VK_MMLA_VG * g + v) * j->rows + r0 + r] = out[r * 8 + v];
+            }
+        }
+    }
+    free(a);
+}
+
+/* 1 если сделано: Q8_0, 8 и больше векторов */
+static int dan_vk_matmul_mmla(int fmt, const uint8_t *w, const uint8_t *xq, float *y, int64_t rows, int64_t cols, int64_t nv) {
+    if (fmt != DAN_FMT_Q80 || nv < DAN_VK_MMLA_VG || rows < 1 || cols < DAN_Q8_BLOCK) return 0;
+    int64_t blocks = cols / DAN_Q8_BLOCK, groups = (nv + DAN_VK_MMLA_VG - 1) / DAN_VK_MMLA_VG, gs = blocks * DAN_VK_MMLA_RB;
+    uint8_t *xp = (uint8_t *)malloc((size_t)(groups * 4 * gs));
+    if (!xp) return 0;
+    int64_t tile = dan_vk_tile_bytes(DAN_VK_MMLA_TILE) / (4 * gs);
+    if (tile < 1) tile = 1;
+    dan_vk_mmla_job j = {w, xq, xp, y, blocks, rows, nv, groups, gs, tile};
+    dan_pool_run(groups * 4, 1, dan_vk_mmla_prep_part, &j);
+    int64_t rgroups = (rows + 3) / 4, work = cols * nv * 4;
+    dan_pool_run_rows(rgroups, work >= 65536 ? 1 : 65536 / work, dan_vk_mmla_part, &j);
     free(xp);
     return 1;
 }
