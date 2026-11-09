@@ -138,6 +138,72 @@ static void test_mm(void) {
     }
 }
 
+/* перевод вектора в 8 бит простым кодом C (как был до команд SSE2): ядра на x86 должны давать те же байты */
+static void ref_q8_quantize(const float *x, uint8_t *out, int64_t n) {
+    for (int64_t b = 0; b < n / 32; b++) {
+        const float *v = x + b * 32;
+        uint8_t *o = out + b * 34;
+        float amax = 0.0f;
+        for (int i = 0; i < 32; i++) { float a = fabsf(v[i]); if (a > amax) amax = a; }
+        float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+        if (!isfinite(id) || !isfinite(d)) { d = 0.0f; id = 0.0f; }
+        uint16_t h = dan_f32_to_f16(d);
+        memcpy(o, &h, 2);
+        for (int i = 0; i < 32; i++) {
+            float q = v[i] * id;
+            q = q != q ? 0.0f : q < -127.0f ? -127.0f : q > 127.0f ? 127.0f : q;
+            o[2 + i] = (uint8_t)(int8_t)lrintf(q);
+        }
+    }
+}
+static void ref_q8k_quantize(const float *x, dan_q8k *y, int64_t n) {
+    for (int64_t b = 0; b < n / 256; b++, x += 256) {
+        dan_q8k *o = y + b;
+        float max = 0.0f, amax = 0.0f;
+        for (int j = 0; j < 256; j++) { float ax = fabsf(x[j]); if (ax > amax) { amax = ax; max = x[j]; } }
+        float iscale = amax != 0.0f ? -127.0f / max : 0.0f;
+        if (!isfinite(iscale) || iscale == 0.0f) { memset(o, 0, sizeof *o); continue; }
+        for (int j = 0; j < 256; j++) {
+            float v = iscale * x[j];
+            long r = lrintf(v);
+            o->qs[j] = (int8_t)(r < 127 ? r : 127);
+        }
+        for (int j = 0; j < 16; j++) {
+            int s = 0;
+            for (int i = 0; i < 16; i++) s += o->qs[16 * j + i];
+            o->bsums[j] = (int16_t)s;
+        }
+        o->d = 1.0f / iscale;
+    }
+}
+
+/* перевод в 8 бит на случайных числах разных порядков, с равными по модулю числами разных знаков,
+   крошечными, NaN и бесконечностями (Q8_0) - побайтно как у простого кода */
+static void test_quantize_ref(void) {
+    uint64_t saved = rng;   /* свои случайные числа: остальные пробы и хеши - как прежде */
+    static float x[1024];
+    static uint8_t a[32 * 34], b[32 * 34];
+    static dan_q8k ka[4], kb[4];
+    for (int t = 0; t < 20000; t++) {
+        int mode = t % 6;
+        for (int i = 0; i < 1024; i++) {
+            double g = rnd();
+            x[i] = mode == 0 ? (float)g : mode == 1 ? (float)(g * 1e-38) : mode == 2 ? (float)(g * 1e6)
+                 : mode == 3 ? (float)((int)(g * 20)) / 4.0f : mode == 4 ? 0.0f : (float)(g * (i % 37 == 0 ? 100 : 1));
+        }
+        if (t % 3 == 0) { int k = (int)(next() % 1023); x[k] = -x[k + 1]; }
+        dan_vk_q8k_quantize(x, ka, 1024);
+        ref_q8k_quantize(x, kb, 1024);
+        CHECK(memcmp(ka, kb, sizeof ka) == 0, "Q8_K как простой код, проба %d", t);
+        if (t % 5 == 0) x[next() % 1024] = NAN;
+        if (t % 7 == 0) x[next() % 1024] = -INFINITY;
+        dan_vk_q8_quantize(x, a, 1024);
+        ref_q8_quantize(x, b, 1024);
+        CHECK(memcmp(a, b, sizeof a) == 0, "Q8_0 как простой код, проба %d", t);
+    }
+    rng = saved;
+}
+
 static void test_q8(void) {
     int8_t x[32], y[32];
     for (int t = 0; t < 2000; t++) {
@@ -1281,6 +1347,7 @@ int main(int argc, char **argv) {
     test_dot();
     test_mm();
     test_q8();
+    test_quantize_ref();
     test_matvec();
     test_f16_kernels();
     test_fast();
