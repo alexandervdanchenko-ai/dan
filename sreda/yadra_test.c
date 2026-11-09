@@ -508,6 +508,85 @@ static void test_rn(void) {
     }
 }
 
+/* раскладка строк по 16 (поток 26А): раскладка каждого варианта - байты
+   образца на C, ядро каждого варианта и формата - биты ядра строки C для
+   каждой строки и вектора (блоки хвоста, ровно 8, 8 и хвост; числа вектора
+   до 100 раз больше обычных и нулевой блок), матрица - при числе строк и
+   векторов, не кратном ядру, и строки длиннее 8 блоков */
+static void test_tl(void) {
+    enum { MAXB = 33, ROWS = 16 * DAN_VK_TL_R, NV = DAN_VK_TL_V };
+    static const int64_t nb[] = {1, 2, 7, 8, 9, 15, 16, 17, 33};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t bytes = dan_vk_fmt_bytes[f], n = dan_vk_fmt_n[f], tu = dan_vk_tl_size(f), xu = dan_vk_tl_xu(f);
+        int64_t xb = MAXB * dan_vk_fmt_xbytes[f];
+        uint8_t *w = malloc((size_t)(ROWS * MAXB * bytes)), *t1 = malloc((size_t)(MAXB * DAN_VK_TL_R * tu));
+        uint8_t *t2 = malloc((size_t)tu), *xp = malloc((size_t)(NV * MAXB * xu));
+        float *x = malloc((size_t)(NV * MAXB * n) * 4);
+        kv_blocks(f, w, ROWS * MAXB, 2626 + (uint64_t)f);
+        for (int64_t i = 0; i < NV * MAXB * n; i++) x[i] = (float)(rnd2() * (i % 7 == 3 ? 100.0 : 1.0));
+        for (int64_t i = 0; i < n; i++) x[MAXB * n + 2 * n + i] = 0.0f;   /* нулевой блок */
+        uint8_t *xq = kv_quantize_x(f, x, NV * MAXB * n);
+        for (int v = 0; v < nvariants; v++) {
+            const dan_vk_table *t = variants[v];
+            if (!t->tl[f]) continue;
+            for (size_t s = 0; s < sizeof nb / sizeof *nb; s++) {
+                int64_t b = nb[s];
+                for (int64_t bl = 0; bl < b; bl++)
+                    for (int h = 0; h < DAN_VK_TL_R; h++) {
+                        const uint8_t *p[16];
+                        for (int i = 0; i < 16; i++) p[i] = w + ((16 * h + i) * MAXB + bl) * bytes;
+                        uint8_t *o = t1 + (bl * DAN_VK_TL_R + h) * tu;
+                        memset(o, 0x55, (size_t)tu);
+                        memset(t2, 0xAA, (size_t)tu);
+                        t->tl_unpack(f, p, o);
+                        dan_vk_tl_unpack_c(f, p, t2);
+                        CHECK(memcmp(o, t2, (size_t)tu) == 0, "%s: строки %s разложены не так, как в C (блок %d)", labels[v], kv_names[f], (int)bl);
+                    }
+                for (int k = 0; k < NV; k++) dan_vk_tl_prep(f, xq + k * xb, b, xp + k * b * xu);
+                float out[ROWS * NV];
+                t->tl[f](t1, xp, b * xu, b, out);
+                for (int r = 0; r < ROWS; r++)
+                    for (int k = 0; k < NV; k++) {
+                        float e = dan_vk_fmt_dot(&dan_vk_plain, f, w + r * MAXB * bytes, xq + k * xb, b);
+                        CHECK(same32(out[k * ROWS + r], e), "%s %s раскладка по 16: строка %d, вектор %d, %d блоков: %.9g и %.9g",
+                              labels[v], kv_names[f], r, k, (int)b, out[k * ROWS + r], e);
+                    }
+            }
+        }
+        free(xq); free(w); free(t1); free(t2); free(xp); free(x);
+    }
+    static const int64_t rows_[] = {1, 15, 33, 70}, blocks_[] = {1, 9, 17}, nv_[] = {4, 5, 11, 13};
+    for (int f = 0; f < DAN_NFMT; f++) {
+        int64_t n = dan_vk_fmt_n[f], bytes = dan_vk_fmt_bytes[f];
+        for (int ri = 0; ri < 4; ri++)
+            for (int bi = 0; bi < 3; bi++) {
+                int64_t rows = rows_[ri], cols = blocks_[bi] * n, nv = nv_[(ri + bi) % 4], blocks = rows * cols / n;
+                uint8_t *w = malloc((size_t)(blocks * bytes));
+                float *x = malloc((size_t)(cols * nv) * 4), *ys = malloc((size_t)(rows * nv) * 4), *y = malloc((size_t)(rows * nv) * 4);
+                kv_blocks(f, w, blocks, 2727 + (uint64_t)(f * 100 + ri * 10 + bi));
+                for (int64_t i = 0; i < cols * nv; i++) x[i] = (float)rnd2();
+                uint8_t *xq = kv_quantize_x(f, x, cols * nv);
+                int64_t xs = cols / n * dan_vk_fmt_xbytes[f];
+                for (int64_t k = 0; k < nv; k++)
+                    for (int64_t i = 0; i < rows; i++)
+                        ys[k * rows + i] = dan_vk_fmt_dot(&dan_vk_plain, f, w + i * (cols / n) * bytes, xq + k * xs, cols / n);
+                for (int v = 0; v < nvariants; v++) {
+                    if (!variants[v]->tl[f]) continue;
+                    dan_vk_cur = variants[v];
+                    memset(y, 0xff, (size_t)(rows * nv) * 4);
+                    CHECK(dan_vk_matmul_tl(f, w, xq, y, rows, cols, nv), "%s %s: раскладка по 16 не взялась", labels[v], kv_names[f]);
+                    for (int64_t k = 0; k < nv * rows; k++)
+                        if (!same32(y[k], ys[k])) {
+                            CHECK(0, "%s %s раскладка по 16, матрица: %d строк, %d блоков, %d векторов: строка %d, вектор %d: %.9g и %.9g",
+                                  labels[v], kv_names[f], (int)rows, (int)(cols / n), (int)nv, (int)(k % rows), (int)(k / rows), y[k], ys[k]);
+                            break;
+                        }
+                }
+                free(w); free(x); free(ys); free(y); free(xq);
+            }
+    }
+}
+
 /* матрица на вектор: каждый вариант - биты ядра строки C при любом числе блоков строки (одни
    блоки хвоста, ровно 8, 8 и хвост) */
 static void test_matvec_bloki(void) {
@@ -1022,7 +1101,7 @@ static void bench_weights(void) {
 /* the matrix of weights by vectors (the batch of a prompt): 4096 x 4096 by
    256 vectors, billions of multiplications per second, the kernels of rows
    by vectors and (DAN_YADRA_RN=0) of a row by 4 vectors; «замер_пакет» or
-   «zamer_paket» as the first argument */
+   «zamer_paket» as the first argument; DAN_ZAMER_VARIANT - только этот вариант */
 static void bench_batch(void) {
     enum { ROWS = 4096, COLS = 4096, NV = 256 };
     static const int fmts[] = {DAN_FMT_Q40, DAN_FMT_Q4K, DAN_FMT_Q5K, DAN_FMT_Q6K, DAN_FMT_Q50, DAN_FMT_Q80,
@@ -1042,30 +1121,38 @@ static void bench_batch(void) {
         }
         uint8_t *xq = kv_quantize_x(f, x, (int64_t)COLS * NV);
         for (int v = 0; v < nvariants; v++) {
+            if (getenv("DAN_ZAMER_VARIANT") && strcmp(getenv("DAN_ZAMER_VARIANT"), labels[v]) != 0) continue;
             dan_vk_cur = variants[v];
-            double best[2] = {1e30, 1e30};
-            for (int pass = 0; pass < 6; pass++) {
-                int rn = pass % 2;
+            /* 0 - строка на 4 вектора, 1 - строки на векторы, 2 - раскладка по 16 (если есть) */
+            double best[3] = {1e30, 1e30, 1e30};
+            int kinds = variants[v]->tl[f] ? 3 : 2;
+            for (int pass = 0; pass < 3 * kinds; pass++) {
+                int kind = pass % kinds;
 #ifdef _WIN32
-                _putenv_s("DAN_YADRA_RN", rn ? "1" : "0");
+                _putenv_s("DAN_YADRA_RN", kind ? "1" : "0");
+                _putenv_s("DAN_YADRA_RASKLADKA", kind == 2 ? "1" : "0");
 #else
-                setenv("DAN_YADRA_RN", rn ? "1" : "0", 1);
+                setenv("DAN_YADRA_RN", kind ? "1" : "0", 1);
+                setenv("DAN_YADRA_RASKLADKA", kind == 2 ? "1" : "0", 1);
 #endif
                 double t0 = now();
                 dan_vk_matmul_fmt(f, w, xq, y, ROWS, COLS, NV);
                 double t = now() - t0;
-                if (t < best[rn]) best[rn] = t;
+                if (t < best[kind]) best[kind] = t;
             }
             double ops = (double)ROWS * COLS * NV * 1e-9;
-            printf("%-10s пакет %s: строки на векторы %.1f, строка на 4 вектора %.1f млрд умножений/с\n", labels[v],
-                   kv_names[f], ops / best[1], ops / best[0]);
+            printf("%-10s пакет %s: строки на векторы %.1f, строка на 4 вектора %.1f", labels[v], kv_names[f], ops / best[1], ops / best[0]);
+            if (kinds == 3) printf(", раскладка по 16 %.1f", ops / best[2]);
+            printf(" млрд умножений/с\n");
         }
         free(w); free(xq);
     }
 #ifdef _WIN32
     _putenv_s("DAN_YADRA_RN", "");
+    _putenv_s("DAN_YADRA_RASKLADKA", "");
 #else
     unsetenv("DAN_YADRA_RN");
+    unsetenv("DAN_YADRA_RASKLADKA");
 #endif
     free(x); free(y);
 }
@@ -1202,6 +1289,7 @@ int main(int argc, char **argv) {
     test_sums();
     test_kvanty();
     test_rn();
+    test_tl();
     test_mnogo();
     test_malye();
     test_stroki();
