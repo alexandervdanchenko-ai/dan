@@ -2411,6 +2411,10 @@ DAN_VK_AVX2 static inline __m256 dan_vk_lanes8_fin(const __m256 *a) {
     return _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(a[0], a[4]), _mm256_add_ps(a[2], a[6])),
                          _mm256_add_ps(_mm256_add_ps(a[1], a[5]), _mm256_add_ps(a[3], a[7])));
 }
+/* 8 строк читаются из памяти восемью потоками, которые аппаратная подкачка ведёт хуже одного:
+   каждая строка подкачивается на DAN_VK_ROWS8_PF байтов вперёд (подкачка за концом строки
+   безвредна: _mm_prefetch не обращается к памяти с ошибкой) */
+#define DAN_VK_ROWS8_PF 768
 /* PARTS(w, y, &mins) - целая часть блока (VEC: наименьшие вектором частичных сумм, иначе int32_t);
    d по смещению DOFF, dmin (MINS) - по MOFF */
 #define DAN_VK_ROWS8_AVX2(NAME, PARTS, WB, DOFF, MINS, MOFF, VEC) DAN_VK_ROWS8_X86(NAME, DAN_VK_AVX2F16, PARTS, WB, DOFF, MINS, MOFF, VEC)
@@ -2425,6 +2429,7 @@ ATTR static void NAME(const uint8_t *w, int64_t row, const void *xv, int64_t blo
         const uint8_t *pw = w + b * (WB); \
         __m256i v[8], mv[8]; \
         int32_t ex[8]; \
+        for (int k = 0; k < 8; k++) _mm_prefetch((const char *)(pw + k * row + DAN_VK_ROWS8_PF), _MM_HINT_T0); \
         for (int k = 0; k < 8; k++) v[k] = VEC ? PARTS(pw + k * row, x + b, (void *)&mv[k]) : PARTS(pw + k * row, x + b, (void *)&ex[k]); \
         __m256 yd = _mm256_set1_ps(x[b].d); \
         __m256 t = _mm256_mul_ps(_mm256_mul_ps(yd, dan_vk_halves8_avx2(pw + (DOFF), (int)row)), _mm256_cvtepi32_ps(dan_vk_hadd8_avx2(v))); \
@@ -2447,7 +2452,6 @@ DAN_VK_ROWS8_AVX2(dan_vk_q3k_rows8_avx2, dan_vk_q3k_parts_avx2, DAN_Q3K_BYTES, 1
 DAN_VK_ROWS8_AVX2(dan_vk_iq4xs_rows8_avx2, dan_vk_iq4xs_parts_avx2, DAN_IQ4XS_BYTES, 0, 0, 0, 0)
 DAN_VK_ROWS8_AVX2(dan_vk_q4k_rows8_avx2, dan_vk_q4k_parts_avx2, DAN_Q4K_BYTES, 0, 1, 2, 0)
 DAN_VK_ROWS8_AVX2(dan_vk_q5k_rows8_avx2, dan_vk_q5k_parts_avx2, DAN_Q5K_BYTES, 0, 1, 2, 0)
-DAN_VK_ROWS8_AVX2(dan_vk_q6k_rows8_avx2, dan_vk_q6k_parts_avx2, DAN_Q6K_BYTES, 208, 0, 0, 0)
 /* ---- строка IQ4_XS на AVX-512 VNNI (варианты avx512 с VNNI) ----
    Числа - kv + 128 без знака из таблицы (vpshufb на 512 битах, 64 числа - две части), на числа
    вектора одной vpdpbusd; суммы части - на её масштаб (vpmulld), сдвиг 128 * сумма частей вектора
@@ -2488,28 +2492,6 @@ DAN_VK_VNNI static inline __m256i dan_vk_iq4xs_parts_vnni(const uint8_t *w, cons
 DAN_VK_KDOT2_X86(dan_vk_iq4xs_dot_vnni, DAN_VK_VNNI, dan_vk_iq4xs_parts_vnni, DAN_IQ4XS_BYTES, 0, 0, 0, dan_vk_iq4xs_p)
 DAN_VK_ROWS8_X86(dan_vk_iq4xs_rows8_vnni, DAN_VK_VNNI, dan_vk_iq4xs_parts_vnni, DAN_IQ4XS_BYTES, 0, 0, 0, 0)
 
-/* Q8_0: блоки по 32, d блока вектора - половинное число */
-DAN_VK_AVX2F16 static void dan_vk_q80_rows8_avx2(const uint8_t *w, int64_t row, const void *xv, int64_t blocks, float *out) {
-    const uint8_t *x = (const uint8_t *)xv;
-    __m256 acc[8];
-    for (int j = 0; j < 8; j++) acc[j] = _mm256_setzero_ps();
-    const int64_t full = blocks / 8 * 8;
-    __m256 r = _mm256_setzero_ps();
-    for (int64_t b = 0; b < blocks; b++) {
-        const uint8_t *pw = w + b * DAN_Q8_BYTES, *px = x + b * DAN_Q8_BYTES;
-        __m256i v[8];
-        for (int k = 0; k < 8; k++) v[k] = dan_vk_q8_part_avx2(pw + k * row, px);
-        __m256 d = _mm256_mul_ps(dan_vk_halves8_avx2(pw, (int)row), _mm256_set1_ps(dan_vk_half(px)));
-        __m256 t = _mm256_mul_ps(d, _mm256_cvtepi32_ps(dan_vk_hadd8_avx2(v)));
-        if (b < full) acc[b & 7] = _mm256_add_ps(acc[b & 7], t);
-        else {
-            if (b == full) r = dan_vk_lanes8_fin(acc);
-            r = _mm256_add_ps(r, t);
-        }
-    }
-    if (blocks == full) r = dan_vk_lanes8_fin(acc);
-    _mm256_storeu_ps(out, r);
-}
 
 /* строки на векторы Q2_K (единицы - dan_vk_rn_lowbit_c): T - части с масштабами, M - наименьшие на
    суммы частей вектора.
@@ -4807,6 +4789,7 @@ static struct {
 #define DAN_POOL_SPIN 2048
 #define DAN_POOL_SPIN_PAUSE 256
 static int dan_pool_spin;   /* polls before sleeping: DAN_POOL_SPIN, or 0 if threads > processors */
+static int dan_pool_kuski = 1;   /* 0 - dan_pool_run_rows равными частями, как dan_pool_run (DAN_POOL_KUSKI=0, для замеров) */
 static inline void dan_pool_relax(int i) {
     if (i >= DAN_POOL_SPIN_PAUSE && i % 16 == 15) {
 #ifdef _WIN32
@@ -4911,6 +4894,8 @@ static void dan_pool_start(void) {
     }
     if (t > DAN_POOL_MAX) t = DAN_POOL_MAX;
     dan_pool_spin = t <= dan_pool_cpus() ? DAN_POOL_SPIN : 0;
+    const char *ku = getenv("DAN_POOL_KUSKI");
+    if (ku && *ku) dan_pool_kuski = atoi(ku) != 0;
     dan_pool_mx_init(&dan_pool.mx);
     dan_pool_cv_init(&dan_pool.start);
     dan_pool_cv_init(&dan_pool.done);
@@ -5001,7 +4986,7 @@ static void dan_pool_run(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx)
 /* То же для работы, в которой каждое число [0, n) считается само по себе (строки матрицы весов): части
    берутся потоками по очереди кусками, поэтому какие числа достались какому потоку, зависит от времени,
    а результат - нет. */
-static void dan_pool_run_rows(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx) { dan_pool_go(n, min_part, 1, fn, ctx); }
+static void dan_pool_run_rows(int64_t n, int64_t min_part, dan_pool_fn fn, void *ctx) { dan_pool_go(n, min_part, dan_pool_kuski, fn, ctx); }
 
 static int dan_pool_threads(void) {
     dan_pool_init_once();
@@ -5590,11 +5575,16 @@ static void dan_vk_q8_dequantize(const uint8_t *in, float *x, int64_t n) {
 /* y[i] = row i of w (rows x cols, cols a multiple of 32, in blocks) . xq (x in blocks) */
 typedef struct { const uint8_t *w, *x; float *y; int64_t blocks; } dan_vk_q8mv_job;
 
-/* 8 строк матрицы на вектор сразу (sreda/yadra.c выше: те же числа, что у ядра строки) или NULL */
+/* 8 строк матрицы на вектор сразу (sreda/yadra.c выше: те же числа, что у ядра строки) или NULL.
+   Только для строк короче 8 блоков: там ядро строки тратит на дорожки и хвост больше, чем на блоки,
+   а 8 строк сразу - на 20-35% быстрее; на длинных строках из памяти (порождение) восемь потоков
+   чтения строк аппаратная подкачка ведёт хуже одного (Q8_0 на EPYC 9V74 - на треть медленнее,
+   временная ветка dvizhok-zamer-25a-4), поэтому там - ядро строки. Q6_K - тоже ядро строки:
+   его 8 строк из памяти медленнее и на коротких строках. */
 typedef void (*dan_vk_rows8_fn)(const uint8_t *, int64_t, const void *, int64_t, float *);
-static dan_vk_rows8_fn dan_vk_rows8(const dan_vk_table *t, int fmt) {
+static dan_vk_rows8_fn dan_vk_rows8(const dan_vk_table *t, int fmt, int64_t blocks) {
 #ifdef DAN_VK_X86
-    if (fmt == DAN_FMT_Q80) return t->q8_dot == dan_vk_q8_dot_avx2 ? dan_vk_q80_rows8_avx2 : NULL;
+    if (blocks >= 8) return NULL;
     if (fmt == DAN_FMT_IQ4XS && t->iq4xs_dot == dan_vk_iq4xs_dot_vnni) return dan_vk_iq4xs_rows8_vnni;
     if (t->q4k_dot == dan_vk_q4k_dot_avx2)
         switch (fmt) {
@@ -5603,11 +5593,10 @@ static dan_vk_rows8_fn dan_vk_rows8(const dan_vk_table *t, int fmt) {
         case DAN_FMT_IQ4XS: return dan_vk_iq4xs_rows8_avx2;
         case DAN_FMT_Q4K: return dan_vk_q4k_rows8_avx2;
         case DAN_FMT_Q5K: return dan_vk_q5k_rows8_avx2;
-        case DAN_FMT_Q6K: return dan_vk_q6k_rows8_avx2;
         default: break;
         }
 #endif
-    (void)t; (void)fmt;
+    (void)t; (void)fmt; (void)blocks;
     return NULL;
 }
 /* наименьший кусок строк пула для матрицы на вектор: кратен 8 (ядра 8 строк) */
@@ -5616,15 +5605,13 @@ static int64_t dan_vk_min_rows8(int64_t cols) { return (dan_vk_min_rows(cols) + 
 static void dan_vk_q8mv_part(void *c, int64_t b, int64_t e) {
     dan_vk_q8mv_job *j = (dan_vk_q8mv_job *)c;
     const dan_vk_table *t = dan_vk();
-    int64_t row = j->blocks * DAN_Q8_BYTES, i = b;
-    dan_vk_rows8_fn r8 = dan_vk_rows8(t, DAN_FMT_Q80);
-    if (r8) for (; i + 8 <= e; i += 8) r8(j->w + i * row, row, j->x, j->blocks, j->y + i);
-    for (; i < e; i++) j->y[i] = t->q8_dot(j->w + i * row, j->x, j->blocks);
+    int64_t row = j->blocks * DAN_Q8_BYTES;
+    for (int64_t i = b; i < e; i++) j->y[i] = t->q8_dot(j->w + i * row, j->x, j->blocks);
 }
 
 static void dan_vk_matvec_q8(const uint8_t *w, const uint8_t *xq, float *y, int64_t rows, int64_t cols) {
     dan_vk_q8mv_job j = {w, xq, y, cols / DAN_Q8_BLOCK};
-    dan_pool_run_rows(rows, dan_vk_min_rows8(cols), dan_vk_q8mv_part, &j);
+    dan_pool_run_rows(rows, dan_vk_min_rows(cols), dan_vk_q8mv_part, &j);
 }
 
 /* ---- weights of llama.cpp ---- */
@@ -5872,7 +5859,7 @@ static void dan_vk_qmv_part(void *c, int64_t b, int64_t e) {
     dan_vk_qmv_job *j = (dan_vk_qmv_job *)c;
     const dan_vk_table *t = dan_vk();
     int64_t row = j->blocks * dan_vk_fmt_bytes[j->fmt], i = b;
-    dan_vk_rows8_fn r8 = dan_vk_rows8(t, j->fmt);
+    dan_vk_rows8_fn r8 = dan_vk_rows8(t, j->fmt, j->blocks);
     if (r8) for (; i + 8 <= e; i += 8) r8(j->w + i * row, row, j->x, j->blocks, j->y + i);
     for (; i < e; i++) j->y[i] = dan_vk_fmt_dot(t, j->fmt, j->w + i * row, j->x, j->blocks);
 }
