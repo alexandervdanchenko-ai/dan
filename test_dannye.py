@@ -64,6 +64,37 @@ class ТестыДанных(unittest.TestCase):
         self.assertEqual(код, 1)
         self.assertIn(фрагмент, ошибки)
 
+    def test_случайные_байты_и_uuid(self):
+        import re
+        import uuid as uuid_python
+        код, вывод_, ошибки = self.запустить(
+            'пусть а = случайные_байты(32)\nпусть б = случайные_байты(32)\n'
+            'вывод(а.длина)\nвывод(а != б)\nвывод(случайные_байты(0).длина)\n'
+            'для к в 1..3 { вывод(uuid()) }\n'
+            'параллельно {\n    для з в 1..4 { запустить много(з) }\n}\n'
+            'функ много(з: цел) {\n    перем прежний = ""\n    для к в 1..5000 {\n'
+            '        пусть у = uuid_по_времени()\n        утвердить(у > прежний, "не по порядку")\n'
+            '        прежний = у\n    }\n    вывод(прежний)\n}\n')
+        self.assertEqual(код, 0, ошибки)
+        строки = вывод_.splitlines()
+        self.assertEqual(строки[:3], ["32", "истина", "0"])
+        образец = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        for с in строки[3:6]:
+            self.assertRegex(с, образец)
+            у = uuid_python.UUID(с)
+            self.assertEqual((у.version, у.variant), (4, uuid_python.RFC_4122))
+        self.assertEqual(len(set(строки[3:6])), 3)
+        import time
+        for с in строки[6:]:
+            self.assertRegex(с, образец)
+            у = uuid_python.UUID(с)
+            self.assertEqual((у.version, у.variant), (7, uuid_python.RFC_4122))
+            мс = у.int >> 80
+            self.assertLess(abs(мс / 1000 - time.time()), 600)
+        self.assertEqual(len(строки), 10)
+        self.ошибка("вывод(случайные_байты(-1).длина)", "от 0 до 16777216")
+        self.ошибка("вывод(случайные_байты(16777217).длина)", "от 0 до 16777216")
+
     def записать(self, имя, данные):
         with open(self.путь(имя), "wb") as ф:
             ф.write(данные)

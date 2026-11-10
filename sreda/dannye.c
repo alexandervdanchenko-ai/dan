@@ -1148,6 +1148,92 @@ static void dan_random(uint8_t *out, size_t n, int line) {
 #endif
 }
 
+/* ---- random bytes and UUID ---- */
+
+static dan_bytes dan_random_bytes(int64_t n, int line) {
+    if (n < 0 || n > 16777216) dan_error(DAN_MSG_RANDOM_LEN, line);
+    uint8_t *d = dan_alloc((size_t)n + 1);
+    if (n > 0) dan_random(d, (size_t)n, line);
+    return dan_bytes_wrap(d, n);
+}
+
+/* 16 bytes as 8-4-4-4-12 lowercase hexadecimal digits */
+static dan_str dan_uuid_text(const uint8_t b[16]) {
+    static const char digits[] = "0123456789abcdef";
+    char *s = dan_str_new(36);
+    int k = 0;
+    for (int i = 0; i < 16; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) s[k++] = '-';
+        s[k++] = digits[b[i] >> 4];
+        s[k++] = digits[b[i] & 15];
+    }
+    s[36] = 0;
+    return s;
+}
+
+/* UUID version 4 (RFC 9562): 122 random bits */
+static dan_str dan_uuid4(int line) {
+    uint8_t b[16];
+    dan_random(b, 16, line);
+    b[6] = (uint8_t)((b[6] & 0x0f) | 0x40);
+    b[8] = (uint8_t)((b[8] & 0x3f) | 0x80);
+    return dan_uuid_text(b);
+}
+
+#ifndef DAN_LIB_LOCK
+/* a lock for tables shared by tasks; without tasks there is only one thread and nothing to lock */
+#if defined(_WIN32)
+#define DAN_LIB_LOCK(m) static SRWLOCK m = SRWLOCK_INIT
+#define DAN_LIB_ACQUIRE(m) AcquireSRWLockExclusive(&m)
+#define DAN_LIB_RELEASE(m) ReleaseSRWLockExclusive(&m)
+#elif defined(DAN_TASKS)
+#define DAN_LIB_LOCK(m) static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER
+#define DAN_LIB_ACQUIRE(m) pthread_mutex_lock(&m)
+#define DAN_LIB_RELEASE(m) pthread_mutex_unlock(&m)
+#else
+#define DAN_LIB_LOCK(m) static int m
+#define DAN_LIB_ACQUIRE(m) ((void)m)
+#define DAN_LIB_RELEASE(m) ((void)m)
+#endif
+#endif
+DAN_LIB_LOCK(dan_uuid_lock);
+
+/* UUID version 7 (RFC 9562): milliseconds since 1970 in the first 48 bits, then random bits;
+   within one millisecond of one program the 12 bits after the version grow by one, so the
+   identifiers of one program are ordered by creation */
+static dan_str dan_uuid7(int line) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t ms = ((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ULL) / 10000u;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) dan_error(DAN_MSG_RANDOM, line);
+    uint64_t ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+#endif
+    uint8_t b[16];
+    dan_random(b, 16, line);
+    static uint64_t last_ms = 0;
+    static uint32_t counter = 0;
+    uint32_t seq;
+    DAN_LIB_ACQUIRE(dan_uuid_lock);
+    if (ms <= last_ms) {
+        ms = last_ms;
+        counter++;
+        if (counter > 0xfff) { counter = 0; ms = ++last_ms; }
+    } else {
+        last_ms = ms;
+        counter = (uint32_t)(b[6] & 0x07) << 8 | b[7];      /* random start, room to grow */
+    }
+    seq = counter;
+    DAN_LIB_RELEASE(dan_uuid_lock);
+    for (int i = 0; i < 6; i++) b[i] = (uint8_t)(ms >> (40 - 8 * i));
+    b[6] = (uint8_t)(0x70 | (seq >> 8));
+    b[7] = (uint8_t)(seq & 0xff);
+    b[8] = (uint8_t)((b[8] & 0x3f) | 0x80);
+    return dan_uuid_text(b);
+}
+
 /* ---- password encryption: "DANC", version 1, PBKDF2 iterations (4 bytes),
    salt (16), nonce (12), ciphertext, tag (16) ---- */
 
