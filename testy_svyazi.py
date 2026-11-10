@@ -55,14 +55,15 @@ import re
                               "test_sam.ТестыРезультатаПрограмм"]),
     (["matematika.py", "vysshaya.py"], ТАБЛИЦЫ + ["test_chisla", "test_vysshaya", "test_sverka"]),
     (["dannye.py"], ТАБЛИЦЫ + ДАННЫЕ),
-    (["sistema.py"], ТАБЛИЦЫ + ["test_sistema", "test_http", "test_pochta", "test_sqlite", "test_okna", "test_paketi"]),
+    (["sistema.py"], ТАБЛИЦЫ + ["test_sistema", "test_http", "test_pochta", "test_sqlite", "test_okna", "test_paketi",
+                    "test_vebserver"]),
     (["versiya.py"], ["test_llama", "test_sovmestimost", "test_obnovlenie", "test_sam.ТестыТаблицСреды", "test_sam.ТестыСамосборки"]),
     (["sreda/dannye.c"], ДАННЫЕ + ["test_katalog", "test_sam.ТестыТаблицСреды"]),
     (["тесты_данные/нейро_прежний_проход.txt"], ["test_neyro"]),
     (["тесты_данные/*"], ["test_dannye"]),
     # плотные массивы: среда на C и их проверка и порождение в компиляторе на Дане
     (["sreda/massivy.c", "сам/типы.dan", "сам/проверка.dan", "сам/порождение.dan"], ["test_massivy"]),
-    (["sreda/sistema.c"], ["test_sistema", "test_paketi", "test_katalog", "test_zadachi", "test_sam.ТестыТаблицСреды",
+    (["sreda/sistema.c"], ["test_sistema", "test_vebserver", "test_paketi", "test_katalog", "test_zadachi", "test_sam.ТестыТаблицСреды",
                            "test_sam.ТестыСамосборки"]),
     (["sreda/set.c"], ["test_http", "test_pochta", "test_sam.ТестыТаблицСреды"]),
     (["sreda/baza.c"], ["test_sqlite", "test_sam.ТестыТаблицСреды"]),
@@ -139,7 +140,7 @@ import re
 ТЕСТЫ_МОДУЛЕЙ = {"json": "test_json", "csv": "test_excel", "excel": "test_excel", "xml": "test_xml",
                  "word": "test_word", "pdf": "test_pdf", "http": "test_http", "почта": "test_pochta",
                  "sqlite": "test_sqlite", "окна": "test_okna", "модели": "test_modeli",
-                 "нейро": "test_neyro"}
+                 "нейро": "test_neyro", "вебсервер": "test_vebserver"}
 
 
 @functools.lru_cache(maxsize=None)
