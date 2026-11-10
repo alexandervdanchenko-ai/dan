@@ -970,6 +970,130 @@ static void test_stroki(void) {
             }
 }
 
+/* SwiGLU: every variant gives the bits of the loop of the program (libm exp in double, rounded to float)
+   and the same index of a result out of float; e^-z of every variant is within 2^-48 of the libm exp and
+   the same in all variants; a polynomial of smaller degree and a loop in float are caught */
+static uint64_t rng5 = 1414213562373095ull;
+static double rnd5(void) {
+    rng5 ^= rng5 << 13; rng5 ^= rng5 >> 7; rng5 ^= rng5 << 17;
+    return (double)(rng5 >> 11) / 9007199254740992.0 * 2.0 - 1.0;
+}
+
+static void expneg_of(const dan_vk_table *t, const float *z, double *e, int64_t n) {
+#ifdef DAN_VK_X86
+    if (t->dot_f32 == dan_vk_dot_f32_avx2) { dan_vk_expneg_avx2(z, e, n); return; }
+    if (t->dot_f32 == dan_vk_dot_f32_avx512) { dan_vk_expneg_avx512(z, e, n); return; }
+#endif
+#ifdef DAN_VK_ARM
+    if (t->dot_f32 == dan_vk_dot_f32_neon) { dan_vk_expneg_neon(z, e, n); return; }
+#endif
+    (void)t;
+    dan_vk_expneg_c(z, e, n, DAN_VK_EXP_DEG);
+}
+
+/* the largest relative error of e[i] against exp(-z[i]) over |z| <= 700 */
+static double exp_error(const float *z, const double *e, int64_t n) {
+    double worst = 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        if (!(fabs(z[i]) <= DAN_VK_EXP_MAX)) continue;
+        double d = fabs(e[i] / exp(-(double)z[i]) - 1.0);
+        if (!(d <= worst)) worst = d;
+    }
+    return worst;
+}
+
+static int64_t swiglu_loop(const float *z, const float *u, float *y, int64_t n, int in_float) {
+    int64_t bad = -1;
+    for (int64_t i = 0; i < n; i++) {
+        double r;
+        if (in_float) { float x = z[i]; r = (double)(x / (1.0f + expf(-x)) * u[i]); }
+        else { double x = (double)z[i]; r = x / (1.0 + exp(-x)) * (double)u[i]; }
+        if (bad < 0 && isfinite(r) && fabs(r) > DAN_VK_FLT_MAX) bad = i;
+        y[i] = (float)r;
+    }
+    return bad;
+}
+
+/* the same floats; NaN - any NaN (its sign and payload depend on the order of operands the C compiler chose) */
+static int same_or_nan(const float *a, const float *b, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (!same32(a[i], b[i]) && !(isnan(a[i]) && isnan(b[i]))) return 0;
+    return 1;
+}
+
+static void test_swiglu(void) {
+    const int64_t n = 400000;
+    float *z = malloc((size_t)n * 4), *u = malloc((size_t)n * 4), *y = malloc((size_t)n * 4), *r = malloc((size_t)n * 4);
+    double *e = malloc((size_t)n * 8), *ec = malloc((size_t)n * 8);
+    static const double scales[] = {0.01, 0.5, 3.0, 12.0, 40.0, 120.0, 700.0, 1e4};
+    for (int64_t i = 0; i < n; i++) {
+        z[i] = (float)(rnd5() * scales[i % 8]);
+        u[i] = (float)(rnd5() * (i % 3 == 0 ? 10.0 : 1.0));
+    }
+    /* special numbers */
+    static const float sz[] = {0.0f, -0.0f, INFINITY, -INFINITY, NAN, 700.0f, -700.0f, 700.0001f, -700.0001f, 750.0f,
+                               -750.0f, 88.7f, -88.7f, 3e38f, -3e38f, 1.17549435e-38f, 1e-40f, -1e-45f, 36.0f, 37.5f};
+    static const float su[] = {1.0f, -1.0f, 2.0f, 0.0f, -0.0f, 1e-30f, 1e-38f, 1e30f, 1.0f, NAN, INFINITY, -2.5f};
+    for (int i = 0; i < 20; i++)
+        for (int j = 0; j < 12; j++) { z[1000 + 12 * i + j] = sz[i]; u[1000 + 12 * i + j] = su[j]; }
+    int64_t want = swiglu_loop(z, u, r, n, 0);
+    for (int v = 0; v < nvariants; v++) {
+        dan_vk_cur = variants[v];
+        memset(y, 0xff, (size_t)n * 4);
+        int64_t bad = dan_vk_swiglu_f32(z, u, y, n);
+        CHECK(same_or_nan(y, r, n) && bad == want, "%s swiglu: не те биты (или номер %lld вместо %lld)", labels[v],
+              (long long)bad, (long long)want);
+        /* short arrays and tails */
+        for (int64_t m = 1; m <= 21; m++) {
+            memset(y, 0xff, (size_t)m * 4);
+            dan_vk_swiglu_f32(z + 1000 + m, u + 1000 + m, y, m);
+            CHECK(same_or_nan(y, r + 1000 + m, m), "%s swiglu: %lld чисел", labels[v], (long long)m);
+        }
+    }
+    /* a result out of float: the first index, as the loop */
+    {
+        float zz[9] = {1, 2, 3, 100, 5, 100, 7, 8, 9}, uu[9] = {1, 1, 1, 3e38f, 1, 3e38f, 1, 1, 1}, yy[9], rr[9];
+        int64_t w = swiglu_loop(zz, uu, rr, 9, 0);
+        CHECK(w == 3, "swiglu: номер числа вне дроб32 %lld", (long long)w);
+        for (int v = 0; v < nvariants; v++) {
+            dan_vk_cur = variants[v];
+            CHECK(dan_vk_swiglu_f32(zz, uu, yy, 9) == 3, "%s swiglu: число вне дроб32 не найдено", labels[v]);
+        }
+    }
+    /* e^-z: dense over -700..700 and the random numbers above */
+    const int64_t m = 300000;
+    float *zs = malloc((size_t)m * 4);
+    for (int64_t i = 0; i < m; i++) zs[i] = (float)(-700.0 + 1400.0 * (double)i / (double)(m - 1));
+    dan_vk_expneg_c(zs, ec, m, DAN_VK_EXP_DEG);
+    double err = exp_error(zs, ec, m);
+    CHECK(err <= 0x1p-48, "e^-z многочленом: относительная ошибка %g больше 2^-48", err);
+    dan_vk_expneg_c(z, ec, n, DAN_VK_EXP_DEG);
+    err = exp_error(z, ec, n);
+    CHECK(err <= 0x1p-48, "e^-z многочленом: относительная ошибка %g больше 2^-48", err);
+    for (int v = 0; v < nvariants; v++) {
+        expneg_of(variants[v], z, e, n);
+        int same = 1;
+        for (int64_t i = 0; i < n; i++)
+            if (fabs(z[i]) <= DAN_VK_EXP_MAX && fabs(z[i]) > 0.0f && !same64(e[i], ec[i])) same = 0;
+        CHECK(same, "%s: e^-z не те биты, что у обычного C", labels[v]);
+        expneg_of(variants[v], zs, e, m);
+        CHECK(exp_error(zs, e, m) <= 0x1p-48, "%s: e^-z неточно", labels[v]);
+    }
+    /* порча ловится: многочлен меньшей степени - ошибка больше границы; цикл в дроб32 - другие биты */
+    dan_vk_expneg_c(zs, ec, m, DAN_VK_EXP_DEG - 2);
+    CHECK(exp_error(zs, ec, m) > 0x1p-48, "многочлен степени %d не пойман", DAN_VK_EXP_DEG - 2);
+    swiglu_loop(z, u, y, n, 1);
+    CHECK(!same_or_nan(y, r, n), "счёт в дроб32 не пойман");
+    /* массив<дроб> */
+    {
+        double dz[3] = {0.5, -2.0, 0.0}, du[3] = {2.0, 1.0, -1.0}, dy[3];
+        dan_vk_swiglu_f64(dz, du, dy, 3);
+        CHECK(same64(dy[0], 0.5 / (1.0 + exp(-0.5)) * 2.0) && same64(dy[1], -2.0 / (1.0 + exp(2.0))) && dy[2] == 0.0,
+              "swiglu дроб");
+    }
+    free(z); free(u); free(y); free(r); free(e); free(ec); free(zs);
+}
+
 static void test_pool(void) {
     static const int64_t sizes[] = {1, 2, 3, 17, 1000, 100003};
     marks = calloc(100003, sizeof(int64_t));
@@ -1360,6 +1484,7 @@ int main(int argc, char **argv) {
     test_mnogo();
     test_malye();
     test_stroki();
+    test_swiglu();
     test_matvec_bloki();
     printf("%s варианты:", failures ? "ОШИБКИ" : "ok");
     for (int v = 0; v < nvariants; v++) printf(" %s", labels[v]);
