@@ -60,6 +60,7 @@ import re
     (["versiya.py"], ["test_llama", "test_sovmestimost", "test_obnovlenie", "test_sam.ТестыТаблицСреды", "test_sam.ТестыСамосборки"]),
     (["sreda/dannye.c"], ДАННЫЕ + ["test_katalog", "test_sam.ТестыТаблицСреды"]),
     (["тесты_данные/нейро_прежний_проход.txt"], ["test_neyro"]),
+    (["тесты_данные/настройки/*"], ["test_nastroyki"]),
     (["тесты_данные/*"], ["test_dannye"]),
     # плотные массивы: среда на C и их проверка и порождение в компиляторе на Дане
     (["sreda/massivy.c", "сам/типы.dan", "сам/проверка.dan", "сам/порождение.dan"], ["test_massivy"]),
@@ -142,7 +143,7 @@ import re
                  "sqlite": "test_sqlite", "окна": "test_okna", "модели": "test_modeli",
                  "нейро": "test_neyro", "вебсервер": "test_vebserver",
                  "командная_строка": "test_komandnaya_stroka",
-                 "журнал": "test_zhurnal"}
+                 "журнал": "test_zhurnal", "настройки": "test_nastroyki"}
 
 
 @functools.lru_cache(maxsize=None)
