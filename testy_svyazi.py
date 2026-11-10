@@ -29,12 +29,12 @@ import re
 # классы сверки с компилятором на Дане для проверки смысла (типы, ошибки, пометки для порождения)
 САМ_ПРОВЕРКА = ["test_sam.ТестыПроверкиНаДане", "test_parallelno", "test_sam.ТестыТиповНаДане", "test_sam.ТестыПорожденияНаДане",
                 "test_sam.ТестыСамосборки", "test_sam.ТестыРезультатаПрограмм"]
-ПОРОЖДЕНИЕ = ["test_kodogen", "test_poryadok", "test_diapazony", "test_parallelno", "test_garantii", "test_pamyat", "test_zadachi", "test_sverka",
+ПОРОЖДЕНИЕ = ["test_kodogen", "test_json_v_tipy", "test_poryadok", "test_diapazony", "test_parallelno", "test_garantii", "test_pamyat", "test_zadachi", "test_sverka",
               "test_sverka_sborok", "test_sovmestimost", "test_katalog", "test_testy", "test_zamery", "test_profil",
               "test_otladka", "test_sam.ТестыПорожденияНаДане", "test_sam.ТестыТаблицСреды",
               "test_sam.ТестыСамосборки", "test_sam.ТестыРезультатаПрограмм"]
 ТАБЛИЦЫ = ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды", "test_llms", "test_katalog"]
-ДАННЫЕ = ["test_dannye", "test_json", "test_excel", "test_xml", "test_word", "test_fazzing", "test_pamyat"]
+ДАННЫЕ = ["test_dannye", "test_json", "test_json_v_tipy", "test_excel", "test_xml", "test_word", "test_fazzing", "test_pamyat"]
 
 # (образцы путей, тесты). Тест - файл («test_json») или класс («test_sam.ТестыСамосборки»).
 СВЯЗИ = [
