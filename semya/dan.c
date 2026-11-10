@@ -25886,8 +25886,8 @@ static dan_str dan_uuid7(int line) {
     GetSystemTimeAsFileTime(&ft);
     uint64_t ms = ((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ULL) / 10000u;
 #else
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) dan_error(DAN_MSG_RANDOM, line);
+    struct timespec ts;                     /* C11: без макросов POSIX, как в обвязках тестов */
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) dan_error(DAN_MSG_RANDOM, line);
     uint64_t ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 #endif
     uint8_t b[16];
