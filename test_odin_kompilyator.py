@@ -294,6 +294,70 @@ class ТестыСервераНаДане(test_server.ТестыСервера,
 
 
 
+class ТестыСсылокСервераНаДане(unittest.TestCase):
+    """textDocument/references, prepareRename и rename сервера на Дане: места имени с учётом местных имён функций."""
+
+    ТЕКСТ = ("функ итог(дела: [цел]) -> цел {\n"          # 0
+             "    перем сумма = 0\n"                      # 1
+             "    для д в дела { сумма += д }\n"          # 2
+             "    вернуть сумма\n"                        # 3
+             "}\n"                                        # 4
+             "функ другая(сумма: цел) -> цел {\n"         # 5
+             "    вернуть сумма * 2\n"                    # 6
+             "}\n"                                        # 7
+             "пусть сумма = итог([1, 2])\n"               # 8
+             "вывод(\"сумма\" + стр(сумма) + стр(другая(сумма)))  // сумма\n")   # 9
+
+    def setUp(self):
+        self.папка = tempfile.TemporaryDirectory()
+        self.uri = test_server.uri_из_пути(os.path.join(self.папка.name, "главная.dan"))
+        self.клиент = test_server.Клиент([компилятор(), "сервер"], среда())
+        ответ = self.клиент.запрос("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+        self.assertTrue(ответ["capabilities"]["referencesProvider"])
+        self.assertEqual(ответ["capabilities"]["renameProvider"], {"prepareProvider": True})
+        self.клиент.уведомление("textDocument/didOpen", {"textDocument": {
+            "uri": self.uri, "languageId": "dan", "version": 1, "text": self.ТЕКСТ}})
+        self.клиент.ждать_ошибок(self.uri)
+
+    def tearDown(self):
+        self.клиент.закрыть()
+        self.папка.cleanup()
+
+    def места(self, строка, символ):
+        ответ = self.клиент.запрос("textDocument/references", {"textDocument": {"uri": self.uri},
+                                   "position": {"line": строка, "character": символ}, "context": {"includeDeclaration": True}})
+        return sorted((м["range"]["start"]["line"], м["range"]["start"]["character"], м["range"]["end"]["character"])
+                      for м in ответ)
+
+    def test_ссылки(self):
+        # местная «сумма» функции итог - только в ней
+        self.assertEqual(self.места(3, 13), [(1, 10, 15), (2, 19, 24), (3, 12, 17)])
+        # параметр «сумма» функции другая
+        self.assertEqual(self.места(6, 12), [(5, 12, 17), (6, 12, 17)])
+        # «сумма» верхнего уровня: не в функциях, где своя «сумма», не в строке и не в комментарии
+        self.assertEqual(self.места(8, 7), [(8, 6, 11), (9, 20, 25), (9, 40, 45)])
+        # функция: объявление и вызовы
+        self.assertEqual(self.места(8, 16), [(0, 5, 9), (8, 14, 18)])
+        self.assertEqual(self.места(4, 0), [])          # «}» - не имя
+
+    def test_переименование(self):
+        диапазон = self.клиент.запрос("textDocument/prepareRename", {"textDocument": {"uri": self.uri},
+                                      "position": {"line": 1, "character": 12}})
+        self.assertEqual(диапазон, {"start": {"line": 1, "character": 10}, "end": {"line": 1, "character": 15}})
+        правка = self.клиент.запрос("textDocument/rename", {"textDocument": {"uri": self.uri},
+                                    "position": {"line": 1, "character": 12}, "newName": "всего"})
+        правки = правка["changes"][self.uri]
+        self.assertEqual(sorted(п["range"]["start"]["line"] for п in правки), [1, 2, 3])
+        self.assertTrue(all(п["newText"] == "всего" for п in правки))
+        self.клиент.послать({"jsonrpc": "2.0", "id": 99, "method": "textDocument/rename", "params": {
+            "textDocument": {"uri": self.uri}, "position": {"line": 1, "character": 12}, "newName": "если"}})
+        ответ = self.клиент.получить()
+        while ответ.get("id") != 99:
+            ответ = self.клиент.получить()
+        self.assertEqual(ответ["error"]["code"], -32602)
+        self.assertIn("не может быть именем", ответ["error"]["message"])
+
+
 class ТестыСверкиСервера(unittest.TestCase):
     """Сервер на Дане отвечает так же, как сервер на Python, и знает возможности версий 1.5 и новее."""
 
@@ -367,8 +431,8 @@ class ТестыСверкиСервера(unittest.TestCase):
     def test_неизвестный_метод(self):
         for к in self.клиенты:
             with self.assertRaises(AssertionError) as о:
-                к.запрос("textDocument/rename", {})
-            self.assertIn("метод textDocument/rename не поддерживается", str(о.exception))
+                к.запрос("textDocument/codeLens", {})
+            self.assertIn("метод textDocument/codeLens не поддерживается", str(о.exception))
 
 
 def адрес(путь):
