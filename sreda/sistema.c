@@ -1088,10 +1088,12 @@ typedef int (WINAPI *dan_recv_f)(dan_sock_t, char *, int, int);
 typedef int (WINAPI *dan_send_f)(dan_sock_t, const char *, int, int);
 typedef int (WINAPI *dan_close_f)(dan_sock_t);
 typedef int (WINAPI *dan_getsockname_f)(dan_sock_t, void *, int *);
+typedef int (WINAPI *dan_setsockopt_f)(dan_sock_t, int, int, const char *, int);
 static struct {
     int ready;
     dan_socket_f socket; dan_bind_f bind; dan_listen_f listen; dan_accept_f accept;
-    dan_recv_f recv; dan_send_f send; dan_close_f close; dan_getsockname_f getsockname;
+    dan_recv_f recv; dan_send_f send; dan_close_f close; dan_getsockname_f getsockname, getpeername;
+    dan_setsockopt_f setsockopt;
 } dan_ws;
 
 static int dan_ws_load(void) {
@@ -1108,8 +1110,10 @@ static int dan_ws_load(void) {
     dan_ws.send = (dan_send_f)(void (*)(void))GetProcAddress(lib, "send");
     dan_ws.close = (dan_close_f)(void (*)(void))GetProcAddress(lib, "closesocket");
     dan_ws.getsockname = (dan_getsockname_f)(void (*)(void))GetProcAddress(lib, "getsockname");
+    dan_ws.getpeername = (dan_getsockname_f)(void (*)(void))GetProcAddress(lib, "getpeername");
+    dan_ws.setsockopt = (dan_setsockopt_f)(void (*)(void))GetProcAddress(lib, "setsockopt");
     if (!start || !dan_ws.socket || !dan_ws.bind || !dan_ws.listen || !dan_ws.accept || !dan_ws.recv
-        || !dan_ws.send || !dan_ws.close || !dan_ws.getsockname) return 0;
+        || !dan_ws.send || !dan_ws.close || !dan_ws.getsockname || !dan_ws.getpeername || !dan_ws.setsockopt) return 0;
     uint8_t data[1024];                    /* WSADATA занимает меньше */
     if (start(0x0202, data) != 0) return 0;
     dan_ws.ready = 1;
@@ -1126,6 +1130,7 @@ static int dan_ws_load(void) {
 #define DAN_GETSOCKNAME dan_ws.getsockname
 #elif !defined(__wasi__)
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 typedef int dan_sock_t;
 #define DAN_SOCK_BAD (-1)
@@ -1145,32 +1150,87 @@ typedef struct sockaddr_in dan_sockaddr_in;
 #endif
 
 #if !defined(__wasi__)
-/* открытые сокеты: номер для программы - место в таблице плюс 1 */
-#define DAN_SOCK_MAX 256
+/* открытые сокеты: номер для программы - место в таблице плюс 1. Таблица общая для всех задач программы и
+   защищена замком: соединение, принятое одной задачей, можно передать другой (номер - обычное число). Чтение,
+   запись и ожидание соединения идут без замка, поэтому задачи не ждут друг друга. */
+#define DAN_SOCK_MAX 1024
 static dan_sock_t dan_socks[DAN_SOCK_MAX];
 static bool dan_socks_used[DAN_SOCK_MAX];
+#ifndef DAN_LIB_LOCK
+#if defined(_WIN32)
+#define DAN_LIB_LOCK(m) static SRWLOCK m = SRWLOCK_INIT
+#define DAN_LIB_ACQUIRE(m) AcquireSRWLockExclusive(&m)
+#define DAN_LIB_RELEASE(m) ReleaseSRWLockExclusive(&m)
+#elif defined(DAN_TASKS)
+#define DAN_LIB_LOCK(m) static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER
+#define DAN_LIB_ACQUIRE(m) pthread_mutex_lock(&m)
+#define DAN_LIB_RELEASE(m) pthread_mutex_unlock(&m)
+#else
+#define DAN_LIB_LOCK(m) static int m
+#define DAN_LIB_ACQUIRE(m) ((void)m)
+#define DAN_LIB_RELEASE(m) ((void)m)
+#endif
+#endif
+DAN_LIB_LOCK(dan_socks_lock);
 
 static int64_t dan_sock_keep(dan_sock_t s) {
+    DAN_LIB_ACQUIRE(dan_socks_lock);
     for (int i = 0; i < DAN_SOCK_MAX; i++)
         if (!dan_socks_used[i]) {
             dan_socks_used[i] = true;
             dan_socks[i] = s;
+            DAN_LIB_RELEASE(dan_socks_lock);
             return i + 1;
         }
+    DAN_LIB_RELEASE(dan_socks_lock);
     DAN_CLOSE(s);
     return -1;
 }
 
 static bool dan_sock_find(int64_t number, dan_sock_t *s) {
-    if (number < 1 || number > DAN_SOCK_MAX || !dan_socks_used[number - 1]) return false;
-    *s = dan_socks[number - 1];
-    return true;
+    if (number < 1 || number > DAN_SOCK_MAX) return false;
+    DAN_LIB_ACQUIRE(dan_socks_lock);
+    bool used = dan_socks_used[number - 1];
+    if (used) *s = dan_socks[number - 1];
+    DAN_LIB_RELEASE(dan_socks_lock);
+    return used;
+}
+
+/* убрать номер из таблицы; ложь - его там не было (закрыт раньше) */
+static bool dan_sock_forget(int64_t number, dan_sock_t *s) {
+    if (number < 1 || number > DAN_SOCK_MAX) return false;
+    DAN_LIB_ACQUIRE(dan_socks_lock);
+    bool used = dan_socks_used[number - 1];
+    if (used) {
+        *s = dan_socks[number - 1];
+        dan_socks_used[number - 1] = false;
+    }
+    DAN_LIB_RELEASE(dan_socks_lock);
+    return used;
 }
 #endif
 
-static int64_t dan_listen_port(int64_t port, int line) {
+/* адрес IPv4 «a.b.c.d» в порядке байтов сети (первое число - первый байт); ложь - не такой адрес */
+static bool dan_ipv4_parse(dan_str text, uint8_t out[4]) {
+    const char *p = text;
+    for (int part = 0; part < 4; part++) {
+        if (part > 0) {
+            if (*p != '.') return false;
+            p++;
+        }
+        const char *start = p;
+        int v = 0;
+        while (*p >= '0' && *p <= '9' && p - start < 3) v = v * 10 + (*p++ - '0');
+        if (p == start || v > 255 || (p - start > 1 && *start == '0')) return false;
+        out[part] = (uint8_t)v;
+    }
+    return *p == 0;
+}
+
+static int64_t dan_listen_on(int64_t port, const uint8_t ip[4], int line) {
     if (port < 0 || port > 65535) dan_error(DAN_MSG_SOCK_PORT, line);
 #if defined(__wasi__)
+    (void)ip;
     return -1;
 #else
     if (!DAN_SOCK_OK()) return -1;
@@ -1181,18 +1241,34 @@ static int64_t dan_listen_port(int64_t port, int line) {
 #if defined(_WIN32)
     a.family = 2;                                          /* AF_INET */
     a.port = (uint16_t)(((port & 0xff) << 8) | ((port >> 8) & 0xff));
-    a.addr = 0x0100007fu;                                  /* 127.0.0.1 */
+    memcpy(&a.addr, ip, 4);
 #else
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    memcpy(&a.sin_addr.s_addr, ip, 4);
+    if (port != 0) {
+        /* занятый недавно закрытым слушателем порт (состояние TIME_WAIT) можно слушать снова сразу */
+        int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    }
 #endif
-    if (DAN_BIND(s, &a, sizeof a) != 0 || DAN_LISTEN(s, 16) != 0) {
+    if (DAN_BIND(s, &a, sizeof a) != 0 || DAN_LISTEN(s, 128) != 0) {
         DAN_CLOSE(s);
         return -1;
     }
     return dan_sock_keep(s);
 #endif
+}
+
+static int64_t dan_listen_port(int64_t port, int line) {
+    static const uint8_t loopback[4] = {127, 0, 0, 1};
+    return dan_listen_on(port, loopback, line);
+}
+
+static int64_t dan_listen_addr(int64_t port, dan_str addr, int line) {
+    uint8_t ip[4];
+    if (!dan_ipv4_parse(addr, ip)) dan_error(DAN_MSG_SOCK_ADDR, line);
+    return dan_listen_on(port, ip, line);
 }
 
 static int64_t dan_listener_port(int64_t number) {
@@ -1270,11 +1346,60 @@ static bool dan_conn_write(int64_t number, dan_bytes b) {
 #endif
 }
 
+/* предел ожидания чтения и записи соединения в секундах (0 - без предела); ложь - нет такого соединения */
+static bool dan_conn_timeout(int64_t number, int64_t seconds, int line) {
+    if (seconds < 0 || seconds > 86400) dan_error(DAN_MSG_SOCK_TIMEOUT, line);
+#if defined(__wasi__)
+    (void)number;
+    return false;
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return false;
+#if defined(_WIN32)
+    DWORD ms = (DWORD)(seconds * 1000);
+    bool ok = dan_ws.setsockopt(s, 0xffff, 0x1006, (const char *)&ms, (int)sizeof ms) == 0      /* SO_RCVTIMEO */
+              && dan_ws.setsockopt(s, 0xffff, 0x1005, (const char *)&ms, (int)sizeof ms) == 0;  /* SO_SNDTIMEO */
+#else
+    struct timeval tv;
+    tv.tv_sec = (time_t)seconds;
+    tv.tv_usec = 0;
+    bool ok = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) == 0
+              && setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) == 0;
+#endif
+    return ok;
+#endif
+}
+
+/* адрес IPv4 другой стороны соединения «a.b.c.d»; "" - нет такого соединения */
+static dan_str dan_conn_peer(int64_t number) {
+#if defined(__wasi__)
+    (void)number;
+    return "";
+#else
+    dan_sock_t s;
+    if (!dan_sock_find(number, &s)) return "";
+    dan_sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    uint8_t ip[4];
+#if defined(_WIN32)
+    int n = (int)sizeof a;
+    if (dan_ws.getpeername(s, &a, &n) != 0 || a.family != 2) return "";
+    memcpy(ip, &a.addr, 4);
+#else
+    socklen_t n = sizeof a;
+    if (getpeername(s, (struct sockaddr *)&a, &n) != 0 || a.sin_family != AF_INET) return "";
+    memcpy(ip, &a.sin_addr.s_addr, 4);
+#endif
+    char buf[16];
+    snprintf(buf, sizeof buf, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    return dan_strdup(buf);
+#endif
+}
+
 static void dan_conn_close(int64_t number) {
 #if !defined(__wasi__)
     dan_sock_t s;
-    if (!dan_sock_find(number, &s)) return;
-    dan_socks_used[number - 1] = false;
+    if (!dan_sock_forget(number, &s)) return;
     DAN_CLOSE(s);
 #else
     (void)number;
