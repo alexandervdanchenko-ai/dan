@@ -5658,6 +5658,317 @@ static void dan_vk_rows_f32_neon(const float *w, const float *x, float *y, int64
 }
 #endif
 
+/* ---- SwiGLU: y[i] = z / (1 + e^-z) * u ----
+
+   The result must be the same as the loop of the program «з / (1.0 + экспонента(-з)) * в» over float
+   arrays: every number in double, exp - the exp of the C library (the function «экспонента» of Dan),
+   the result rounded to float (and an error if it does not fit). Calling exp for every number costs most
+   of the time, so the vector kernels compute e^-z themselves - a table of 2^(j/32) and a polynomial (relative
+   error below 2^-50, checked by the test against the exp of the library), then the same operations in double, and keep the rounded float
+   only when it cannot differ from the loop's: the exp of a library differs from e^-z by far less than 2^-45
+   (glibc, musl, macOS, Windows - below 1 unit of the last place, 2^-52), so the double result of the loop
+   differs from ours by less than 2^-44 of it; if ours is farther than 2^-40 of it from every midpoint
+   between neighbouring floats, the rounding of both gives the same float. Otherwise (once in tens of
+   thousands of numbers), and for |z| > 700, zero, non-finite numbers and results outside 2^-125..2^127,
+   the number is computed as the loop does, with the exp of the library. So every variant gives the bits
+   of the loop. */
+
+#define DAN_VK_FLT_MAX 3.4028234663852886e38
+#define DAN_VK_LOG2E 1.4426950408889634
+#define DAN_VK_LN2HI 6.93147180369123816490e-01   /* 32 significant bits: t * LN2HI is exact for |t| < 2^21 */
+#define DAN_VK_LN2LO 1.90821492927058770002e-10
+#define DAN_VK_EXP_DEG 6
+#define DAN_VK_EXP_MAX 700.0
+/* 1/k!, k = 0..8 */
+static const double dan_vk_exp_c[9] = {1.0, 1.0, 1.0 / 2, 1.0 / 6, 1.0 / 24, 1.0 / 120, 1.0 / 720, 1.0 / 5040, 1.0 / 40320};
+/* 2^(j/32), j = 0..31 (nearest doubles) */
+static const double dan_vk_exp2t[32] = {1.0, 1.0218971486541166, 1.0442737824274138, 1.0671404006768237, 1.0905077326652577, 1.1143867425958924,
+    1.1387886347566916, 1.1637248587775775, 1.189207115002721, 1.215247359980469, 1.241857812073484, 1.2690509571917332,
+    1.2968395546510096, 1.3252366431597413, 1.3542555469368927, 1.383909881963832, 1.4142135623730951, 1.4451808069770467,
+    1.4768261459394993, 1.5091644275934228, 1.5422108254079407, 1.5759808451078865, 1.6104903319492543, 1.645755478153965,
+    1.681792830507429, 1.718619298122478, 1.7562521603732995, 1.7947090750031072, 1.8340080864093424, 1.8741676341103,
+    1.9152065613971474, 1.9571441241754002};
+
+/* e^y for |y| <= 700 (other y and NaN give NaN, so the result is computed as the loop does): y = t ln2 / 32 + r,
+   |r| <= ln2 / 64, t = 32 k + j, e^y = 2^k 2^(j/32) e^r, e^r - Taylor polynomial of degree deg (DAN_VK_EXP_DEG;
+   the test checks that a smaller degree is caught) */
+static inline double dan_vk_exp_poly(double y, int deg) {
+    if (!(fabs(y) <= DAN_VK_EXP_MAX)) return NAN;
+    /* rounded to the nearest integer, ties to even (as the vector variants): |32 y log2 e| < 2^51 */
+    double t = (y * (32 * DAN_VK_LOG2E) + 0x1.8p52) - 0x1.8p52;
+    double r = (y - t * (DAN_VK_LN2HI / 32)) - t * (DAN_VK_LN2LO / 32);
+    double p = dan_vk_exp_c[deg];
+    for (int k = deg - 1; k >= 0; k--) p = p * r + dan_vk_exp_c[k];
+    int64_t ti = (int64_t)t, j = ti & 31;
+    uint64_t bits = (uint64_t)((ti - j) / 32 + 1023) << 52;
+    double s;
+    memcpy(&s, &bits, 8);
+    return p * dan_vk_exp2t[j] * s;
+}
+
+/* the number as the loop of the program computes it; *bad - the first index whose result does not fit a float */
+static inline void dan_vk_swiglu_exact(const float *z, const float *u, float *y, int64_t i, int64_t *bad) {
+    double x = (double)z[i];
+    double r = x / (1.0 + exp(-x)) * (double)u[i];
+    if (*bad < 0 && isfinite(r) && fabs(r) > DAN_VK_FLT_MAX) *bad = i;
+    y[i] = (float)r;
+}
+
+/* e[i] = e^-z[i] by the polynomial (plain C; the test also calls it with a smaller degree) */
+static void dan_vk_expneg_c(const float *z, double *e, int64_t n, int deg) {
+    for (int64_t i = 0; i < n; i++) e[i] = dan_vk_exp_poly(-(double)z[i], deg);
+}
+
+/* plain C: the loop with the exp of the library (the polynomial without vector instructions is not faster) */
+static int64_t dan_vk_swiglu_f32_c(const float *z, const float *u, float *y, int64_t b, int64_t e) {
+    int64_t bad = -1;
+    for (int64_t i = b; i < e; i++) dan_vk_swiglu_exact(z, u, y, i, &bad);
+    return bad;
+}
+
+#ifdef DAN_VK_X86
+/* e[i] = e^-z[i], 16 numbers at a time (4 independent vectors keep the units busy): the operations of
+   dan_vk_exp_poly in every lane */
+DAN_VK_AVX2 static void dan_vk_expneg_avx2(const float *z, double *e, int64_t n) {
+    const __m256d mx = _mm256_set1_pd(DAN_VK_EXP_MAX), mn = _mm256_set1_pd(-DAN_VK_EXP_MAX), nan = _mm256_set1_pd(NAN);
+    int64_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256d y[4], in[4], t[4], r[4], p[4];
+        for (int q = 0; q < 4; q++) {
+            y[q] = _mm256_sub_pd(_mm256_setzero_pd(), _mm256_cvtps_pd(_mm_loadu_ps(z + i + 4 * q)));
+            in[q] = _mm256_and_pd(_mm256_cmp_pd(y[q], mx, _CMP_LE_OQ), _mm256_cmp_pd(y[q], mn, _CMP_GE_OQ));
+            y[q] = _mm256_and_pd(y[q], in[q]);   /* outside (and NaN) - 0, the result - NaN */
+            t[q] = _mm256_round_pd(_mm256_mul_pd(y[q], _mm256_set1_pd(32 * DAN_VK_LOG2E)), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            r[q] = _mm256_sub_pd(_mm256_sub_pd(y[q], _mm256_mul_pd(t[q], _mm256_set1_pd(DAN_VK_LN2HI / 32))),
+                                 _mm256_mul_pd(t[q], _mm256_set1_pd(DAN_VK_LN2LO / 32)));
+            p[q] = _mm256_set1_pd(dan_vk_exp_c[DAN_VK_EXP_DEG]);
+        }
+        for (int k = DAN_VK_EXP_DEG - 1; k >= 0; k--) {
+            __m256d c = _mm256_set1_pd(dan_vk_exp_c[k]);
+            for (int q = 0; q < 4; q++) p[q] = _mm256_add_pd(_mm256_mul_pd(p[q], r[q]), c);
+        }
+        for (int q = 0; q < 4; q++) {
+            __m128i ti = _mm256_cvtpd_epi32(t[q]);
+            __m256d tab = _mm256_i32gather_pd(dan_vk_exp2t, _mm_and_si128(ti, _mm_set1_epi32(31)), 8);
+            __m256i s = _mm256_slli_epi64(_mm256_add_epi64(_mm256_cvtepi32_epi64(_mm_srai_epi32(ti, 5)), _mm256_set1_epi64x(1023)), 52);
+            __m256d v = _mm256_mul_pd(_mm256_mul_pd(p[q], tab), _mm256_castsi256_pd(s));
+            _mm256_storeu_pd(e + i + 4 * q, _mm256_blendv_pd(nan, v, in[q]));
+        }
+    }
+    dan_vk_expneg_c(z + i, e + i, n - i, DAN_VK_EXP_DEG);
+}
+
+/* mask of the lanes whose float is sure: |r| in 2^-125..2^127, and r is farther than 2^-40 |r| from the
+   midpoints between the float nearest to it and its neighbours, so every number that close rounds to it */
+DAN_VK_AVX2 static int dan_vk_sure_avx2(__m256d r) {
+    const __m256d nosign = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL));
+    __m256d a = _mm256_and_pd(r, nosign);
+    __m256d in = _mm256_and_pd(_mm256_cmp_pd(a, _mm256_set1_pd(0x1p-125), _CMP_GE_OQ),
+                               _mm256_cmp_pd(a, _mm256_set1_pd(0x1p127), _CMP_LE_OQ));
+    __m128i fb = _mm_castps_si128(_mm256_cvtpd_ps(a));
+    __m256d f = _mm256_cvtps_pd(_mm_castsi128_ps(fb));
+    __m256d fu = _mm256_cvtps_pd(_mm_castsi128_ps(_mm_add_epi32(fb, _mm_set1_epi32(1))));
+    __m256d fd = _mm256_cvtps_pd(_mm_castsi128_ps(_mm_sub_epi32(fb, _mm_set1_epi32(1))));
+    __m256d tol = _mm256_mul_pd(a, _mm256_set1_pd(0x1p-40)), half = _mm256_set1_pd(0.5);
+    __m256d lo = _mm256_add_pd(_mm256_mul_pd(_mm256_add_pd(f, fd), half), tol);
+    __m256d hi = _mm256_sub_pd(_mm256_mul_pd(_mm256_add_pd(f, fu), half), tol);
+    in = _mm256_and_pd(in, _mm256_and_pd(_mm256_cmp_pd(a, lo, _CMP_GT_OQ), _mm256_cmp_pd(a, hi, _CMP_LT_OQ)));
+    return _mm256_movemask_pd(in);
+}
+
+#define DAN_VK_SWIGLU_CHUNK 64
+DAN_VK_AVX2 static int64_t dan_vk_swiglu_f32_avx2(const float *z, const float *u, float *y, int64_t b, int64_t e) {
+    int64_t bad = -1, i = b;
+    double ex[DAN_VK_SWIGLU_CHUNK];
+    const __m256d one = _mm256_set1_pd(1.0);
+    while (i + 4 <= e) {
+        int64_t m = (e - i) / 4 * 4;
+        if (m > DAN_VK_SWIGLU_CHUNK) m = DAN_VK_SWIGLU_CHUNK;
+        dan_vk_expneg_avx2(z + i, ex, m);
+        for (int64_t k = 0; k < m; k += 4, i += 4) {
+            __m256d x = _mm256_cvtps_pd(_mm_loadu_ps(z + i));
+            __m256d r = _mm256_mul_pd(_mm256_div_pd(x, _mm256_add_pd(one, _mm256_loadu_pd(ex + k))), _mm256_cvtps_pd(_mm_loadu_ps(u + i)));
+            _mm_storeu_ps(y + i, _mm256_cvtpd_ps(r));
+            int ok = dan_vk_sure_avx2(r);
+            if (ok != 15)
+                for (int l = 0; l < 4; l++) if (!(ok >> l & 1)) dan_vk_swiglu_exact(z, u, y, i + l, &bad);
+        }
+    }
+    for (; i < e; i++) dan_vk_swiglu_exact(z, u, y, i, &bad);
+    return bad;
+}
+
+DAN_VK_AVX512 static void dan_vk_expneg_avx512(const float *z, double *e, int64_t n) {
+    const __m512d mx = _mm512_set1_pd(DAN_VK_EXP_MAX), nan = _mm512_set1_pd(NAN);
+    int64_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        __m512d y[4], t[4], r[4], p[4];
+        __mmask8 in[4];
+        for (int q = 0; q < 4; q++) {
+            y[q] = _mm512_sub_pd(_mm512_setzero_pd(), _mm512_cvtps_pd(_mm256_loadu_ps(z + i + 8 * q)));
+            in[q] = _mm512_cmp_pd_mask(_mm512_abs_pd(y[q]), mx, _CMP_LE_OQ);
+            y[q] = _mm512_maskz_mov_pd(in[q], y[q]);
+            t[q] = _mm512_roundscale_pd(_mm512_mul_pd(y[q], _mm512_set1_pd(32 * DAN_VK_LOG2E)), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            r[q] = _mm512_sub_pd(_mm512_sub_pd(y[q], _mm512_mul_pd(t[q], _mm512_set1_pd(DAN_VK_LN2HI / 32))),
+                                 _mm512_mul_pd(t[q], _mm512_set1_pd(DAN_VK_LN2LO / 32)));
+            p[q] = _mm512_set1_pd(dan_vk_exp_c[DAN_VK_EXP_DEG]);
+        }
+        for (int k = DAN_VK_EXP_DEG - 1; k >= 0; k--) {
+            __m512d c = _mm512_set1_pd(dan_vk_exp_c[k]);
+            for (int q = 0; q < 4; q++) p[q] = _mm512_add_pd(_mm512_mul_pd(p[q], r[q]), c);
+        }
+        for (int q = 0; q < 4; q++) {
+            __m256i ti = _mm512_cvtpd_epi32(t[q]);
+            __m512d tab = _mm512_i32gather_pd(_mm256_and_si256(ti, _mm256_set1_epi32(31)), dan_vk_exp2t, 8);
+            __m512i s = _mm512_slli_epi64(_mm512_add_epi64(_mm512_cvtepi32_epi64(_mm256_srai_epi32(ti, 5)), _mm512_set1_epi64(1023)), 52);
+            __m512d v = _mm512_mul_pd(_mm512_mul_pd(p[q], tab), _mm512_castsi512_pd(s));
+            _mm512_storeu_pd(e + i + 8 * q, _mm512_mask_mov_pd(nan, in[q], v));
+        }
+    }
+    dan_vk_expneg_c(z + i, e + i, n - i, DAN_VK_EXP_DEG);
+}
+
+DAN_VK_AVX512 static __mmask8 dan_vk_sure_avx512(__m512d r) {
+    __m512d a = _mm512_abs_pd(r);
+    __mmask8 in = _mm512_cmp_pd_mask(a, _mm512_set1_pd(0x1p-125), _CMP_GE_OQ) & _mm512_cmp_pd_mask(a, _mm512_set1_pd(0x1p127), _CMP_LE_OQ);
+    __m256i fb = _mm256_castps_si256(_mm512_cvtpd_ps(a));
+    __m512d f = _mm512_cvtps_pd(_mm256_castsi256_ps(fb));
+    __m512d fu = _mm512_cvtps_pd(_mm256_castsi256_ps(_mm256_add_epi32(fb, _mm256_set1_epi32(1))));
+    __m512d fd = _mm512_cvtps_pd(_mm256_castsi256_ps(_mm256_sub_epi32(fb, _mm256_set1_epi32(1))));
+    __m512d tol = _mm512_mul_pd(a, _mm512_set1_pd(0x1p-40)), half = _mm512_set1_pd(0.5);
+    __m512d lo = _mm512_add_pd(_mm512_mul_pd(_mm512_add_pd(f, fd), half), tol);
+    __m512d hi = _mm512_sub_pd(_mm512_mul_pd(_mm512_add_pd(f, fu), half), tol);
+    return in & _mm512_cmp_pd_mask(a, lo, _CMP_GT_OQ) & _mm512_cmp_pd_mask(a, hi, _CMP_LT_OQ);
+}
+
+DAN_VK_AVX512 static int64_t dan_vk_swiglu_f32_avx512(const float *z, const float *u, float *y, int64_t b, int64_t e) {
+    int64_t bad = -1, i = b;
+    double ex[DAN_VK_SWIGLU_CHUNK];
+    const __m512d one = _mm512_set1_pd(1.0);
+    while (i + 8 <= e) {
+        int64_t m = (e - i) / 8 * 8;
+        if (m > DAN_VK_SWIGLU_CHUNK) m = DAN_VK_SWIGLU_CHUNK;
+        dan_vk_expneg_avx512(z + i, ex, m);
+        for (int64_t k = 0; k < m; k += 8, i += 8) {
+            __m512d x = _mm512_cvtps_pd(_mm256_loadu_ps(z + i));
+            __m512d r = _mm512_mul_pd(_mm512_div_pd(x, _mm512_add_pd(one, _mm512_loadu_pd(ex + k))), _mm512_cvtps_pd(_mm256_loadu_ps(u + i)));
+            _mm256_storeu_ps(y + i, _mm512_cvtpd_ps(r));
+            unsigned ok = dan_vk_sure_avx512(r);
+            if (ok != 255)
+                for (int l = 0; l < 8; l++) if (!(ok >> l & 1)) dan_vk_swiglu_exact(z, u, y, i + l, &bad);
+        }
+    }
+    for (; i < e; i++) dan_vk_swiglu_exact(z, u, y, i, &bad);
+    return bad;
+}
+#endif
+
+#ifdef DAN_VK_ARM
+static void dan_vk_expneg_neon(const float *z, double *e, int64_t n) {
+    const float64x2_t mx = vdupq_n_f64(DAN_VK_EXP_MAX), nan = vdupq_n_f64(NAN);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        float64x2_t y[4], t[4], r[4], p[4];
+        uint64x2_t in[4];
+        for (int q = 0; q < 4; q++) {
+            y[q] = vnegq_f64(vcvt_f64_f32(vld1_f32(z + i + 2 * q)));
+            in[q] = vcleq_f64(vabsq_f64(y[q]), mx);
+            y[q] = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(y[q]), in[q]));
+            t[q] = vrndnq_f64(vmulq_f64(y[q], vdupq_n_f64(32 * DAN_VK_LOG2E)));
+            r[q] = vsubq_f64(vsubq_f64(y[q], vmulq_f64(t[q], vdupq_n_f64(DAN_VK_LN2HI / 32))),
+                             vmulq_f64(t[q], vdupq_n_f64(DAN_VK_LN2LO / 32)));
+            p[q] = vdupq_n_f64(dan_vk_exp_c[DAN_VK_EXP_DEG]);
+        }
+        for (int k = DAN_VK_EXP_DEG - 1; k >= 0; k--) {
+            float64x2_t c = vdupq_n_f64(dan_vk_exp_c[k]);
+            for (int q = 0; q < 4; q++) p[q] = vaddq_f64(vmulq_f64(p[q], r[q]), c);
+        }
+        for (int q = 0; q < 4; q++) {
+            int64x2_t ti = vcvtq_s64_f64(t[q]);
+            int64x2_t j = vandq_s64(ti, vdupq_n_s64(31));
+            double tv[2] = {dan_vk_exp2t[vgetq_lane_s64(j, 0)], dan_vk_exp2t[vgetq_lane_s64(j, 1)]};
+            int64x2_t s = vshlq_n_s64(vaddq_s64(vshrq_n_s64(ti, 5), vdupq_n_s64(1023)), 52);
+            float64x2_t v = vmulq_f64(vmulq_f64(p[q], vld1q_f64(tv)), vreinterpretq_f64_s64(s));
+            vst1q_f64(e + i + 2 * q, vbslq_f64(in[q], v, nan));
+        }
+    }
+    dan_vk_expneg_c(z + i, e + i, n - i, DAN_VK_EXP_DEG);
+}
+
+static uint64x2_t dan_vk_sure_neon(float64x2_t r) {
+    float64x2_t a = vabsq_f64(r);
+    uint64x2_t in = vandq_u64(vcgeq_f64(a, vdupq_n_f64(0x1p-125)), vcleq_f64(a, vdupq_n_f64(0x1p127)));
+    uint32x2_t fb = vreinterpret_u32_f32(vcvt_f32_f64(a));
+    float64x2_t f = vcvt_f64_f32(vreinterpret_f32_u32(fb));
+    float64x2_t fu = vcvt_f64_f32(vreinterpret_f32_u32(vadd_u32(fb, vdup_n_u32(1))));
+    float64x2_t fd = vcvt_f64_f32(vreinterpret_f32_u32(vsub_u32(fb, vdup_n_u32(1))));
+    float64x2_t tol = vmulq_f64(a, vdupq_n_f64(0x1p-40)), half = vdupq_n_f64(0.5);
+    float64x2_t lo = vaddq_f64(vmulq_f64(vaddq_f64(f, fd), half), tol);
+    float64x2_t hi = vsubq_f64(vmulq_f64(vaddq_f64(f, fu), half), tol);
+    return vandq_u64(in, vandq_u64(vcgtq_f64(a, lo), vcltq_f64(a, hi)));
+}
+
+static int64_t dan_vk_swiglu_f32_neon(const float *z, const float *u, float *y, int64_t b, int64_t e) {
+    int64_t bad = -1, i = b;
+    double ex[DAN_VK_SWIGLU_CHUNK];
+    const float64x2_t one = vdupq_n_f64(1.0);
+    while (i + 2 <= e) {
+        int64_t m = (e - i) / 2 * 2;
+        if (m > DAN_VK_SWIGLU_CHUNK) m = DAN_VK_SWIGLU_CHUNK;
+        dan_vk_expneg_neon(z + i, ex, m);
+        for (int64_t k = 0; k < m; k += 2, i += 2) {
+            float64x2_t x = vcvt_f64_f32(vld1_f32(z + i));
+            float64x2_t r = vmulq_f64(vdivq_f64(x, vaddq_f64(one, vld1q_f64(ex + k))), vcvt_f64_f32(vld1_f32(u + i)));
+            vst1_f32(y + i, vcvt_f32_f64(r));
+            uint64x2_t ok = dan_vk_sure_neon(r);
+            if (!vgetq_lane_u64(ok, 0)) dan_vk_swiglu_exact(z, u, y, i, &bad);
+            if (!vgetq_lane_u64(ok, 1)) dan_vk_swiglu_exact(z, u, y, i + 1, &bad);
+        }
+    }
+    for (; i < e; i++) dan_vk_swiglu_exact(z, u, y, i, &bad);
+    return bad;
+}
+#endif
+
+/* the variant of the processor (by the dot product of the chosen table, as the rows below) */
+static int64_t dan_vk_swiglu_f32_part_v(const float *z, const float *u, float *y, int64_t b, int64_t e) {
+    float (*dot)(const float *, const float *, int64_t) = dan_vk()->dot_f32;
+#ifdef DAN_VK_X86
+    if (dot == dan_vk_dot_f32_avx2) return dan_vk_swiglu_f32_avx2(z, u, y, b, e);
+    if (dot == dan_vk_dot_f32_avx512) return dan_vk_swiglu_f32_avx512(z, u, y, b, e);
+#endif
+#ifdef DAN_VK_ARM
+    if (dot == dan_vk_dot_f32_neon) return dan_vk_swiglu_f32_neon(z, u, y, b, e);
+#endif
+    (void)dot;
+    return dan_vk_swiglu_f32_c(z, u, y, b, e);
+}
+
+#define DAN_VK_SWIGLU_PART 2048   /* numbers in a part of the pool */
+typedef struct { const float *z, *u; float *y; int64_t n; _Atomic int64_t bad; } dan_vk_swiglu_job;
+
+static void dan_vk_swiglu_f32_part(void *c, int64_t b, int64_t e) {
+    dan_vk_swiglu_job *j = (dan_vk_swiglu_job *)c;
+    int64_t to = e * DAN_VK_SWIGLU_PART < j->n ? e * DAN_VK_SWIGLU_PART : j->n;
+    int64_t bad = dan_vk_swiglu_f32_part_v(j->z, j->u, j->y, b * DAN_VK_SWIGLU_PART, to);
+    if (bad < 0) return;
+    int64_t was = atomic_load_explicit(&j->bad, memory_order_relaxed);
+    while ((was < 0 || bad < was) && !atomic_compare_exchange_weak_explicit(&j->bad, &was, bad, memory_order_relaxed, memory_order_relaxed)) {}
+}
+
+/* y = SwiGLU of z and u (n numbers each), on all cores; the first index of a result out of float, or -1 */
+static int64_t dan_vk_swiglu_f32(const float *z, const float *u, float *y, int64_t n) {
+    dan_vk_swiglu_job j = {z, u, y, n, -1};
+    if (n <= 0) return -1;
+    dan_pool_run((n + DAN_VK_SWIGLU_PART - 1) / DAN_VK_SWIGLU_PART, 4, dan_vk_swiglu_f32_part, &j);
+    return atomic_load_explicit(&j.bad, memory_order_relaxed);
+}
+
+static int64_t dan_vk_swiglu_f64(const double *z, const double *u, double *y, int64_t n) {
+    for (int64_t i = 0; i < n; i++) { double x = z[i]; y[i] = x / (1.0 + exp(-x)) * u[i]; }
+    return -1;
+}
+
 typedef struct { const float *w, *x; float *y; int64_t rows, cols, nv; } dan_vk_rows_job;
 
 /* DAN_YADRA_STROKI=0 - the kernels below are off (a dot_f32 for each pair, matmat by the tiles of the
@@ -6842,6 +7153,24 @@ static dan_arr *dan_k_axpy_f64(const dan_arr *y, double a, const dan_arr *x, int
     dan_arr *r = dan_arr_new(DAN_AF64, y->len, line);
     memcpy(r->data, y->data, (size_t)y->len * 8);
     dan_vk_axpy_f64((double *)r->data, a, (const double *)x->data, x->len);
+    return r;
+}
+
+static dan_arr *dan_k_swiglu_f32(const dan_arr *z, const dan_arr *u, int line) {
+    if (z->len != u->len) dan_k_error("swiglu: массивы разной длины (%lld и %lld)", z->len, u->len, line);
+    dan_arr *r = dan_arr_new(DAN_AF32, z->len, line);
+    int64_t bad = dan_vk_swiglu_f32((const float *)z->data, (const float *)u->data, (float *)r->data, z->len);
+    if (bad >= 0) {
+        /* as the loop of the program: the number does not fit the element of the array */
+        double x = (double)((const float *)z->data)[bad];
+        dan_arr_float_range_error(DAN_AF32, x / (1.0 + exp(-x)) * (double)((const float *)u->data)[bad], line);
+    }
+    return r;
+}
+static dan_arr *dan_k_swiglu_f64(const dan_arr *z, const dan_arr *u, int line) {
+    if (z->len != u->len) dan_k_error("swiglu: массивы разной длины (%lld и %lld)", z->len, u->len, line);
+    dan_arr *r = dan_arr_new(DAN_AF64, z->len, line);
+    dan_vk_swiglu_f64((const double *)z->data, (const double *)u->data, (double *)r->data, z->len);
     return r;
 }
 
