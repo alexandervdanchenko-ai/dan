@@ -140,7 +140,8 @@ import re
 ТЕСТЫ_МОДУЛЕЙ = {"json": "test_json", "csv": "test_excel", "excel": "test_excel", "xml": "test_xml",
                  "word": "test_word", "pdf": "test_pdf", "http": "test_http", "почта": "test_pochta",
                  "sqlite": "test_sqlite", "окна": "test_okna", "модели": "test_modeli",
-                 "нейро": "test_neyro", "вебсервер": "test_vebserver"}
+                 "нейро": "test_neyro", "вебсервер": "test_vebserver",
+                 "командная_строка": "test_komandnaya_stroka"}
 
 
 @functools.lru_cache(maxsize=None)
