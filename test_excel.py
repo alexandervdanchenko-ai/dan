@@ -212,6 +212,20 @@ class ТестыCSV(unittest.TestCase):
                     with open(os.path.join(п, f"итог_т{н}.csv"), encoding="utf-8-sig", newline="") as ф:
                         self.assertEqual(list(csv.reader(ф, delimiter=";")), т)
 
+    def test_запись_побайтно(self):
+        # запись выполняет среда на C (записать_csv): тот же текст, что прежняя запись на Дане
+        with tempfile.TemporaryDirectory() as п:
+            код, вывод, ош = выполнить(п, r'''подключить "csv"
+записать("1.csv", csv.записать([[""], [], ["а", ""], ["", ""], ["x\"y", "a,b", "c\nd", "e\rf", "ё"]]))
+записать("2.csv", csv.записать_с_разделителем([["аёб", "ё", "х"]], "ё"))
+записать("3.csv", csv.записать_для_excel([["а;б", "в"]]))
+''')
+            self.assertEqual(код, 0, ош)
+            прочитать = lambda и: open(os.path.join(п, и), "rb").read().decode("utf-8")
+            self.assertEqual(прочитать("1.csv"), '""\r\n\r\nа,\r\n,\r\n"x""y","a,b","c\nd","e\rf",ё\r\n')
+            self.assertEqual(прочитать("2.csv"), '"аёб"ё"ё"ёх\r\n')
+            self.assertEqual(прочитать("3.csv"), '\ufeff"а;б";в\r\n')
+
     def test_разделитель_и_ошибки(self):
         with tempfile.TemporaryDirectory() as п:
             код, вывод, ош = выполнить(п, r'''подключить "csv"

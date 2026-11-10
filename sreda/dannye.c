@@ -3932,10 +3932,19 @@ static size_t dan_json_value(dan_json *j, size_t i, int depth) {
    The separator is one character; values in quotes may hold the separator,
    doubled quotes and line breaks; an empty line of the text is a row without
    values; "" is an empty value, different from no value. */
+/* A value of the table: one allocation of its exact length (the buffer f is reused for every value) */
+static dan_str dan_csv_value(const dan_mbuf *f) {
+    char *v = dan_str_new(f->len);
+    if (f->len) memcpy(v, f->s, f->len);
+    v[f->len] = 0;
+    return v;
+}
+
 static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
     size_t sl = strlen(sep);
     if (!sl || dan_utf8_len_at(sep) != sl || !strcmp(sep, "\"") || !strcmp(sep, "\n"))
         return dr_LLs_err(dan_strdup("разделитель CSV - один знак, кроме кавычки и перевода строки"), line);
+    const char s0 = sep[0];
     dl_LLs *rows = dl_LLs_from(0, NULL);
     dl_Ls *row = dl_Ls_from(0, NULL);
     dan_mbuf f = { NULL, 0, 0 };
@@ -3943,22 +3952,25 @@ static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
     const char *p = text;
     long lineno = 1;
     if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;
-    #define DAN_CSV_TAKE() do { dl_Ls_push(row, dan_strdup(f.s ? f.s : "")); f.len = 0; if (f.s) f.s[0] = 0; has = 0; } while (0)
+    #define DAN_CSV_TAKE() do { dl_Ls_push(row, dan_csv_value(&f)); f.len = 0; has = 0; } while (0)
+    /* the separator at q: its first byte is compared first (a lead byte of UTF-8 never equals
+       a continuation byte, so a separator is not found inside another character) */
+    #define DAN_CSV_SEP(q) (*(q) == s0 && (sl == 1 || strncmp((q), sep, sl) == 0))
     while (*p) {
         if (*p == '"' && !has) {
             long start = lineno;
             int closed = 0;
             p++;
-            while (*p && !closed) {
-                if (*p == '"') {
-                    if (p[1] == '"') { dan_mbuf_add(&f, "\"", 1); p += 2; }
-                    else { closed = 1; p++; }
-                } else {
-                    if (*p == '\n') lineno++;
-                    size_t k = dan_utf8_len_at(p);
-                    dan_mbuf_add(&f, p, k);
-                    p += k;
-                }
+            while (*p) {
+                const char *q = p;                /* a piece up to the next quote at once */
+                while (*q && *q != '"') { if (*q == '\n') lineno++; q++; }
+                if (q > p) dan_mbuf_add(&f, p, (size_t)(q - p));
+                p = q;
+                if (!*p) break;
+                if (p[1] == '"') { dan_mbuf_add(&f, "\"", 1); p += 2; continue; }
+                closed = 1;
+                p++;
+                break;
             }
             char why[160];
             if (!closed) {
@@ -3966,13 +3978,13 @@ static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
                 snprintf(why, sizeof why, "CSV, строка %ld: кавычка не закрыта", start);
                 return dr_LLs_err(dan_strdup(why), line);
             }
-            if (*p && strncmp(p, sep, sl) != 0 && *p != '\n' && *p != '\r') {
+            if (*p && !DAN_CSV_SEP(p) && *p != '\n' && *p != '\r') {
                 dan_free(f.s);
                 snprintf(why, sizeof why, "CSV, строка %ld: после закрывающей кавычки должен идти разделитель", lineno);
                 return dr_LLs_err(dan_strdup(why), line);
             }
             has = 1;
-        } else if (strncmp(p, sep, sl) == 0) {
+        } else if (DAN_CSV_SEP(p)) {
             DAN_CSV_TAKE();
             p += sl;
         } else if (*p == '\n' || *p == '\r') {
@@ -3984,19 +3996,60 @@ static dr_LLs dan_csv_parse(dan_str text, dan_str sep, int line) {
             p++;
             lineno++;
         } else {
-            size_t k = dan_utf8_len_at(p);
-            dan_mbuf_add(&f, p, k);
+            const char *q = p;                    /* ordinary characters up to a separator or line end */
+            while (*q && *q != '\n' && *q != '\r' && !DAN_CSV_SEP(q)) q++;
+            dan_mbuf_add(&f, p, (size_t)(q - p));
             has = 1;
-            p += k;
+            p = q;
         }
     }
     if (has || f.len > 0 || row->len > 0) {
         DAN_CSV_TAKE();
         dl_LLs_push(rows, row);
+    } else {
+        dl_Ls_release(row);
     }
     #undef DAN_CSV_TAKE
+    #undef DAN_CSV_SEP
     dan_free(f.s);
     return dr_LLs_some(rows);
+}
+
+/* Text CSV of rows: a value with the separator, a quote, \n or \r goes in quotes with doubled
+   quotes; a row of one empty value is "" (it differs from an empty row); every row ends with \r\n
+   (RFC 4180). The same text as the former writer of the module csv in Dan. */
+static dan_str dan_csv_write(const dl_LLs *rows, dan_str sep) {
+    size_t sl = strlen(sep);
+    dan_mbuf b = { NULL, 0, 0 };
+    dan_mbuf_add(&b, "", 0);
+    for (int64_t r = 0; r < rows->len; r++) {
+        const dl_Ls *row = rows->items[r];
+        if (row->len == 1 && row->items[0][0] == 0) {
+            dan_mbuf_add(&b, "\"\"\r\n", 4);
+            continue;
+        }
+        for (int64_t i = 0; i < row->len; i++) {
+            if (i > 0) dan_mbuf_add(&b, sep, sl);
+            const char *v = row->items[i];
+            size_t n = strlen(v);
+            int quote = sl == 0 || strstr(v, sep) != NULL;
+            for (size_t k = 0; !quote && k < n; k++)
+                if (v[k] == '"' || v[k] == '\n' || v[k] == '\r') quote = 1;
+            if (!quote) { dan_mbuf_add(&b, v, n); continue; }
+            dan_mbuf_add(&b, "\"", 1);
+            const char *p = v;
+            for (const char *q; (q = strchr(p, '"')) != NULL; p = q + 1) {
+                dan_mbuf_add(&b, p, (size_t)(q - p + 1));
+                dan_mbuf_add(&b, "\"", 1);
+            }
+            dan_mbuf_add(&b, p, strlen(p));
+            dan_mbuf_add(&b, "\"", 1);
+        }
+        dan_mbuf_add(&b, "\r\n", 2);
+    }
+    dan_str s = dan_strdup(b.s);
+    dan_free(b.s);
+    return s;
 }
 
 /* separator of a CSV text by its first line: «;» or tab if there are more of them than commas */
