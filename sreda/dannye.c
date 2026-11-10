@@ -70,6 +70,27 @@ static dan_str dan_read_text(dan_str path, int line) {
     return r;
 }
 
+#ifndef DAN_LIB_LOCK
+/* a lock for tables shared by tasks; without tasks there is only one thread and nothing to lock */
+#if defined(_WIN32)
+#define DAN_LIB_LOCK(m) static SRWLOCK m = SRWLOCK_INIT
+#define DAN_LIB_ACQUIRE(m) AcquireSRWLockExclusive(&m)
+#define DAN_LIB_RELEASE(m) ReleaseSRWLockExclusive(&m)
+#elif defined(DAN_TASKS)
+#define DAN_LIB_LOCK(m) static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER
+#define DAN_LIB_ACQUIRE(m) pthread_mutex_lock(&m)
+#define DAN_LIB_RELEASE(m) pthread_mutex_unlock(&m)
+#else
+#define DAN_LIB_LOCK(m) static int m
+#define DAN_LIB_ACQUIRE(m) ((void)m)
+#define DAN_LIB_RELEASE(m) ((void)m)
+#endif
+#endif
+DAN_LIB_LOCK(dan_uuid_lock);
+/* дописывание в файл из нескольких задач: в Windows режим "ab" сначала ищет конец файла, потом пишет,
+   и строки двух задач могут затереть друг друга */
+DAN_LIB_LOCK(dan_append_lock);
+
 static void dan_write_raw(dan_str path, const char *mode, const void *data, size_t len, int line) {
     FILE *f = dan_fopen(path, mode);
     if (!f) dan_path_error(DAN_MSG_OPEN_WRITE, path, line);
@@ -79,7 +100,15 @@ static void dan_write_raw(dan_str path, const char *mode, const void *data, size
 
 static void dan_write_file_text(dan_str path, dan_str s, int line) { dan_write_raw(path, "wb", s, strlen(s), line); }
 static void dan_write_file_bytes(dan_str path, dan_bytes b, int line) { dan_write_raw(path, "wb", b->data, (size_t)b->len, line); }
-static void dan_append_file_text(dan_str path, dan_str s, int line) { dan_write_raw(path, "ab", s, strlen(s), line); }
+static void dan_append_file_text(dan_str path, dan_str s, int line) {
+    DAN_LIB_ACQUIRE(dan_append_lock);
+    FILE *f = dan_fopen(path, "ab");
+    size_t len = strlen(s), w = f && len ? fwrite(s, 1, len, f) : 0;
+    int closed = f ? fclose(f) : -1;
+    DAN_LIB_RELEASE(dan_append_lock);
+    if (!f) dan_path_error(DAN_MSG_OPEN_WRITE, path, line);
+    if (closed != 0 || w != len) dan_path_error(DAN_MSG_WRITE, path, line);
+}
 
 static bool dan_file_exists(dan_str path) {
 #ifdef _WIN32
@@ -1179,24 +1208,6 @@ static dan_str dan_uuid4(int line) {
     b[8] = (uint8_t)((b[8] & 0x3f) | 0x80);
     return dan_uuid_text(b);
 }
-
-#ifndef DAN_LIB_LOCK
-/* a lock for tables shared by tasks; without tasks there is only one thread and nothing to lock */
-#if defined(_WIN32)
-#define DAN_LIB_LOCK(m) static SRWLOCK m = SRWLOCK_INIT
-#define DAN_LIB_ACQUIRE(m) AcquireSRWLockExclusive(&m)
-#define DAN_LIB_RELEASE(m) ReleaseSRWLockExclusive(&m)
-#elif defined(DAN_TASKS)
-#define DAN_LIB_LOCK(m) static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER
-#define DAN_LIB_ACQUIRE(m) pthread_mutex_lock(&m)
-#define DAN_LIB_RELEASE(m) pthread_mutex_unlock(&m)
-#else
-#define DAN_LIB_LOCK(m) static int m
-#define DAN_LIB_ACQUIRE(m) ((void)m)
-#define DAN_LIB_RELEASE(m) ((void)m)
-#endif
-#endif
-DAN_LIB_LOCK(dan_uuid_lock);
 
 /* UUID version 7 (RFC 9562): milliseconds since 1970 in the first 48 bits, then random bits;
    within one millisecond of one program the 12 bits after the version grow by one, so the
