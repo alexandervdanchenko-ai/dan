@@ -141,7 +141,8 @@ import re
                  "word": "test_word", "pdf": "test_pdf", "http": "test_http", "почта": "test_pochta",
                  "sqlite": "test_sqlite", "окна": "test_okna", "модели": "test_modeli",
                  "нейро": "test_neyro", "вебсервер": "test_vebserver",
-                 "командная_строка": "test_komandnaya_stroka"}
+                 "командная_строка": "test_komandnaya_stroka",
+                 "журнал": "test_zhurnal"}
 
 
 @functools.lru_cache(maxsize=None)
