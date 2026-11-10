@@ -1136,6 +1136,12 @@ static void NAME(const T *A, const T *B, T *C, int64_t m, int64_t n, int64_t k, 
 DAN_VK_MM_DRIVE(dan_vk_mm_drive_f32, float)
 DAN_VK_MM_DRIVE(dan_vk_mm_drive_f64, double)
 
+#if defined(__MINGW32__) && defined(__GNUC__) && !defined(__clang__)
+/* gcc MinGW (15.2, -O3): клон функции под постоянный аргумент (ipa-cp), который возвращает
+   __m256, падает при обращении к стеку (Windows x64 не выравнивает стек по 32 байтам);
+   без клонов ядра те же, а падения нет */
+#pragma GCC optimize("no-ipa-cp-clone")
+#endif
 #ifdef DAN_VK_X86
 #define DAN_VK_AVX2 __attribute__((target("avx2")))
 #define DAN_VK_AVX512 __attribute__((target("avx512f,avx512bw")))
