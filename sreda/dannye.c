@@ -3736,6 +3736,7 @@ static char *dan_json_new(const char *text, size_t n) {
 }
 
 static void dan_json_emit(dan_json *j, char kind, const char *text, size_t n) {
+    if (j->compact == 2) return;              /* пропуск значения при разборе в свой тип */
     if (j->compact) {
         dan_mbuf_add(&j->kinds, &kind, 1);
         if (kind == 'k' && n < 64) {
@@ -3789,8 +3790,17 @@ static size_t dan_json_string(dan_json *j, size_t i) {
     if (j->tmp.s) j->tmp.s[0] = 0;
     size_t k = i;
     for (;;) {
-        /* a run of ordinary bytes is copied at once */
+        /* a run of ordinary bytes is copied at once; whole words of 8 bytes are checked first:
+           a word without «"», «\» and bytes below 32 is passed in one step */
         size_t r = k;
+        while (r + 8 <= j->n) {
+            uint64_t w;
+            memcpy(&w, j->s + r, 8);
+            const uint64_t ones = 0x0101010101010101u, high = 0x8080808080808080u;
+            const uint64_t q = w ^ (ones * '"'), b = w ^ (ones * '\\');
+            if (((q - ones) & ~q & high) | ((b - ones) & ~b & high) | ((w - ones * 32) & ~w & high)) break;
+            r += 8;
+        }
         while (r < j->n) {
             unsigned char c = (unsigned char)j->s[r];
             if (c == '"' || c == '\\' || c < 32) break;
@@ -4133,6 +4143,257 @@ static dr_Ls dan_json_scan(dan_str text, int compact, int line) {
 }
 
 static dr_Ls dan_json_events(dan_str text, int line) { return dan_json_scan(text, 0, line); }
+
+/* ==== JSON в свои типы: json.разобрать_в и json.записать для собственных типов ====
+   Код разбора и записи для каждого типа порождает компилятор; здесь - чтение по месту
+   в тексте (без дерева значений) и запись в буфер. Проверка записи и сообщения - те же,
+   что у json.разобрать: значение пропускается тем же разбором без событий. */
+typedef struct {
+    dan_json j;
+    size_t i;                 /* место чтения (байт) */
+    int depth;
+    const char *field;        /* ключ поля, значение которого читается: для сообщения */
+} dan_jr;
+
+static void dan_jr_init(dan_jr *r, dan_str text) {
+    memset(r, 0, sizeof *r);
+    r->j.s = text;
+    r->j.n = strlen(text);
+    r->j.compact = 2;
+    size_t k = dan_json_space(&r->j, 0);
+    if (k + 3 <= r->j.n && !memcmp(r->j.s + k, "\xEF\xBB\xBF", 3)) k = dan_json_space(&r->j, k + 3);
+    r->i = k;
+}
+
+static void dan_jr_done(dan_jr *r) { dan_free(r->j.tmp.s); r->j.tmp.s = NULL; }
+
+/* ошибка вида значения: с ключом поля, если значение - поле объекта */
+static int dan_jr_fail(dan_jr *r, size_t at, const char *why) {
+    if (r->j.err) return 0;
+    if (!r->field) return dan_json_fail(&r->j, at, why);
+    size_t n = strlen(r->field) + strlen(why) + 32;
+    char *t = dan_alloc(n);
+    snprintf(t, n, "поле «%s»: %s", r->field, why);
+    dan_json_fail(&r->j, at, t);
+    dan_free(t);
+    return 0;
+}
+
+static int dan_jr_missing(dan_jr *r, const char *key, const char *type) {
+    size_t n = strlen(key) + strlen(type) + 64;
+    char *t = dan_alloc(n);
+    snprintf(t, n, "нет поля «%s» (тип %s)", key, type);
+    r->field = NULL;
+    dan_json_fail(&r->j, r->i > 0 ? r->i - 1 : 0, t);
+    dan_free(t);
+    return 0;
+}
+
+/* начало значения: текст не кончился */
+static int dan_jr_start(dan_jr *r) {
+    r->i = dan_json_space(&r->j, r->i);
+    if (r->i >= r->j.n) return dan_json_fail(&r->j, r->i, "текст закончился, а значение не найдено");
+    return 1;
+}
+
+static int dan_jr_null(dan_jr *r) {
+    r->i = dan_json_space(&r->j, r->i);
+    if (r->i + 4 <= r->j.n && !memcmp(r->j.s + r->i, "null", 4)) { r->i += 4; return 1; }
+    return 0;
+}
+
+static int dan_jr_skip(dan_jr *r) {
+    if (!dan_jr_start(r)) return 0;
+    size_t e = dan_json_value(&r->j, r->i, r->depth);
+    if (r->j.err) return 0;
+    r->i = e;
+    return 1;
+}
+
+/* запись числа JSON с места i: конец, целое ли (без точки и показателя) */
+static int dan_jr_number(dan_jr *r, size_t *end, int *integer, const char *why) {
+    if (!dan_jr_start(r)) return 0;
+    size_t i = r->i;
+    if (!(dan_jis(&r->j, i, '-') || dan_jdigit(&r->j, i))) return dan_jr_fail(r, i, why);
+    size_t e = dan_json_number(&r->j, i);
+    if (r->j.err) return 0;
+    *integer = 1;
+    for (size_t k = i; k < e; k++)
+        if (r->j.s[k] == '.' || r->j.s[k] == 'e' || r->j.s[k] == 'E') *integer = 0;
+    *end = e;
+    return 1;
+}
+
+static int dan_jr_int(dan_jr *r, int64_t *out) {
+    size_t e;
+    int integer;
+    if (!dan_jr_number(r, &e, &integer, "ожидалось целое число")) return 0;
+    if (!integer) return dan_jr_fail(r, r->i, "ожидалось целое число, а найдено дробное");
+    const char *p = r->j.s + r->i;
+    int neg = *p == '-';
+    if (neg) p++;
+    uint64_t v = 0;
+    for (; p < r->j.s + e; p++) {
+        unsigned d = (unsigned)(*p - '0');
+        if (v > (UINT64_MAX - d) / 10) return dan_jr_fail(r, r->i, "целое число не помещается в цел");
+        v = v * 10 + d;
+    }
+    if (v > (uint64_t)INT64_MAX + (uint64_t)neg) return dan_jr_fail(r, r->i, "целое число не помещается в цел");
+    *out = neg ? (int64_t)(0 - v) : (int64_t)v;
+    r->i = e;
+    return 1;
+}
+
+static int dan_jr_float(dan_jr *r, double *out) {
+    size_t e;
+    int integer;
+    if (!dan_jr_number(r, &e, &integer, "ожидалось число")) return 0;
+    char small[64];
+    size_t n = e - r->i;
+    char *t = n < sizeof small ? small : dan_alloc(n + 1);
+    memcpy(t, r->j.s + r->i, n);
+    t[n] = 0;
+    *out = strtod(t, NULL);
+    if (t != small) dan_free(t);
+    r->i = e;
+    return 1;
+}
+
+static int dan_jr_bool(dan_jr *r, bool *out) {
+    if (!dan_jr_start(r)) return 0;
+    if (r->i + 4 <= r->j.n && !memcmp(r->j.s + r->i, "true", 4)) { *out = true; r->i += 4; return 1; }
+    if (r->i + 5 <= r->j.n && !memcmp(r->j.s + r->i, "false", 5)) { *out = false; r->i += 5; return 1; }
+    return dan_jr_fail(r, r->i, "ожидалось true или false");
+}
+
+static int dan_jr_str(dan_jr *r, dan_str *out) {
+    if (!dan_jr_start(r)) return 0;
+    if (!dan_jis(&r->j, r->i, '"')) return dan_jr_fail(r, r->i, "ожидалась строка в кавычках");
+    size_t e = dan_json_string(&r->j, r->i + 1);
+    if (r->j.err) return 0;
+    char *v = dan_str_new(r->j.tmp.len);
+    if (r->j.tmp.len) memcpy(v, r->j.tmp.s, r->j.tmp.len);
+    v[r->j.tmp.len] = 0;
+    *out = v;
+    r->i = e;
+    return 1;
+}
+
+/* значение целиком как текст JSON (для поля типа json.Значение) */
+static int dan_jr_span(dan_jr *r, dan_str *out) {
+    if (!dan_jr_start(r)) return 0;
+    size_t b = r->i;
+    if (!dan_jr_skip(r)) return 0;
+    char *v = dan_str_new(r->i - b);
+    memcpy(v, r->j.s + b, r->i - b);
+    v[r->i - b] = 0;
+    *out = v;
+    return 1;
+}
+
+/* элементы массива: first - перед «[»; 1 - есть элемент, 0 - массив закончился, -1 - ошибка */
+static int dan_jr_item(dan_jr *r, int first) {
+    if (first) {
+        if (!dan_jr_start(r)) return -1;
+        if (!dan_jis(&r->j, r->i, '[')) return dan_jr_fail(r, r->i, "ожидался массив «[...]»") - 1;
+        if (r->depth >= 500) return dan_json_fail(&r->j, r->i, "слишком глубокая вложенность (больше 500)") - 1;
+        r->depth++;
+        r->i = dan_json_space(&r->j, r->i + 1);
+        if (dan_jis(&r->j, r->i, ']')) { r->i++; r->depth--; return 0; }
+        return 1;
+    }
+    r->i = dan_json_space(&r->j, r->i);
+    if (r->i >= r->j.n) return dan_json_fail(&r->j, r->i, "массив не закрыт скобкой «]»") - 1;
+    if (dan_jis(&r->j, r->i, ']')) { r->i++; r->depth--; return 0; }
+    if (!dan_jis(&r->j, r->i, ',')) return dan_json_fail(&r->j, r->i, "между элементами массива нужна запятая") - 1;
+    r->i++;
+    return 1;
+}
+
+/* поля объекта: 1 - прочитан ключ (в r->j.tmp) и двоеточие, 0 - объект закончился, -1 - ошибка */
+static int dan_jr_key(dan_jr *r, int first) {
+    if (first) {
+        if (!dan_jr_start(r)) return -1;
+        if (!dan_jis(&r->j, r->i, '{')) return dan_jr_fail(r, r->i, "ожидался объект «{...}»") - 1;
+        if (r->depth >= 500) return dan_json_fail(&r->j, r->i, "слишком глубокая вложенность (больше 500)") - 1;
+        r->depth++;
+        r->i = dan_json_space(&r->j, r->i + 1);
+        if (dan_jis(&r->j, r->i, '}')) { r->i++; r->depth--; return 0; }
+    } else {
+        r->i = dan_json_space(&r->j, r->i);
+        if (r->i >= r->j.n) return dan_json_fail(&r->j, r->i, "объект не закрыт скобкой «}»") - 1;
+        if (dan_jis(&r->j, r->i, '}')) { r->i++; r->depth--; return 0; }
+        if (!dan_jis(&r->j, r->i, ',')) return dan_json_fail(&r->j, r->i, "между полями объекта нужна запятая") - 1;
+        r->i = dan_json_space(&r->j, r->i + 1);
+    }
+    if (r->i >= r->j.n) return dan_json_fail(&r->j, r->i, "объект не закрыт скобкой «}»") - 1;
+    if (!dan_jis(&r->j, r->i, '"')) return dan_json_fail(&r->j, r->i, "имя поля должно быть строкой в кавычках") - 1;
+    size_t e = dan_json_string(&r->j, r->i + 1);
+    if (r->j.err) return -1;
+    r->i = dan_json_space(&r->j, e);
+    if (!dan_jis(&r->j, r->i, ':')) return dan_json_fail(&r->j, r->i, "после имени поля нужно двоеточие") - 1;
+    r->i++;
+    if (!r->j.tmp.s) dan_mbuf_add(&r->j.tmp, "", 0);
+    return 1;
+}
+
+static int dan_jr_is_key(dan_jr *r, const char *key, size_t n) {
+    return r->j.tmp.len == n && (n == 0 || !memcmp(r->j.tmp.s, key, n));
+}
+
+/* после значения - только пробелы */
+static int dan_jr_end(dan_jr *r) {
+    size_t e = dan_json_space(&r->j, r->i);
+    if (e < r->j.n) return dan_json_fail(&r->j, e, "после значения лишний текст");
+    return 1;
+}
+
+/* ---- запись ---- */
+static void dan_jw_raw(dan_mbuf *b, const char *s, size_t n) { dan_mbuf_add(b, s, n); }
+
+static void dan_jw_int(dan_mbuf *b, int64_t v) {
+    char t[24];
+    char *p = dan_itoa(v, t + sizeof t);
+    dan_mbuf_add(b, p, (size_t)(t + sizeof t - 1 - p));
+}
+
+/* как стр(ч); бесконечность и «не число» - null, как в json.записать */
+static void dan_jw_float(dan_mbuf *b, double v) {
+    if (v - v != 0.0) { dan_mbuf_add(b, "null", 4); return; }
+    char t[64];
+    dan_format_float(t, sizeof t, v);
+    dan_mbuf_add(b, t, strlen(t));
+}
+
+static void dan_jw_bool(dan_mbuf *b, bool v) { if (v) dan_mbuf_add(b, "true", 4); else dan_mbuf_add(b, "false", 5); }
+
+/* строка в кавычках, как строка_json: \" \\ \n \t, другие знаки меньше 32 - \u00XX */
+static void dan_jw_str(dan_mbuf *b, dan_str s) {
+    dan_mbuf_add(b, "\"", 1);
+    const unsigned char *p = (const unsigned char *)s, *run = p;
+    for (; *p; p++) {
+        unsigned char c = *p;
+        if (c >= 32 && c != '"' && c != '\\') continue;
+        if (p > run) dan_mbuf_add(b, (const char *)run, (size_t)(p - run));
+        if (c == '"' || c == '\\') { char e[2] = { '\\', (char)c }; dan_mbuf_add(b, e, 2); }
+        else if (c == '\n') dan_mbuf_add(b, "\\n", 2);
+        else if (c == '\t') dan_mbuf_add(b, "\\t", 2);
+        else { char e[8]; snprintf(e, sizeof e, "\\u%04X", c); dan_mbuf_add(b, e, 6); }
+        run = p + 1;
+    }
+    if (p > run) dan_mbuf_add(b, (const char *)run, (size_t)(p - run));
+    dan_mbuf_add(b, "\"", 1);
+}
+
+static dan_str dan_jw_take(dan_mbuf *b) {
+    char *v = dan_str_new(b->len);
+    if (b->len) memcpy(v, b->s, b->len);
+    v[b->len] = 0;
+    dan_free(b->s);
+    b->s = NULL;
+    b->len = b->cap = 0;
+    return v;
+}
 
 /* части_json: [kinds, texts...]: kinds - one character per event (as in события_json),
    texts - names of fields, strings and numbers in order */
