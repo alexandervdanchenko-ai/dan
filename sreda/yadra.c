@@ -5726,6 +5726,7 @@ static int64_t dan_vk_swiglu_f32_c(const float *z, const float *u, float *y, int
     return bad;
 }
 
+#define DAN_VK_SWIGLU_CHUNK 64   /* чисел за проход векторных вариантов swiglu */
 #ifdef DAN_VK_X86
 /* e[i] = e^-z[i], 16 numbers at a time (4 independent vectors keep the units busy): the operations of
    dan_vk_exp_poly in every lane */
@@ -5776,7 +5777,6 @@ DAN_VK_AVX2 static int dan_vk_sure_avx2(__m256d r) {
     return _mm256_movemask_pd(in);
 }
 
-#define DAN_VK_SWIGLU_CHUNK 64
 DAN_VK_AVX2 static int64_t dan_vk_swiglu_f32_avx2(const float *z, const float *u, float *y, int64_t b, int64_t e) {
     int64_t bad = -1, i = b;
     double ex[DAN_VK_SWIGLU_CHUNK];
