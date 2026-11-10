@@ -417,7 +417,7 @@ static dan_bytes dan_unhex(dan_str s, int line) {
 static uint32_t dan_crc_table[8][256];
 static int dan_crc_ready = 0;
 
-static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
+static uint32_t dan_crc32_table_update(uint32_t crc, const uint8_t *p, size_t n) {
     if (!__atomic_load_n(&dan_crc_ready, __ATOMIC_ACQUIRE)) {
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
@@ -441,6 +441,158 @@ static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
     }
     while (n--) crc = t[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
     return ~crc;
+}
+
+/* CRC-32 by the instructions of the processor: on x86-64 - carry-less multiplication PCLMULQDQ,
+   four 128-bit lanes folded over 64 bytes (V. Gopal and others, Intel, "Fast CRC Computation for
+   Generic Polynomials Using PCLMULQDQ Instruction", 2009; the constants of the bit-reflected
+   polynomial 0xEDB88320 from the end of the paper, as in zlib of Chromium); on ARMv8 - the CRC32X
+   instructions. Both give the same bits as the tables; DAN_CRC=c chooses the tables. */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define DAN_CRC_X86 1
+#include <emmintrin.h>
+#include <smmintrin.h>
+#include <wmmintrin.h>
+#include <cpuid.h>
+__attribute__((target("pclmul,sse4.1")))
+static uint32_t dan_crc32_clmul(uint32_t crc, const uint8_t *buf, size_t len) {
+    /* len >= 64, a multiple of 16; crc - the inverted state */
+    static const uint64_t k1k2[2] __attribute__((aligned(16))) = { 0x0154442bd4ull, 0x01c6e41596ull };
+    static const uint64_t k3k4[2] __attribute__((aligned(16))) = { 0x01751997d0ull, 0x00ccaa009eull };
+    static const uint64_t k5k0[2] __attribute__((aligned(16))) = { 0x0163cd6124ull, 0 };
+    static const uint64_t poly[2] __attribute__((aligned(16))) = { 0x01db710641ull, 0x01f7011641ull };
+    __m128i x0, x1, x2, x3, x4, x5, x6, x7, x8, y5, y6, y7, y8;
+    x1 = _mm_loadu_si128((const __m128i *)(buf + 0x00));
+    x2 = _mm_loadu_si128((const __m128i *)(buf + 0x10));
+    x3 = _mm_loadu_si128((const __m128i *)(buf + 0x20));
+    x4 = _mm_loadu_si128((const __m128i *)(buf + 0x30));
+    x1 = _mm_xor_si128(x1, _mm_cvtsi32_si128((int)crc));
+    x0 = _mm_load_si128((const __m128i *)k1k2);
+    buf += 64;
+    len -= 64;
+    while (len >= 64) {
+        x5 = _mm_clmulepi64_si128(x1, x0, 0x00);
+        x6 = _mm_clmulepi64_si128(x2, x0, 0x00);
+        x7 = _mm_clmulepi64_si128(x3, x0, 0x00);
+        x8 = _mm_clmulepi64_si128(x4, x0, 0x00);
+        x1 = _mm_clmulepi64_si128(x1, x0, 0x11);
+        x2 = _mm_clmulepi64_si128(x2, x0, 0x11);
+        x3 = _mm_clmulepi64_si128(x3, x0, 0x11);
+        x4 = _mm_clmulepi64_si128(x4, x0, 0x11);
+        y5 = _mm_loadu_si128((const __m128i *)(buf + 0x00));
+        y6 = _mm_loadu_si128((const __m128i *)(buf + 0x10));
+        y7 = _mm_loadu_si128((const __m128i *)(buf + 0x20));
+        y8 = _mm_loadu_si128((const __m128i *)(buf + 0x30));
+        x1 = _mm_xor_si128(_mm_xor_si128(x1, x5), y5);
+        x2 = _mm_xor_si128(_mm_xor_si128(x2, x6), y6);
+        x3 = _mm_xor_si128(_mm_xor_si128(x3, x7), y7);
+        x4 = _mm_xor_si128(_mm_xor_si128(x4, x8), y8);
+        buf += 64;
+        len -= 64;
+    }
+    /* four lanes into one */
+    x0 = _mm_load_si128((const __m128i *)k3k4);
+    x5 = _mm_clmulepi64_si128(x1, x0, 0x00);
+    x1 = _mm_clmulepi64_si128(x1, x0, 0x11);
+    x1 = _mm_xor_si128(_mm_xor_si128(x1, x2), x5);
+    x5 = _mm_clmulepi64_si128(x1, x0, 0x00);
+    x1 = _mm_clmulepi64_si128(x1, x0, 0x11);
+    x1 = _mm_xor_si128(_mm_xor_si128(x1, x3), x5);
+    x5 = _mm_clmulepi64_si128(x1, x0, 0x00);
+    x1 = _mm_clmulepi64_si128(x1, x0, 0x11);
+    x1 = _mm_xor_si128(_mm_xor_si128(x1, x4), x5);
+    while (len >= 16) {
+        x2 = _mm_loadu_si128((const __m128i *)buf);
+        x5 = _mm_clmulepi64_si128(x1, x0, 0x00);
+        x1 = _mm_clmulepi64_si128(x1, x0, 0x11);
+        x1 = _mm_xor_si128(_mm_xor_si128(x1, x2), x5);
+        buf += 16;
+        len -= 16;
+    }
+    /* 128 bits into 64 */
+    x2 = _mm_clmulepi64_si128(x1, x0, 0x10);
+    x3 = _mm_setr_epi32(~0, 0, ~0, 0);
+    x1 = _mm_srli_si128(x1, 8);
+    x1 = _mm_xor_si128(x1, x2);
+    x0 = _mm_loadl_epi64((const __m128i *)k5k0);
+    x2 = _mm_srli_si128(x1, 4);
+    x1 = _mm_and_si128(x1, x3);
+    x1 = _mm_clmulepi64_si128(x1, x0, 0x00);
+    x1 = _mm_xor_si128(x1, x2);
+    /* Barrett reduction to 32 bits */
+    x0 = _mm_load_si128((const __m128i *)poly);
+    x2 = _mm_and_si128(x1, x3);
+    x2 = _mm_clmulepi64_si128(x2, x0, 0x10);
+    x2 = _mm_and_si128(x2, x3);
+    x2 = _mm_clmulepi64_si128(x2, x0, 0x00);
+    x1 = _mm_xor_si128(x1, x2);
+    return (uint32_t)_mm_extract_epi32(x1, 1);
+}
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) && (defined(__linux__) || defined(__APPLE__))
+#define DAN_CRC_ARM 1
+#include <arm_acle.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#ifndef HWCAP_CRC32
+#define HWCAP_CRC32 (1 << 7)
+#endif
+#endif
+__attribute__((target("+crc")))
+static uint32_t dan_crc32_arm(uint32_t crc, const uint8_t *p, size_t n) {
+    /* crc - the inverted state */
+    while (n >= 8) {
+        uint64_t v;
+        memcpy(&v, p, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        v = __builtin_bswap64(v);
+#endif
+        crc = __crc32d(crc, v);
+        p += 8;
+        n -= 8;
+    }
+    while (n--) crc = __crc32b(crc, *p++);
+    return crc;
+}
+#endif
+
+/* 0 - tables, 1 - instructions of the processor */
+static int dan_crc_hw = -1;
+
+static int dan_crc_choose(void) {
+    int hw = 0;
+    const char *env = getenv("DAN_CRC");
+    int forbid = env && strcmp(env, "c") == 0;
+#ifdef DAN_CRC_X86
+    unsigned int ea, eb, ec, ed;
+    if (!forbid && __get_cpuid(1, &ea, &eb, &ec, &ed) && (ec & (1u << 1)) && (ec & (1u << 19))) hw = 1;  /* PCLMULQDQ, SSE4.1 */
+#endif
+#ifdef DAN_CRC_ARM
+#if defined(__APPLE__)
+    if (!forbid) hw = 1;
+#else
+    if (!forbid && (getauxval(AT_HWCAP) & HWCAP_CRC32)) hw = 1;
+#endif
+#endif
+    __atomic_store_n(&dan_crc_hw, hw, __ATOMIC_RELEASE);
+    return hw;
+}
+
+static uint32_t dan_crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
+    int hw = __atomic_load_n(&dan_crc_hw, __ATOMIC_ACQUIRE);
+    if (hw < 0) hw = dan_crc_choose();
+#ifdef DAN_CRC_X86
+    if (hw && n >= 64) {
+        size_t chunk = n & ~(size_t)15;
+        crc = ~dan_crc32_clmul(~crc, p, chunk);
+        p += chunk;
+        n -= chunk;
+    }
+#endif
+#ifdef DAN_CRC_ARM
+    if (hw) return ~dan_crc32_arm(~crc, p, n);
+#endif
+    (void)hw;
+    return dan_crc32_table_update(crc, p, n);
 }
 
 static int64_t dan_crc32_bytes(dan_bytes b) { return dan_crc32_update(0, b->data, (size_t)b->len); }
@@ -1311,13 +1463,28 @@ static void dan_bitw_byte(dan_bitw *w, uint8_t b) {
     w->d[w->len++] = b;
 }
 
+/* up to 32 bits at a time; whole 32 bits go out at once, fewer stay in w->bits (at most 31) */
 static void dan_bitw_put(dan_bitw *w, uint32_t v, int n) {
     w->bits |= (uint64_t)v << w->nbits;
     w->nbits += n;
-    while (w->nbits >= 8) { dan_bitw_byte(w, (uint8_t)w->bits); w->bits >>= 8; w->nbits -= 8; }
+    if (w->nbits >= 32) {
+        if (w->len + 4 > w->cap) { w->cap = w->cap ? w->cap * 2 : 65536; w->d = dan_realloc(w->d, w->cap); }
+        uint32_t x = (uint32_t)w->bits;
+        w->d[w->len] = (uint8_t)x;
+        w->d[w->len + 1] = (uint8_t)(x >> 8);
+        w->d[w->len + 2] = (uint8_t)(x >> 16);
+        w->d[w->len + 3] = (uint8_t)(x >> 24);
+        w->len += 4;
+        w->bits >>= 32;
+        w->nbits -= 32;
+    }
 }
 
-static void dan_bitw_align(dan_bitw *w) { if (w->nbits > 0) dan_bitw_put(w, 0, 8 - w->nbits); }
+/* the rest to whole bytes: after it w->bits is empty */
+static void dan_bitw_align(dan_bitw *w) {
+    if (w->nbits & 7) dan_bitw_put(w, 0, 8 - (w->nbits & 7));
+    while (w->nbits >= 8) { dan_bitw_byte(w, (uint8_t)w->bits); w->bits >>= 8; w->nbits -= 8; }
+}
 
 /* ---- Huffman code lengths limited to `limit` bits ---- */
 
@@ -1382,8 +1549,25 @@ typedef struct { uint16_t len, dist; } dan_lz;          /* len == 0: literal byt
 #define DAN_HASH_BITS 15
 #define DAN_MAX_CHAIN 4096
 
-static int dan_len_code(int len) { int c = 0; while (c < 28 && dan_len_base[c + 1] <= len) c++; return c; }
-static int dan_dist_code(int dist) { int c = 0; while (c < 29 && dan_dist_base[c + 1] <= dist) c++; return c; }
+/* codes of lengths 3-258 and distances 1-32768 by tables (as _length_code and _dist_code in zlib):
+   distances up to 256 directly, longer ones by (dist - 1) >> 7 */
+static uint8_t dan_len_code_tab[259], dan_dist_code_lo[256], dan_dist_code_hi[256];
+static int dan_code_tabs_ready = 0;
+
+static int dan_len_code_slow(int len) { int c = 0; while (c < 28 && dan_len_base[c + 1] <= len) c++; return c; }
+static int dan_dist_code_slow(int dist) { int c = 0; while (c < 29 && dan_dist_base[c + 1] <= dist) c++; return c; }
+
+static void dan_code_tabs(void) {
+    if (__atomic_load_n(&dan_code_tabs_ready, __ATOMIC_ACQUIRE)) return;
+    for (int l = 0; l < 259; l++) dan_len_code_tab[l] = (uint8_t)(l < 3 ? 0 : dan_len_code_slow(l));
+    for (int d = 1; d <= 256; d++) dan_dist_code_lo[d - 1] = (uint8_t)dan_dist_code_slow(d);
+    for (int k = 2; k < 256; k++) dan_dist_code_hi[k] = (uint8_t)dan_dist_code_slow((k << 7) + 1);
+    dan_dist_code_hi[0] = dan_dist_code_hi[1] = 0;      /* not used: such distances are <= 256 */
+    __atomic_store_n(&dan_code_tabs_ready, 1, __ATOMIC_RELEASE);
+}
+
+static int dan_len_code(int len) { return dan_len_code_tab[len]; }
+static int dan_dist_code(int dist) { return dist <= 256 ? dan_dist_code_lo[dist - 1] : dan_dist_code_hi[(dist - 1) >> 7]; }
 
 /* prev: the previous position with the same hash, in a ring of 64 Ki positions (twice the window,
    so a position within the window is never overwritten): the chains are the same as with an array
@@ -1423,10 +1607,21 @@ static int dan_lz_common(const uint8_t *a, const uint8_t *b, int max) {
     return l;
 }
 
-#define DAN_LZ_GOOD 32          /* after a match this long the next search looks four times less */
-#define DAN_LZ_NICE 258         /* a match this long is not improved */
+/* Levels of compression as in zlib (deflate.c, configuration_table): good - after a match this long
+   the search one byte later looks four times less; lazy - a match shorter than this is checked
+   against the one starting a byte later (0 - no such check, levels 1-3); nice - a match this long is
+   not improved; chain - how many earlier places with the same hash are compared. Level 9 is the
+   former behaviour of the runtime (before 1.13): the same bytes as then. */
+typedef struct { int good, lazy, nice, chain; } dan_lz_level;
+static const dan_lz_level dan_lz_levels[10] = {
+    { 0, 0, 0, 0 },
+    { 4, 0, 8, 4 }, { 4, 0, 16, 8 }, { 4, 0, 32, 32 },
+    { 4, 4, 16, 16 }, { 8, 16, 32, 32 }, { 8, 16, 128, 128 },
+    { 8, 32, 128, 256 }, { 32, 128, 258, 1024 }, { 32, 258, 258, DAN_MAX_CHAIN },
+};
+#define DAN_GZIP_LEVEL 6        /* as zlib and Python by default */
 
-static int dan_lz_search_from(dan_lz77 *z, size_t p, int *dist, int chain) {
+static int dan_lz_search_from(dan_lz77 *z, size_t p, int *dist, int chain, int nice) {
     if (p + 3 > z->n) return 0;
     int maxlen = z->n - p < 258 ? (int)(z->n - p) : 258, best = 0;
     int32_t cand = z->head[dan_hash3(z->d + p)];
@@ -1434,16 +1629,15 @@ static int dan_lz_search_from(dan_lz77 *z, size_t p, int *dist, int chain) {
         const uint8_t *a = z->d + cand, *b = z->d + p;
         if (a[best] == b[best] && a[0] == b[0]) {
             int l = dan_lz_common(a, b, maxlen);
-            if (l > best) { best = l; *dist = (int)(p - (size_t)cand); if (l >= maxlen || l >= DAN_LZ_NICE) break; }
+            if (l > best) { best = l; *dist = (int)(p - (size_t)cand); if (l >= maxlen || l >= nice) break; }
         }
         cand = z->prev[(size_t)cand & DAN_PREV_MASK];
     }
     return best >= 3 ? best : 0;
 }
 
-static int dan_lz_search(dan_lz77 *z, size_t p, int *dist) { return dan_lz_search_from(z, p, dist, DAN_MAX_CHAIN); }
-
-static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count) {
+static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count, int level) {
+    const dan_lz_level lv = dan_lz_levels[level < 1 ? 1 : level > 9 ? 9 : level];
     dan_lz77 z = { d, n, dan_alloc(sizeof(int32_t) << DAN_HASH_BITS), dan_alloc(sizeof(int32_t) * (DAN_PREV_MASK + 1)) };
     for (size_t i = 0; i < (1u << DAN_HASH_BITS); i++) z.head[i] = -1;
     dan_lz *out = dan_alloc(sizeof(dan_lz) * (n ? n : 1));
@@ -1452,10 +1646,10 @@ static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count) {
     while (i < n) {
         int len, dist = 0;
         if (have_next) { len = next_len; dist = next_dist; have_next = 0; }
-        else len = dan_lz_search(&z, i, &dist);
+        else len = dan_lz_search_from(&z, i, &dist, lv.chain, lv.nice);
         dan_lz_insert(&z, i);
-        if (len >= 3 && len < 258 && i + 1 < n) {
-            next_len = dan_lz_search_from(&z, i + 1, &next_dist, len >= DAN_LZ_GOOD ? DAN_MAX_CHAIN / 4 : DAN_MAX_CHAIN);
+        if (len >= 3 && len < lv.lazy && len < 258 && i + 1 < n) {
+            next_len = dan_lz_search_from(&z, i + 1, &next_dist, len >= lv.good ? lv.chain / 4 : lv.chain, lv.nice);
             if (next_len > len) {                       /* a longer match starts one byte later */
                 out[k].len = 0; out[k].dist = d[i]; k++;
                 i++;
@@ -1622,10 +1816,11 @@ static void dan_write_block(dan_bitw *w, const dan_lz *s, size_t ns, const uint8
 
 #define DAN_BLOCK_SYMBOLS 16384
 
-static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
+static uint8_t *dan_deflate_level(const uint8_t *d, size_t n, size_t *outlen, int level) {
     dan_bitw w = { NULL, 0, 0, 0, 0 };
     size_t ns;
-    dan_lz *s = dan_lz77_parse(d, n, &ns);
+    dan_code_tabs();
+    dan_lz *s = dan_lz77_parse(d, n, &ns, level);
     if (ns == 0) {                                     /* empty input: one fixed block with end-of-block only */
         dan_bitw_put(&w, 1, 1);
         dan_bitw_put(&w, 1, 2);
@@ -1643,6 +1838,10 @@ static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
     dan_free(s);
     *outlen = w.len;
     return w.d;
+}
+
+static uint8_t *dan_deflate_raw(const uint8_t *d, size_t n, size_t *outlen) {
+    return dan_deflate_level(d, n, outlen, DAN_GZIP_LEVEL);
 }
 
 /* ---- inflate ----
@@ -1885,9 +2084,9 @@ static uint8_t *dan_inflate_raw(const uint8_t *in, size_t n, size_t *outlen, siz
 
 /* ---- gzip container (RFC 1952): the result opens in 7-Zip, WinRAR, gzip ---- */
 
-static dan_bytes dan_gzip_raw(const uint8_t *d, size_t n) {
+static dan_bytes dan_gzip_raw(const uint8_t *d, size_t n, int level) {
     size_t clen;
-    uint8_t *c = dan_deflate_raw(d, n, &clen);
+    uint8_t *c = dan_deflate_level(d, n, &clen, level);
     uint8_t *out = dan_alloc(clen + 18);
     static const uint8_t head[10] = { 0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 255 };
     memcpy(out, head, 10);
@@ -1898,8 +2097,18 @@ static dan_bytes dan_gzip_raw(const uint8_t *d, size_t n) {
     return dan_bytes_wrap(out, (int64_t)(clen + 18));
 }
 
-static dan_bytes dan_gzip(dan_bytes b) { return dan_gzip_raw(b->data, (size_t)b->len); }
-static dan_bytes dan_gzip_str(dan_str s) { return dan_gzip_raw((const uint8_t *)s, strlen(s)); }
+static dan_bytes dan_gzip(dan_bytes b) { return dan_gzip_raw(b->data, (size_t)b->len, DAN_GZIP_LEVEL); }
+static dan_bytes dan_gzip_str(dan_str s) { return dan_gzip_raw((const uint8_t *)s, strlen(s), DAN_GZIP_LEVEL); }
+static int dan_gzip_level_ok(int64_t level, int line) {
+    if (level < 1 || level > 9) dan_error(DAN_MSG_GZIP_LEVEL, line);
+    return (int)level;
+}
+static dan_bytes dan_gzip_lv(dan_bytes b, int64_t level, int line) {
+    return dan_gzip_raw(b->data, (size_t)b->len, dan_gzip_level_ok(level, line));
+}
+static dan_bytes dan_gzip_str_lv(dan_str s, int64_t level, int line) {
+    return dan_gzip_raw((const uint8_t *)s, strlen(s), dan_gzip_level_ok(level, line));
+}
 
 static dan_bytes dan_gunzip(dan_bytes b, int line) {
     const uint8_t *p = b->data;
