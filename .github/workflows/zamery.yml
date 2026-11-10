@@ -1,8 +1,8 @@
 # Замеры скорости на машинах GitHub (необязательный сценарий, не входит в проверку):
 # векторные ядра и пул потоков (sreda/yadra_test.c zamer, в том числе чтение весов
-# llama.cpp Q4_0, Q4_K, Q5_K, Q6_K) и эталон скорости чтения
-# памяти (замеры/память). Таблицы печатаются в итог задания; из них обновляется
-# замеры/результаты.md.
+# llama.cpp Q4_0, Q4_K, Q5_K, Q6_K), эталон скорости чтения
+# памяти (замеры/память) и общие задачи Дан - C - Python (zamery.py, Linux и macOS). Таблицы печатаются
+# в итог задания; из них обновляется замеры/результаты.md.
 #
 # Запуск вручную (после слияния в main):
 #   gh api -X POST repos/<владелец>/dan/actions/workflows/zamery.yml/dispatches -f ref=main
@@ -89,6 +89,13 @@ jobs:
           # матвек в точном порядке сложения языка (без «приближённо»), все потоки
           echo "== дан-точно" >> pamyat.txt
           замеры/память/память "$GB" "$GB_VESOV" 9 - точно | tee -a pamyat.txt
+      - name: Общие задачи против C и Python (zamery.py, Linux и macOS)
+        if: runner.os != 'Windows'
+        env:
+          DAN_KOMPILYATOR: сам
+          DAN_SAM_IZ_SEMENI: "1"
+          PYTHONUTF8: "1"
+        run: python3 zamery.py 5 --не-записывать | tee obshchie.txt
       - name: Таблицы в итог задания
         shell: bash
         run: |
@@ -158,4 +165,16 @@ jobs:
               m = re.match(r"предел для ([\d.]+) ГБ весов: ([\d.]+)", s)
               if m:
                   print(f"| {kto} | {pot} | {ch(buf)} | {ch(sk)} | {ch(m.group(2))} (для {ch(m.group(1))} ГБ) |")
+          import os
+          if os.path.exists("obshchie.txt"):
+              print()
+              print("Общие задачи (zamery.py, 5 запусков, наименьшее время, секунды):")
+              print()
+              stroki = open("obshchie.txt", encoding="utf-8").read().splitlines()
+              for s in stroki:
+                  if s.startswith("Дата:"):
+                      print(s)
+                      print()
+                  if s.startswith("|"):
+                      print(s)
           PY

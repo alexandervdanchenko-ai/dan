@@ -179,3 +179,25 @@ class ТестыЭталонаПамяти(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ТестыЗаписиОбщихЗамеров(unittest.TestCase):
+    """zamery.py заменяет в замеры/результаты.md только первую таблицу, остальные разделы сохраняются."""
+
+    def test_замена_только_первой_таблицы(self):
+        import zamery
+        with tempfile.TemporaryDirectory() as п:
+            путь = os.path.join(п, "результаты.md")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write("# Замеры скорости\n\nстарая таблица\n| а | 1 |\n| а | 2 |\n\n## Скорость сборки\n\nтекст\n\n"
+                        "## Модели\n\nещё\n")
+            zamery.записать("# Замеры скорости\n\nновая таблица\n| б | 3 |\n", путь)
+            with open(путь, encoding="utf-8") as ф:
+                текст = ф.read()
+            self.assertEqual(текст, "# Замеры скорости\n\nновая таблица\n| б | 3 |\n\n## Скорость сборки\n\nтекст\n\n"
+                                    "## Модели\n\nещё\n")
+            # файла нет - создаётся только таблица
+            os.remove(путь)
+            zamery.записать("# Замеры\n", путь)
+            with open(путь, encoding="utf-8") as ф:
+                self.assertEqual(ф.read(), "# Замеры\n")
