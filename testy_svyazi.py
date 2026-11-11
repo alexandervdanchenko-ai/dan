@@ -75,6 +75,8 @@ import re
     (["сам/разбор.dan", "сам/лексер.dan"], ["test_dokumentaciya"]),
     # пределы вложенности разбора и стек задачи компилятора
     (["сам/разбор.dan", "сам/дан.dan", "semya/sobrat.sh"], ["test_predely_vlozhennosti"]),
+    # метаморфный фаззинг параллельного цикла: проверка независимости и пул потоков
+    (["fazzing_parallelno.py", "сам/проверка.dan", "сам/порождение.dan"], ["test_fazzing_parallelno"]),
     (["yadra.py"], ТАБЛИЦЫ + ["test_yadra"]),
     # опись математики (математика/охват.md) сверяется с таблицами встроенных функций
     (["математика/*", "matematika.py", "vysshaya.py", "yadra.py", "bity.py"], ["test_ohvat_matematiki"]),
