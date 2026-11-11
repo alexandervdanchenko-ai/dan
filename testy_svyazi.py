@@ -34,7 +34,7 @@ import re
               "test_otladka", "test_sam.ТестыПорожденияНаДане", "test_sam.ТестыТаблицСреды",
               "test_sam.ТестыСамосборки", "test_sam.ТестыРезультатаПрограмм"]
 ТАБЛИЦЫ = ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды", "test_llms", "test_katalog"]
-ДАННЫЕ = ["test_dannye", "test_json", "test_json_v_tipy", "test_excel", "test_xml", "test_word", "test_fazzing", "test_pamyat"]
+ДАННЫЕ = ["test_dannye", "test_heshi", "test_json", "test_json_v_tipy", "test_excel", "test_xml", "test_word", "test_fazzing", "test_pamyat"]
 
 # (образцы путей, тесты). Тест - файл («test_json») или класс («test_sam.ТестыСамосборки»).
 СВЯЗИ = [
