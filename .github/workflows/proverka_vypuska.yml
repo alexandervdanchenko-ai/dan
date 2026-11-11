@@ -2,7 +2,8 @@
 # машинах скачивает файлы со страницы выпуска и сверяет их с SHA256SUMS.txt, выполняет команды
 # установки из README (git clone по метке выпуска, sh semya/sobrat.sh), проверяет «semya/dan
 # --версия», ставит библиотеку llama.cpp командой «semya/dan модели установить» и собирает
-# программы поставка/программы (плотные массивы, «параллельно для», модуль «модели»).
+# программы поставка/программы (плотные массивы, «параллельно для», модуль «модели»). Второе задание -
+# холодная пересборка из метки: компилятор из семени выпуска переводит сам себя и проходит тесты выпуска.
 #
 # Запускается сценарием «Выпуск» после создания страницы выпуска, а также вручную для любой метки:
 #   gh api -X POST repos/<владелец>/dan/actions/workflows/proverka_vypuska.yml/dispatches -f ref=main -f inputs[metka]=v1.6.1
@@ -53,3 +54,25 @@ jobs:
           code=${PIPESTATUS[0]}
           { echo '```'; tail -40 itog.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $code
+
+  holod:
+    name: Холодная пересборка из метки (${{ matrix.os }})
+    # исходники выпуска по метке в пустую папку, компилятор из семени, неподвижная точка в двух
+    # поколениях и тесты выпуска на этом компиляторе с пустым кэшем (поставка/холодная_пересборка.py)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Пересборка и тесты
+        shell: bash
+        env:
+          METKA: ${{ inputs.metka }}
+          PYTHONUTF8: "1"
+        run: python поставка/холодная_пересборка.py $METKA --папка="$RUNNER_TEMP/holod"
