@@ -122,6 +122,9 @@ import re
     (["versiya.py", "выпуски/*", "README.md", "spec.md", "справочник.md", "SECURITY.md", "ROADMAP.md", "CHANGELOG.md",
       "поставка/проверить_выпуск.py"], ["test_dokumenty_versii"]),
     (["создать_llms.py", "llms.txt", "llms-full.txt"], ["test_llms"]),
+    # сервер MCP для агентов («дан mcp») и новый проект («дан новый»)
+    (["сам/mcp.dan", "сам/проект.dan", "сам/дан.dan", "сам/песочница.dan", "сам/подсказки.dan", "llms-full.txt",
+      "sam_kompilyator.py"], ["test_mcp"]),
     (["сам/создать_*.py", "пересоздать.py"], ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды",
                                                "test_llms", "test_testy_svyazi"]),
     (["каталог/*"], ["test_katalog", "test_kody", "test_garantii"]),
