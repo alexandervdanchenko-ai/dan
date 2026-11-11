@@ -192,12 +192,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # мишени делятся на две машины: каждая мишень получает те же 45 секунд, а ждать вдвое меньше
+        # мишени делятся на три машины: разборщики получают по 45 секунд, компилятор на Дане - 5 минут
         include:
           - mesto: тексты
             misheni: json csv xml base64 почта
+            sekund: 45
           - mesto: документы и архивы
             misheni: word excel pdf архив распаковка расшифровка
+            sekund: 45
+          # компилятор на Дане: лексер, разбор, модули, проверка и порождение на текстах программ
+          - mesto: компилятор
+            misheni: компилятор
+            sekund: 300
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -208,8 +214,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang fonts-dejavu-core
           sudo apt-get install -y libclang-rt-dev || sudo apt-get install -y libclang-rt-18-dev
-      - name: Фаззинг (по 45 секунд на каждую мишень)
-        run: python fazzing.py ${{ matrix.misheni }} --секунд=45
+      - name: Фаззинг
+        run: python fazzing.py ${{ matrix.misheni }} --секунд=${{ matrix.sekund }}
 
   sverka:
     name: Сверка сборок

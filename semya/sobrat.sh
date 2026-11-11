@@ -9,5 +9,5 @@
 set -e
 cd "$(dirname "$0")/.."
 CC="${1:-${DAN_COMPILER:-cc}}"
-"$CC" -std=c11 -O2 -fwrapv -ffp-contract=off -w semya/dan.c -o semya/dan -lm
+"$CC" -std=c11 -O2 -fwrapv -ffp-contract=off -w semya/dan.c -o semya/dan -lm -pthread
 echo "Готово: semya/dan"

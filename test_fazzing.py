@@ -22,5 +22,29 @@ class ТестыФаззинга(unittest.TestCase):
                 self.assertTrue(успех, вывод[-4000:])
 
 
+class ТестыМишениКомпилятора(unittest.TestCase):
+    """Программа-мишень «компилятор» верна для компилятора на Дане (без libFuzzer: только проверка)."""
+
+    def test_мишень_проверяется(self):
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        import sam_kompilyator
+        with tempfile.TemporaryDirectory() as папка:
+            копия = os.path.join(папка, "сам")
+            shutil.copytree(os.path.join(fazzing.ПАПКА, "сам"), копия, ignore=shutil.ignore_patterns("*.py"))
+            путь = os.path.join(копия, "цель.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(fazzing.текст_мишени(fazzing.КОМПИЛЯТОР))
+            р = subprocess.run([sam_kompilyator.исполняемый(), "проверить", путь], capture_output=True,
+                               env=sam_kompilyator.среда())
+            self.assertEqual(р.returncode, 0, р.stdout.decode("utf-8", "replace") + р.stderr.decode("utf-8", "replace"))
+
+    def test_образцы_из_каталога(self):
+        self.assertIn(fazzing.КОМПИЛЯТОР, fazzing.МИШЕНИ)
+        self.assertIn("каталог", fazzing.ПАПКИ_ПРОГРАММ)
+
+
 if __name__ == "__main__":
     unittest.main()
