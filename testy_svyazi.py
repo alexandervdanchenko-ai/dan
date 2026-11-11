@@ -122,6 +122,8 @@ import re
     (["versiya.py", "выпуски/*", "README.md", "spec.md", "справочник.md", "SECURITY.md", "ROADMAP.md", "CHANGELOG.md",
       "поставка/проверить_выпуск.py"], ["test_dokumenty_versii"]),
     (["создать_llms.py", "llms.txt", "llms-full.txt"], ["test_llms"]),
+    # набор задач для оценки языковых моделей: эталоны, сценарий оценки, описание языка в запросе
+    (["оценка_моделей/*", "llms-full.txt"], ["test_ocenka_modeley"]),
     (["сам/создать_*.py", "пересоздать.py"], ["test_sam.ТестыТаблицВстроенных", "test_sam.ТестыТаблицСреды",
                                                "test_llms", "test_testy_svyazi"]),
     (["каталог/*"], ["test_katalog", "test_kody", "test_garantii"]),
@@ -131,7 +133,7 @@ import re
     (["*.md"], ["test_soglasovannost"]),
     (["testy.py", "testy_svyazi.py", "testy_vremya.json"], ["test_testy_svyazi"]),
     (["semya/*", ".gitattributes"], ["test_semya", "test_testy_svyazi"]),
-    (["библиотека/*"], ["test_katalog", "test_okna"]),
+    (["библиотека/*"], ["test_katalog", "test_okna", "test_ocenka_modeley"]),
     # библиотека llama.cpp для модуля «модели»: сборка, команды «дан модели»
     (["поставка/собрать_llama.py", ".github/workflows/llama.yml", "сам/модели_поставка.dan"], ["test_llama"]),
     # файлы, которые тесты не проверяют (проверяют задания CI «Установка» и «Поставка»)
