@@ -82,6 +82,7 @@ import re
     (["bity.py", "сам/лексер.dan", "сам/формат.dan", "сам/разбор.dan"], ТАБЛИЦЫ + ["test_bity"]),
     # перенос выражения после знака действия в конце строки
     (["сам/лексер.dan", "сам/формат.dan", "сам/разбор.dan"], ["test_perenos_stroki"]),
+    (["сам/лексер.dan", "сам/формат.dan"], ["test_mnogostrochnye_stroki"]),
     (["сам/проверка.dan", "сам/дан.dan", "сам/сервер.dan", "сам/объяснение.dan", "kody.py"], ["test_pustoy_obrabotchik"]),
     (["сам/проверка.dan", "kody.py"], ["test_perenos_stroki"]),
     (["сам/дан.dan", "semya/sobrat.sh"], ["test_papka_dana"]),

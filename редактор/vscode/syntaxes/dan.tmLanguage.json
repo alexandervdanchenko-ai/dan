@@ -43,17 +43,46 @@
       "match": "//.*$"
     },
     "string": {
-      "name": "string.quoted.double.dan",
-      "begin": "\"",
-      "end": "\"|$",
       "patterns": [
         {
-          "name": "constant.character.escape.dan",
-          "match": "\\\\[nt\"\\\\]"
+          "name": "string.quoted.raw.triple.dan",
+          "begin": "#\"\"\"",
+          "end": "\"\"\"#"
         },
         {
-          "name": "invalid.illegal.escape.dan",
-          "match": "\\\\."
+          "name": "string.quoted.triple.dan",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.dan",
+              "match": "\\\\[ntr\"\\\\]"
+            },
+            {
+              "name": "invalid.illegal.escape.dan",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.raw.dan",
+          "begin": "#\"",
+          "end": "\"#|$"
+        },
+        {
+          "name": "string.quoted.double.dan",
+          "begin": "\"",
+          "end": "\"|$",
+          "patterns": [
+            {
+              "name": "constant.character.escape.dan",
+              "match": "\\\\[ntr\"\\\\]"
+            },
+            {
+              "name": "invalid.illegal.escape.dan",
+              "match": "\\\\."
+            }
+          ]
         }
       ]
     },
