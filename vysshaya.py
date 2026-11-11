@@ -264,7 +264,12 @@ for имя, c, описание in (
 д("чистая_приведённая_стоимость", [([ДРОБ, СД], ДРОБ, "dan_npv", False)],
   "NPV: ставка в процентах и денежные потоки по годам, начиная с нулевого")
 д("внутренняя_норма_доходности", [([СД], НЕОБЯЗ_ДРОБ, "dan_irr", True)],
-  "IRR в процентах: ставка, при которой NPV потоков равна нулю; ничего, если её нет")
+  "IRR в процентах: ставка, при которой NPV потоков равна нулю; ничего, если её нет; "
+  "если ставок несколько - наименьшая (все ставки даёт все_ставки_доходности)")
+д("все_ставки_доходности", [([СД], СД, "dan_irr_all", True)],
+  "все ставки (в процентах, больше -100, по возрастанию), при которых NPV потоков равна нулю: "
+  "все_ставки_доходности([-100.0, 230.0, -132.0]) = [10, 20]; пустой список, если ставки нет "
+  "(или в потоках есть бесконечность или не число)")
 д("реальная_ставка", [([ДРОБ, ДРОБ], ДРОБ, "dan_real_rate", False)],
   "реальная ставка в процентах по номинальной ставке и инфляции (формула Фишера)")
 д("проценты_за_дни", [([РАЦ, РАЦ, ЦЕЛ, ЦЕЛ], РАЦ, "dan_daily_interest", True)],
@@ -341,6 +346,7 @@ for имя, c, описание in (
     "DAN_MSG_NEG_MONEY": "сумма не может быть отрицательной",
     "DAN_MSG_TERM_N": "номер члена прогрессии должен быть натуральным",
     "DAN_MSG_MONTHS": "срок в месяцах должен быть положительным",
+    "DAN_MSG_IRR_LONG": "все ставки доходности ищутся не больше чем для 20 000 потоков",
     "DAN_MSG_YEAR_DAYS": "число дней в году должно быть положительным, а число дней - неотрицательным",
     "DAN_MSG_LP_DIMS": "размеры цели, матрицы ограничений и правых частей не согласованы",
     "DAN_MSG_LP_RHS": "правые части ограничений должны быть неотрицательными (тогда х = 0 - допустимое решение)",
@@ -1346,6 +1352,55 @@ static do_f dan_irr(const dl_Lf *cf, int line) {
     }
     (void)fhi;
     return do_f_some((lo + hi) / 2);
+}
+/* All rates: NPV is a polynomial in v = 1 / (1 + r), the rates are its roots v > 0.
+   Roots with a change of sign are found by dan_real_roots_d; a rate where NPV only
+   touches zero is a critical point where |NPV| is within rounding of the sum of |terms|. */
+static int dan_qcmp_f_desc(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x < y) - (x > y);
+}
+static double dan_irr_rel(const double *c, int n, double x) {   /* |NPV| / sum of |terms| */
+    double f = 0, s = 0;
+    for (int j = n; j >= 0; j--) { f = f * x + c[j]; s = s * x + fabs(c[j]); }
+    return s > 0 ? fabs(f) / s : 0;
+}
+static dl_Lf *dan_irr_all(const dl_Lf *cf, int line) {
+    dl_Lf *r = dl_Lf_from(0, NULL);
+    int64_t lo = 0, hi = cf->len - 1;
+    while (hi >= 0 && cf->items[hi] == 0) hi--;
+    while (lo <= hi && cf->items[lo] == 0) lo++;        /* v^lo divides NPV: v = 0 is not a rate */
+    if (hi - lo < 1) return r;
+    if (hi - lo > 20000) dan_error(DAN_MSG_IRR_LONG, line);
+    int n = (int)(hi - lo);
+    double *c = dan_alloc(sizeof(double) * (size_t)(n + 1));
+    for (int i = 0; i <= n; i++) {
+        c[i] = cf->items[lo + i];
+        if (c[i] - c[i] != 0) { dan_free(c); return r; }   /* бесконечность или не число */
+    }
+    double *v = dan_alloc(sizeof(double) * (size_t)(2 * n + 2));
+    int k = dan_real_roots_d(c, n, v);
+    double *d = dan_alloc(sizeof(double) * (size_t)n);
+    for (int i = 1; i <= n; i++) d[i - 1] = c[i] * i;
+    double *crit = dan_alloc(sizeof(double) * (size_t)(n + 1));
+    int nc = dan_real_roots_d(d, n - 1, crit);
+    for (int i = 0; i < nc; i++)
+        if (crit[i] > 0 && dan_irr_rel(c, n, crit[i]) <= 1e-9) v[k++] = crit[i];
+    qsort(v, (size_t)k, sizeof(double), dan_qcmp_f_desc);
+    /* close candidates (a multiple root found twice by rounding) - one rate, the most accurate */
+    for (int i = 0; i < k;) {
+        int j = i + 1;
+        double best = v[i], bf = dan_irr_rel(c, n, v[i]);
+        while (j < k && v[j - 1] - v[j] <= 1e-7 * v[j - 1]) {
+            double f = dan_irr_rel(c, n, v[j]);
+            if (f < bf) { bf = f; best = v[j]; }
+            j++;
+        }
+        if (best > 0) dl_Lf_push(r, (1 / best - 1) * 100);
+        i = j;
+    }
+    dan_free(c); dan_free(v); dan_free(d); dan_free(crit);
+    return r;
 }
 static double dan_real_rate(double nominal, double inflation) { return ((1 + nominal / 100) / (1 + inflation / 100) - 1) * 100; }
 static dan_rat dan_daily_interest(dan_rat s, dan_rat r, int64_t days, int64_t year, int line) {
