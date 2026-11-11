@@ -30,6 +30,9 @@ jobs:
     name: Страница выпуска
     needs: llama
     runs-on: windows-latest
+    # окружение «выпуск»: задание ждёт одобрения владельца, только ему доступен ключ подписи
+    # (секрет DAN_KLYUCH_PODPISI - закрытый ключ Ed25519 шестнадцатеричными цифрами, решение 0014)
+    environment: выпуск
     timeout-minutes: 60
     outputs:
       metka: ${{ steps.vypusk.outputs.metka }}
@@ -48,11 +51,14 @@ jobs:
       - name: Сборка поставки
         shell: bash
         run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
+      - name: Подпись файла сумм
+        run: python -m pip install --quiet cryptography
       - name: Создать или обновить выпуск
         id: vypusk
         shell: python
         env:
           GH_TOKEN: ${{ github.token }}
+          DAN_KLYUCH_PODPISI: ${{ secrets.DAN_KLYUCH_PODPISI }}
         run: |
           import glob, os, shutil, subprocess, sys, tempfile
           sys.path.insert(0, os.getcwd())   # сценарий выполняется из временной папки, versiya.py - в корне проекта
@@ -87,6 +93,24 @@ jobs:
           with open(путь_сумм, "w", encoding="utf-8", newline="\n") as фф:
               фф.writelines(f"{с}  {и}\n" for и, с in суммы)
           файлы.append(путь_сумм)
+          # подпись SHA256SUMS.txt: её проверяет «dan обновить» открытым ключом из компилятора
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          ключ = os.environ.get("DAN_KLYUCH_PODPISI", "").strip()
+          if not ключ:
+              print("::error title=Нет ключа подписи::секрет DAN_KLYUCH_PODPISI окружения «выпуск» не задан")
+              raise SystemExit(1)
+          закрытый = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(ключ))
+          with open(путь_сумм, "rb") as фф:
+              подпись = закрытый.sign(фф.read())
+          import re
+          with open(os.path.join("сам", "обновление.dan"), encoding="utf-8") as фф:
+              записанный = re.findall(r'вернуть "([0-9a-f]{64})"', фф.read())
+          if закрытый.public_key().public_bytes_raw().hex() not in записанный:
+              print("::error title=Чужой ключ подписи::открытый ключ секрета не совпадает с ключом в сам/обновление.dan")
+              raise SystemExit(1)
+          with open(путь_сумм + ".sig", "w", encoding="utf-8", newline="\n") as фф:
+              фф.write(подпись.hex() + "\n")
+          файлы.append(путь_сумм + ".sig")
           with open(описание, encoding="utf-8") as фф:
               текст = фф.read().rstrip() + "\n\n## Контрольные суммы SHA256\n\n| Файл | SHA256 |\n|---|---|\n"
           текст += "".join(f"| `{и}` | `{с}` |\n" for и, с in суммы)

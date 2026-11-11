@@ -24,6 +24,19 @@ class ТестыВыпуска(unittest.TestCase):
         self.assertIn("privyazat/*", шаг)
         self.assertLess(текст.index('файлы.append(путь_сумм)'), текст.index("# те же файлы, что выложены"))
 
+    def test_подпись_сумм(self):
+        текст = прочитать(".github", "workflows", "vypusk.yml")
+        self.assertIn("environment: выпуск", текст)
+        self.assertIn("secrets.DAN_KLYUCH_PODPISI", текст)
+        шаг = текст.split("файлы.append(путь_сумм)\n", 1)[1]
+        self.assertIn('файлы.append(путь_сумм + ".sig")', шаг)
+        # привязка к коммиту охватывает и подпись: она добавлена в «файлы» раньше
+        self.assertLess(текст.index('файлы.append(путь_сумм + ".sig")'), текст.index("# те же файлы, что выложены"))
+        # ключ, которым проверяет «dan обновить», один - в сам/обновление.dan
+        import re
+        ключи = re.findall(r'вернуть "([0-9a-f]{64})"', прочитать("сам", "обновление.dan"))
+        self.assertEqual(len(ключи), 1)
+
     def test_проверка_описана_в_readme(self):
         self.assertIn("gh attestation verify", прочитать("README.md"))
 
