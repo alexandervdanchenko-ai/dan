@@ -15,7 +15,6 @@
 import concurrent.futures
 import glob
 import os
-import resource
 import subprocess
 import sys
 import tempfile
@@ -41,9 +40,15 @@ def собрать(выход, санитайзеры):
 
 
 def большой_стек():
-    мягкий, жёсткий = resource.getrlimit(resource.RLIMIT_STACK)
-    нужно = СТЕК if жёсткий == resource.RLIM_INFINITY else min(СТЕК, жёсткий)
-    resource.setrlimit(resource.RLIMIT_STACK, (нужно, жёсткий))
+    """Поднимает предел стека до СТЕК, насколько разрешает система (в macOS жёсткий предел - 64 МБ)."""
+    import resource                     # только Linux и macOS
+    try:
+        мягкий, жёсткий = resource.getrlimit(resource.RLIMIT_STACK)
+        нужно = СТЕК if жёсткий == resource.RLIM_INFINITY else min(СТЕК, жёсткий)
+        if мягкий != resource.RLIM_INFINITY and мягкий < нужно:
+            resource.setrlimit(resource.RLIMIT_STACK, (нужно, жёсткий))
+    except (ValueError, OSError):
+        pass
 
 
 def выполнить(компилятор, аргументы):

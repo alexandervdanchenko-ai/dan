@@ -62,7 +62,7 @@ class ТестыБукв(unittest.TestCase):
             р = subprocess.run([sam_kompilyator.исполняемый(), "запустить", "обход.dan"], cwd=папка,
                                capture_output=True, env=sam_kompilyator.среда(), timeout=900)
             self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
-            self.assertEqual(р.stdout.decode("utf-8"), ожидается)
+            self.assertEqual(р.stdout.decode("utf-8").replace("\r\n", "\n"), ожидается)
 
     def test_лексеры_согласны(self):
         import unicodedata
@@ -97,7 +97,7 @@ class ТестыБукв(unittest.TestCase):
         self.assertEqual(р.returncode, 0, р.stderr.decode("utf-8", "replace"))
         имена_дан = [и for и in имена]
         for и in имена_дан:
-            self.assertIn(и, р.stdout.decode("utf-8"))
+            self.assertIn(и, р.stdout.decode("utf-8").replace("\r\n", "\n"))
         self.assertEqual(sum(1 for т in токены if т.вид.name == "ИМЯ"), len(имена))
 
 

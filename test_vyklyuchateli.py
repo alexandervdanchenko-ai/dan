@@ -43,7 +43,8 @@ def выполнить(аргументы, папка, **выключатели)
     окружение.update({к: "1" for к in выключатели})
     р = subprocess.run([sam_kompilyator.исполняемый(), *аргументы], cwd=папка, capture_output=True,
                        env=окружение, timeout=600)
-    return р.returncode, р.stdout.decode("utf-8", "replace"), р.stderr.decode("utf-8", "replace")
+    return (р.returncode, р.stdout.decode("utf-8", "replace").replace("\r\n", "\n"),
+            р.stderr.decode("utf-8", "replace"))
 
 
 class ТестыВыключателей(unittest.TestCase):
