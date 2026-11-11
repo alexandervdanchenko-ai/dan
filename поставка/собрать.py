@@ -11,7 +11,7 @@ dan.exe - сам компилятор на Дане (сам/дан.dan), соб�
 
 Запускается в Windows (на GitHub - задачей «Поставка»):
 
-    python поставка/собрать.py [--llama=llama-<метка>-windows-x64.zip]
+    python поставка/собрать.py [--llama=llama-<метка>-windows-x64.zip] [--без-установщика]
 
 Архив библиотеки llama.cpp собирает сценарий поставка/собрать_llama.py (на GitHub - задание
 «Библиотека llama.cpp»); без --llama=... он запускается отсюда. Её файлы (llama.dll, ggml*.dll,
@@ -25,6 +25,12 @@ version.txt, лицензия) кладутся рядом с dan.exe: уста�
 
 Нужны: Python 3 с пакетами ziglang и markdown (ставятся сами; Python нужен только для сборки),
 Inno Setup 6 (если его нет, установщик не собирается, архив собирается).
+
+Сборка воспроизводима: из того же коммита получаются те же dan.exe, zig-cc.exe, редактор и переносной
+архив байт в байт (проверка - поставка/проверить_воспроизводимость.py). Для этого компилятор собирается
+в папке с постоянным именем, компоновщик не пишет в файлы .exe время сборки, а в архиве файлы идут
+по порядку имён и с одним временем - SOURCE_DATE_EPOCH или временем последнего коммита. Установщик
+Inno Setup в эту проверку не входит: он сам вписывает время сборки.
 """
 
 import glob
@@ -42,6 +48,10 @@ sys.path.insert(0, КОРЕНЬ)
 
 # Заголовки C для систем, под которые Дан не собирает программы: в поставку не входят.
 ЛИШНЕЕ_В_ZIG = ["freebsd", "netbsd", "openbsd", "dragonfly", "haiku", "solaris", "illumos", "serenity"]
+
+
+# компоновщик zig (lld) для Windows по умолчанию пишет в заголовок .exe время сборки
+БЕЗ_ВРЕМЕНИ = ["-Wl,--no-insert-timestamp"] if os.name == "nt" else []
 
 
 def шаг(текст):
@@ -78,8 +88,11 @@ def собрать_компилятор_на_дане():
     # цель указана явно: без неё zig собирает под процессор этой машины, а компилятор должен
     # работать на любом процессоре x86-64
     цель = ["-target", "x86_64-windows-gnu"] if windows else []
-    # сборка в папке с латинским именем: исходники и выход не зависят от русских букв в пути
-    with tempfile.TemporaryDirectory(prefix="dan_sam_") as работа:
+    # сборка в папке с латинским и постоянным именем: исходники и выход не зависят от русских букв
+    # в пути и от случайного имени временной папки
+    with tempfile.TemporaryDirectory(prefix="dan_sam_") as временная:
+        работа = os.path.join(временная, "dan_sam")
+        os.makedirs(работа)
         семя = os.path.join(работа, "dan.c")
         shutil.copy(os.path.join(КОРЕНЬ, "semya", "dan.c"), семя)
         выход = os.path.join(работа, "dan" + exe)
@@ -91,13 +104,13 @@ def собрать_компилятор_на_дане():
             shutil.copy(os.path.join(ЗНАЧКИ, "dan.ico"), os.path.join(работа, "dan.ico"))
             иконка = [os.path.join(работа, "dan.rc")]
         subprocess.run([zig, "cc", *цель, "-std=c11", "-O2", "-fwrapv", "-ffp-contract=off", "-w", "-s", семя,
-                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else ["-pthread"])], check=True)
+                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else ["-pthread"]), *БЕЗ_ВРЕМЕНИ], check=True)
         shutil.copy(выход, os.path.join(ПАПКА, "dan" + exe))
         if windows:
             обёртка = os.path.join(работа, "zig_cc.c")
             shutil.copy(os.path.join(КОРЕНЬ, "поставка", "zig_cc.c"), обёртка)
             готовая = os.path.join(работа, "zig-cc.exe")
-            subprocess.run([zig, "cc", *цель, "-O2", "-s", обёртка, "-o", готовая, "-lshell32"], check=True)
+            subprocess.run([zig, "cc", *цель, "-O2", "-s", обёртка, "-o", готовая, "-lshell32", *БЕЗ_ВРЕМЕНИ], check=True)
             shutil.copy(готовая, os.path.join(ПАПКА, "zig", "zig-cc.exe"))
     # среда выполнения, стандартная библиотека и задачник - рядом с dan.exe (папка Дана)
     for папка in ("sreda", "библиотека", os.path.join("учебник", "задачи")):
@@ -212,13 +225,55 @@ def собрать_установщик(версия):
     return os.path.join(ГОТОВО, f"dan-{версия}-setup.exe")
 
 
+def время_сборки():
+    """Время файлов в архиве: SOURCE_DATE_EPOCH или время последнего коммита, но не час сборки."""
+    значение = os.environ.get("SOURCE_DATE_EPOCH", "")
+    if not значение.isdigit():
+        р = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=КОРЕНЬ, capture_output=True, text=True)
+        значение = р.stdout.strip() if р.returncode == 0 else ""
+    return int(значение) if значение.isdigit() else 0
+
+
+def упаковать(основа, имя, выход, время):
+    """Архив ZIP папки основа/имя, который зависит только от содержимого файлов: имена по порядку,
+    одно время у всех файлов, постоянные права и сжатие."""
+    import time
+    import zipfile
+    дата = max(tuple(time.gmtime(время)[:6]), (1980, 1, 1, 0, 0, 0))   # раньше 1980 ZIP не умеет
+    записи = []
+    for корень, папки, файлы in os.walk(os.path.join(основа, имя)):
+        имя_папки = os.path.relpath(корень, основа).replace(os.sep, "/")
+        if not папки and not файлы:
+            записи.append((имя_папки + "/", None))
+        for ф in файлы:
+            записи.append((имя_папки + "/" + ф, os.path.join(корень, ф)))
+    записи.sort()
+    with zipfile.ZipFile(выход, "w", zipfile.ZIP_DEFLATED) as архив:
+        for имя_записи, путь in записи:
+            запись = zipfile.ZipInfo(имя_записи, дата)
+            запись.create_system = 3
+            if путь is None:
+                запись.external_attr = (0o40755 << 16) | 0x10
+                архив.writestr(запись, b"")
+                continue
+            запись.compress_type = zipfile.ZIP_DEFLATED
+            права = 0o755 if имя_записи.endswith((".exe", ".dll")) or os.access(путь, os.X_OK) and os.name != "nt" else 0o644
+            запись.external_attr = (0o100000 | права) << 16
+            with open(путь, "rb") as ф:
+                архив.writestr(запись, ф.read(), compresslevel=9)
+    return выход
+
+
 def main(аргументы):
     import versiya
     версия = versiya.ВЕРСИЯ
     архив_llama = None
+    с_установщиком = True
     for а in аргументы:
         if а.startswith("--llama="):
             архив_llama = os.path.abspath(а[len("--llama="):])
+        elif а == "--без-установщика":
+            с_установщиком = False
         else:
             print(__doc__.strip())
             return 2
@@ -230,8 +285,8 @@ def main(аргументы):
     добавить_файлы()
     добавить_учебник_и_редактор()
     шаг("переносной архив")
-    архив = shutil.make_archive(os.path.join(ГОТОВО, f"dan-{версия}-windows"), "zip", ГОТОВО, "dan")
-    установщик = собрать_установщик(версия) if os.name == "nt" else None
+    архив = упаковать(ГОТОВО, "dan", os.path.join(ГОТОВО, f"dan-{версия}-windows.zip"), время_сборки())
+    установщик = собрать_установщик(версия) if os.name == "nt" and с_установщиком else None
     шаг("готово")
     for путь in filter(None, (установщик, архив)):
         print(f"{путь}: {os.path.getsize(путь) // (1024 * 1024)} МБ")
