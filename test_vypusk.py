@@ -37,6 +37,23 @@ class ТестыВыпуска(unittest.TestCase):
         ключи = re.findall(r'вернуть "([0-9a-f]{64})"', прочитать("сам", "обновление.dan"))
         self.assertEqual(len(ключи), 1)
 
+    def test_холодная_пересборка(self):
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("holod", os.path.join(ПАПКА, "поставка", "холодная_пересборка.py"))
+        м = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(м)
+        # тесты выпуска, которые она прогоняет, существуют
+        for т in м.ТЕСТЫ:
+            self.assertTrue(os.path.isfile(os.path.join(ПАПКА, т.split(".")[0] + ".py")), т)
+        сценарий = прочитать(".github", "workflows", "proverka_vypuska.yml")
+        self.assertIn("python поставка/холодная_пересборка.py $METKA", сценарий)
+        # собранный из кода компилятор - теми же ключами, что semya/sobrat.sh
+        строка = [с for с in прочитать("semya", "sobrat.sh").splitlines() if с.startswith('"$CC"')][0]
+        ключи = строка.split("semya/dan.c", 1)[0].split()[1:]
+        текст = прочитать("поставка", "холодная_пересборка.py")
+        for к in ключи:
+            self.assertIn(f'"{к}"', текст)
+
     def test_проверка_описана_в_readme(self):
         self.assertIn("gh attestation verify", прочитать("README.md"))
 
