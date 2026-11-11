@@ -127,6 +127,9 @@ import re
     # набор задач для оценки языковых моделей: эталоны, сценарий оценки, описание языка в запросе
     (["оценка_моделей/*", "llms-full.txt"], ["test_ocenka_modeley"]),
     (["решения/*", "ROADMAP.md", "AGENTS.md"], ["test_resheniya"]),
+    (["сам/буквы.dan", "сам/создать_буквы.py", "сам/лексер.dan"], ["test_bukvy"]),
+    (["сам/порождение.dan", "sverka_sborok.py"], ["test_vyklyuchateli"]),
+    (["sanitayzery_kompilyatora.py", ".github/workflows/proverka.yml"], ["test_sanitayzery_kompilyatora"]),
     ([".github/workflows/vypusk.yml", "README.md"], ["test_vypusk"]),
     # сервер MCP для агентов («дан mcp») и новый проект («дан новый»)
     (["сам/mcp.dan", "сам/проект.dan", "сам/дан.dan", "сам/песочница.dan", "сам/подсказки.dan", "llms-full.txt",
