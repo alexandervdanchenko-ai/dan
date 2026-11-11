@@ -96,6 +96,8 @@ import re
     (["sreda/modeli.c", "gguf_malaya.py", "сам/порождение.dan", "сам/дан.dan"], ["test_modeli"]),
     # движок «нейро» на Дане и его сверка с llama.cpp
     (["gguf_malaya.py", "замеры/нейро/*", "sreda/yadra.c", "sreda/massivy.c"], ["test_neyro"]),
+    # прерывание генерации и продолжение в модуле «нейро»
+    (["библиотека/нейро.dan", "gguf_malaya.py", "sreda/yadra.c"], ["test_neyro_preryvanie"]),
     (["formatirovanie.py"], ["test_formatirovanie", "test_raskladka", "test_ustoychivost",
                              "test_sam.ТестыФорматаНаДане"]),
     (["dokumentaciya.py"], ["test_dokumentaciya", "test_opisaniya", "test_sam.ТестыДокументацииНаДане"]),
