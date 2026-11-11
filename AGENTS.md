@@ -43,6 +43,7 @@ python sverka_sborok.py 150                    # gcc и clang, -O0/-O2/-O3/-Os �
 python fazzing.py --секунд=60                  # разборщики форматов и компилятор на Дане (нужен clang с libFuzzer)
 python staticheskiy_analiz.py                  # анализатор gcc на коде C среды и программ; новое предупреждение - ошибка
 python sanitayzery_kompilyatora.py             # компилятор под ASan, LSan, UBSan переводит себя и все программы
+python fazzing_parallelno.py 50 [--tsan]       # «параллельно для»: один вывод при любом числе потоков, отказы Д03xx
 DAN_KOMPILYATOR=сам python testy.py            # тот же набор, но программы переводит компилятор на Дане
 ```
 
