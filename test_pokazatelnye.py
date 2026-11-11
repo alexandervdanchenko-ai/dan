@@ -429,5 +429,32 @@ class ТестыДубликатов(unittest.TestCase):
             self.assertTrue(р.stdout.splitlines()[-1].startswith("Просмотрено файлов: 8, групп одинаковых: 3"))
 
 
+
+# ---------- чат в окне ----------
+
+@unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
+class ТестыЧатаВОкне(unittest.TestCase):
+    """Окна есть только в Windows; режим без окна порождает ответ теми же шагами, что окно,
+    и с --сверить сравнивает его с порождением без прерываний на крошечной модели (gguf_malaya)."""
+
+    def test_пошаговый_ответ_совпадает(self):
+        import gguf_malaya
+        with tempfile.TemporaryDirectory() as папка:
+            модель = os.path.join(папка, "м.gguf")
+            gguf_malaya.создать(модель)
+            исп = собрать("чат_в_окне", папка)
+            р = subprocess.run([исп, "--без-окна", "--сверить", модель, "Привет", "Как дела?"],
+                               capture_output=True, text=True, encoding="utf-8", timeout=600, cwd=папка)
+            self.assertEqual(р.returncode, 0, р.stdout + р.stderr)
+            строки = р.stdout.splitlines()
+            self.assertEqual(len(строки), 2, р.stdout)
+            for с in строки:
+                self.assertTrue(с.startswith("совпадает: "), р.stdout)
+            р = subprocess.run([исп, "--без-окна", модель], capture_output=True, text=True, encoding="utf-8",
+                               timeout=120, cwd=папка)
+            self.assertEqual(р.returncode, 2)
+            self.assertIn("Укажите модель и вопросы", р.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
