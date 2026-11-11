@@ -4,7 +4,9 @@
    собирает код C командой из двух частей: «zig cc». Обёртка запускает zig.exe из своей папки
    с первым аргументом «cc» и всеми своими аргументами, ждёт его и возвращает его код завершения.
    Параметр -mwindows (программа с окнами без окна консоли) zig не знает: он заменяется тем же
-   самым по частям, как в dan.py.
+   самым по частям, как в dan.py. При компоновке (есть -o, нет -c, -S, -E) добавляется
+   -Wl,--no-insert-timestamp: без него компоновщик пишет в заголовок .exe время сборки, и одна и
+   та же программа, собранная дважды, даёт разные файлы.
 
    Собирается сценарием поставка/собрать.py: zig cc -O2 zig_cc.c -o zig-cc.exe -lshell32 */
 
@@ -79,6 +81,13 @@ int main(void) {
     add_s(&cmd, L"\"");
     add_s(&cmd, zig.p);
     add_s(&cmd, L"\" cc");
+    int link = 0;
+    for (int i = 1; i < argc; i++) {
+        if (wcscmp(argv[i], L"-o") == 0) link = 1;
+    }
+    for (int i = 1; i < argc; i++) {
+        if (wcscmp(argv[i], L"-c") == 0 || wcscmp(argv[i], L"-S") == 0 || wcscmp(argv[i], L"-E") == 0) link = 0;
+    }
     for (int i = 1; i < argc; i++) {
         if (wcscmp(argv[i], L"-mwindows") == 0) {
             add_s(&cmd, L" -Wl,--subsystem,windows -luser32 -lgdi32 -lcomdlg32");
@@ -86,6 +95,7 @@ int main(void) {
             add_arg(&cmd, argv[i]);
         }
     }
+    if (link) add_s(&cmd, L" -Wl,--no-insert-timestamp");
 
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;

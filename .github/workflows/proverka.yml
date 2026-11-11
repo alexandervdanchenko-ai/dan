@@ -451,3 +451,25 @@ jobs:
               текст = (р.stdout + р.stderr)[-8000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
               print("::error title=Проверка поставки::" + текст)
           sys.exit(р.returncode)
+
+  vosproizvodimost:
+    name: Воспроизводимая сборка поставки
+    # поставка/собрать.py дважды из одного коммита даёт те же dan.exe, zig-cc.exe, редактор и
+    # переносной архив байт в байт (установщик Inno Setup в сверку не входит)
+    needs: llama
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-windows-x64
+          path: llama-vypusk
+      - name: Две сборки поставки и сверка
+        shell: bash
+        run: python поставка/проверить_воспроизводимость.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
