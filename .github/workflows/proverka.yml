@@ -244,6 +244,27 @@ jobs:
           if-no-files-found: ignore
 
 
+  parallelno:
+    name: Фаззинг параллельного цикла
+    # случайные программы с «параллельно для»: вывод не зависит от числа потоков и совпадает с обычным
+    # «для», ThreadSanitizer не видит гонок, испорченные варианты отвергаются с кодом Д03xx
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: clang для ThreadSanitizer
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Программы (каждый прогон - новые зёрна)
+        run: python fazzing_parallelno.py 150 --зерно=$(( (GITHUB_RUN_ID % 100000) * 1000 ))
+      - name: Программы под ThreadSanitizer
+        run: python fazzing_parallelno.py 15 --зерно=$(( (GITHUB_RUN_ID % 100000) * 1000 + 500 )) --tsan
+      - name: Находки
+        if: failure()
+        run: for ф in фаззинг/находки_параллельно/*.dan; do echo "== $ф"; cat "$ф"; done
+
   sanitayzery:
     name: Компилятор под санитайзерами
     # компилятор из семени с ASan, LSan и UBSan переводит сам себя (код C совпадает с семенем) и все
