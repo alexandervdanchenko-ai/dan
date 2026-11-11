@@ -133,7 +133,8 @@ def добавить_файлы():
         shutil.copy(путь, примеры)
     for путь in glob.glob(os.path.join(КОРЕНЬ, "примеры", "модули", "*.dan")):
         shutil.copy(путь, os.path.join(примеры, "модули"))
-    for имя in ("LICENSE", "README.md"):
+    # llms-full.txt - правила языка для агентов (инструмент spravka сервера «dan mcp», AGENTS.md «dan новый»)
+    for имя in ("LICENSE", "README.md", "llms-full.txt"):
         shutil.copy(os.path.join(КОРЕНЬ, имя), ПАПКА)
     # значки программы и файлов .dan (для «Пуска» и проводника)
     for имя in ("dan.ico", "dan-fail.ico"):
