@@ -48,7 +48,7 @@
         "варианты": [([ЦЕЛ], ЛОГ)],
         "c": ["dan_prime"],
         "строка": [False],
-        "описание": "имеет ли число ровно два делителя: 1 и само себя",
+        "описание": "имеет ли число ровно два делителя: 1 и само себя (точный тест Миллера - Рабина для любого цел)",
     },
     "делители": {
         "варианты": [([ЦЕЛ], СПИСОК_ЦЕЛ)],
@@ -66,7 +66,7 @@
         "варианты": [([ЦЕЛ], СПИСОК_ЦЕЛ)],
         "c": ["dan_prime_factors"],
         "строка": [True],
-        "описание": "разложение на простые множители: простые_множители(180) = [2, 2, 3, 3, 5]",
+        "описание": "разложение на простые множители по возрастанию: простые_множители(180) = [2, 2, 3, 3, 5] (метод Полларда: миллисекунды для любого цел)",
     },
     "частное": {
         "варианты": [([ЦЕЛ, ЦЕЛ], ЦЕЛ), (["длинное", "длинное"], "длинное"), (["мн", "мн"], "мн")],
@@ -162,13 +162,89 @@ static bool dan_divides(int64_t a, int64_t b, int line) {
 static bool dan_even(int64_t a) { return a % 2 == 0; }
 static bool dan_odd(int64_t a) { return a % 2 != 0; }
 
-static bool dan_prime(int64_t n) {
+/* Arithmetic modulo m < 2^63 without overflow (128-bit product). */
+static uint64_t dan_mulmod_u(uint64_t a, uint64_t b, uint64_t m) { return (uint64_t)((dan_u128)a * b % m); }
+static uint64_t dan_powmod_u(uint64_t a, uint64_t e, uint64_t m) {
+    uint64_t r = 1 % m;
+    a %= m;
+    while (e) {
+        if (e & 1) r = dan_mulmod_u(r, a, m);
+        a = dan_mulmod_u(a, a, m);
+        e >>= 1;
+    }
+    return r;
+}
+
+/* Deterministic Miller-Rabin test: the first twelve primes as bases are enough
+   for every n < 3.3 * 10^24, so for every 64-bit number. */
+static bool dan_prime_u(uint64_t n) {
+    static const uint64_t small[12] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37 };
     if (n < 2) return false;
-    if (n < 4) return true;
-    if (n % 2 == 0 || n % 3 == 0) return false;
-    for (int64_t d = 5; d <= n / d; d += 6)
-        if (n % d == 0 || n % (d + 2) == 0) return false;
+    for (int i = 0; i < 12; i++) {
+        if (n == small[i]) return true;
+        if (n % small[i] == 0) return false;
+    }
+    if (n < 41 * 41) return true;
+    uint64_t d = n - 1;
+    int s = 0;
+    while ((d & 1) == 0) { d >>= 1; s++; }
+    for (int i = 0; i < 12; i++) {
+        uint64_t x = dan_powmod_u(small[i], d, n);
+        if (x == 1 || x == n - 1) continue;
+        int composite = 1;
+        for (int r = 1; r < s && composite; r++) {
+            x = dan_mulmod_u(x, x, n);
+            if (x == n - 1) composite = 0;
+        }
+        if (composite) return false;
+    }
     return true;
+}
+
+static bool dan_prime(int64_t n) { return n >= 2 && dan_prime_u((uint64_t)n); }
+
+static uint64_t dan_gcd_u(uint64_t a, uint64_t b);
+
+/* A nontrivial divisor of an odd composite n: Pollard's rho method in Brent's form
+   with a fixed sequence of constants (the result does not depend on chance). */
+static uint64_t dan_rho_divisor(uint64_t n) {
+    for (uint64_t c = 1;; c++) {
+        uint64_t y = 2, x = 2, q = 1, g = 1, ys = 2, r = 1;
+        const uint64_t m = 128;
+        while (g == 1) {
+            x = y;
+            for (uint64_t i = 0; i < r; i++) y = (dan_mulmod_u(y, y, n) + c) % n;
+            for (uint64_t k = 0; k < r && g == 1; k += m) {
+                ys = y;
+                for (uint64_t i = 0; i < m && i < r - k; i++) {
+                    y = (dan_mulmod_u(y, y, n) + c) % n;
+                    q = dan_mulmod_u(q, x > y ? x - y : y - x, n);
+                }
+                g = dan_gcd_u(q, n);
+            }
+            r <<= 1;
+        }
+        if (g == n) {                       /* the batch overshot: repeat it step by step */
+            do {
+                ys = (dan_mulmod_u(ys, ys, n) + c) % n;
+                g = dan_gcd_u(x > ys ? x - ys : ys - x, n);
+            } while (g == 1);
+        }
+        if (g != n) return g;
+    }
+}
+
+static void dan_factor_push(dl_Li *r, uint64_t n) {
+    if (n == 1) return;
+    if (dan_prime_u(n)) { dl_Li_push(r, (int64_t)n); return; }
+    uint64_t d = dan_rho_divisor(n);
+    dan_factor_push(r, d);
+    dan_factor_push(r, n / d);
+}
+
+static int dan_qcmp_i64(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
 }
 
 static dl_Li *dan_divisors(int64_t n, int line) {
@@ -195,13 +271,18 @@ static dl_Li *dan_multiples(int64_t a, int64_t count, int line) {
     return r;
 }
 
+/* Small divisors by trial division, the rest by Pollard's rho with the Miller-Rabin test:
+   milliseconds even for 64-bit numbers. */
 static dl_Li *dan_prime_factors(int64_t n, int line) {
     if (n < 1) dan_natural_error(DAN_NAME_PRIME_FACTORS, n, line);
     dl_Li *r = dl_Li_from(0, NULL);
-    while (n % 2 == 0) { dl_Li_push(r, 2); n /= 2; }
-    for (int64_t d = 3; d <= n / d; d += 2)
-        while (n % d == 0) { dl_Li_push(r, d); n /= d; }
-    if (n > 1) dl_Li_push(r, n);
+    uint64_t u = (uint64_t)n;
+    while (u % 2 == 0) { dl_Li_push(r, 2); u /= 2; }
+    for (uint64_t d = 3; d < 1000 && d <= u / d; d += 2)
+        while (u % d == 0) { dl_Li_push(r, (int64_t)d); u /= d; }
+    int64_t from = r->len;
+    dan_factor_push(r, u);
+    if (r->len - from > 1) qsort(r->items + from, (size_t)(r->len - from), sizeof(int64_t), dan_qcmp_i64);
     return r;
 }
 
@@ -838,10 +919,11 @@ _добавить("решить", [
 _добавить("решить_приближённо", [
     ([МН], СПИСОК_ДРОБ, "dan_solve_real", True),
     ([МН, МН], СПИСОК_ДРОБ, "dan_solve_real2", True),
-], "все действительные корни, в том числе иррациональные: решить_приближённо(х² - 2)")
+], "все действительные корни, в том числе иррациональные, кратные - один раз: решить_приближённо(х² - 2)")
 ФУНКЦИИ["решить_приближенно"] = ФУНКЦИИ["решить_приближённо"]
 _добавить("разложить", [([МН], СТР, "dan_factor_str", True)],
-          "разложение многочлена на множители: разложить(х² - 3*х + 2) = \"(х - 2)(х - 1)\"")
+          "разложение многочлена на неприводимые множители над рациональными числами: "
+          "разложить(х^4 + 3*х^2 + 2) = \"(х² + 1)(х² + 2)\"; сверх пределов (spec.md, раздел 11.6) - ошибка выполнения")
 _добавить("вынести_общий_множитель", [([МН], СТР, "dan_common_factor_str", True)],
           "вынесение общего множителя за скобки: 2х² + 6х = \"2х(х + 3)\"")
 _добавить("решить_неравенство", [([МН, СТР, МН], СТР, "dan_ineq_str", True)],
@@ -866,6 +948,8 @@ _формула("дискриминант", "абв", ("-", умн(А(1), А(1))
 СООБЩЕНИЯ.update({
     "DAN_MSG_POLY_NEG_POW": "многочлен нельзя возводить в отрицательную степень",
     "DAN_MSG_POLY_BIG": "многочлен слишком сложен: степень или коэффициенты слишком велики",
+    "DAN_MSG_FACTOR_LIMIT": "многочлен не удалось разложить на неприводимые множители: степень или коэффициенты "
+                            "слишком велики (оценка коэффициентов множителей больше 2^60)",
     "DAN_MSG_ANY_X": "уравнение верно при любом значении х",
     "DAN_MSG_BAD_REL": "неизвестный знак сравнения \"%s\"; используйте <, <=, >, >=, =, !=",
     "DAN_MSG_SYS_SHAPE": "в системе из N уравнений каждая строка должна содержать N коэффициентов "
@@ -1171,10 +1255,620 @@ static int64_t dan_divisors128(dan_i128 n, dan_i128 **out, int line) {
     return k;
 }
 
+/* ---- factorization over the integers: arithmetic modulo a prime 2^61 < p < 2^62 ---- */
+
+/* Integer polynomial helpers (dan_zpoly: z[0..deg], deg = -1 for zero). */
+static dan_zpoly dan_zp_new(int64_t deg) {
+    dan_zpoly a;
+    a.deg = deg;
+    a.z = dan_alloc(sizeof(dan_i128) * (size_t)(deg < 0 ? 1 : deg + 1));
+    for (int64_t i = 0; i <= deg; i++) a.z[i] = 0;
+    return a;
+}
+static dan_zpoly dan_zp_copy(const dan_zpoly *a) {
+    dan_zpoly r = dan_zp_new(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) r.z[i] = a->z[i];
+    return r;
+}
+static void dan_zp_trim(dan_zpoly *a) { while (a->deg >= 0 && a->z[a->deg] == 0) a->deg--; }
+/* divide by the content, leading coefficient positive */
+static void dan_zp_primitive(dan_zpoly *a) {
+    dan_i128 g = 0;
+    for (int64_t i = 0; i <= a->deg; i++) g = dan_gcd_i128(g, a->z[i]);
+    if (g == 0) return;
+    if (a->z[a->deg] < 0) g = -g;
+    for (int64_t i = 0; i <= a->deg; i++) a->z[i] /= g;
+}
+/* derivative; false if a coefficient does not fit */
+static bool dan_zp_derivative(const dan_zpoly *a, dan_zpoly *r) {
+    *r = dan_zp_new(a->deg - 1);
+    for (int64_t i = 1; i <= a->deg; i++)
+        if (__builtin_mul_overflow(a->z[i], (dan_i128)i, &r->z[i - 1])) { dan_free(r->z); return false; }
+    dan_zp_trim(r);
+    return true;
+}
+static double dan_zp_norm2(const dan_zpoly *a);
+/* Mignotte: a factor g of a of degree k has |g_j| <= C(k, j) M(a) <= C(k, k/2) ||a||_2 */
+static double dan_zp_bound(const dan_zpoly *a, int64_t k) {
+    double b = dan_zp_norm2(a);
+    for (int64_t j = 1; j <= k / 2; j++) b = b * (double)(k - j + 1) / (double)j;
+    return b * 1.0001 + 1;
+}
+/* exact division a = b * q over the integers: 1 - divides, 0 - does not,
+   -1 - a number does not fit in 128 bits (undecided). A quotient coefficient above
+   the bound for factors of a means that b does not divide a. */
+static int dan_zp_divexact(const dan_zpoly *a, const dan_zpoly *b, dan_zpoly *q) {
+    if (b->deg < 0 || a->deg < b->deg) return 0;
+    if (b->z[0] != 0 && a->z[0] % b->z[0] != 0) return 0;
+    double qb = dan_zp_bound(a, a->deg - b->deg);
+    int res = 0;
+    dan_zpoly r = dan_zp_copy(a);
+    *q = dan_zp_new(a->deg - b->deg);
+    dan_i128 lb = b->z[b->deg];
+    for (int64_t k = a->deg - b->deg; k >= 0; k--) {
+        dan_i128 top = r.z[b->deg + k];
+        if (top % lb != 0) goto fail;
+        dan_i128 t = top / lb, m;
+        q->z[k] = t;
+        if (t == 0) continue;
+        if ((double)(t < 0 ? -t : t) > qb) goto fail;
+        for (int64_t j = 0; j <= b->deg; j++) {
+            if (__builtin_mul_overflow(t, b->z[j], &m) || __builtin_sub_overflow(r.z[j + k], m, &r.z[j + k])) {
+                res = -1;
+                goto fail;
+            }
+        }
+    }
+    for (int64_t i = 0; i < b->deg; i++) if (r.z[i] != 0) goto fail;
+    dan_free(r.z);
+    return 1;
+fail:
+    dan_free(r.z);
+    dan_free(q->z);
+    return res;
+}
+static double dan_zp_norm2(const dan_zpoly *a) {
+    double s = 0;
+    for (int64_t i = 0; i <= a->deg; i++) { double t = (double)a->z[i]; s += t * t; }
+    return sqrt(s);
+}
+/* Every coefficient of (lc f / lc g) g for a factor g of f of degree k is at most
+   C(k, j) M(f) <= C(k, k/2) ||f||_2 (Mignotte); it must stay below p / 2 > 2^60. */
+static bool dan_zp_bound_ok(const dan_zpoly *f, int64_t k) {
+    return dan_zp_bound(f, k) < 1152921504606846976.0;        /* 2^60 */
+}
+static bool dan_zp_within(const dan_zpoly *h, double bound) {
+    for (int64_t i = 0; i <= h->deg; i++)
+        if ((double)(h->z[i] < 0 ? -h->z[i] : h->z[i]) > bound) return false;
+    return true;
+}
+
+/* Polynomial modulo the prime p: c[0..deg], deg = -1 for zero. */
+typedef struct { int64_t deg; uint64_t *c; } dan_pp;
+
+static dan_pp dan_pp_new(int64_t deg) {
+    dan_pp a;
+    a.deg = deg;
+    a.c = dan_alloc(sizeof(uint64_t) * (size_t)(deg < 0 ? 1 : deg + 1));
+    for (int64_t i = 0; i <= deg; i++) a.c[i] = 0;
+    return a;
+}
+static void dan_pp_trim(dan_pp *a) { while (a->deg >= 0 && a->c[a->deg] == 0) a->deg--; }
+static dan_pp dan_pp_copy(const dan_pp *a) {
+    dan_pp r = dan_pp_new(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) r.c[i] = a->c[i];
+    return r;
+}
+static uint64_t dan_pm_add(uint64_t a, uint64_t b, uint64_t p) { uint64_t s = a + b; return s >= p ? s - p : s; }
+static uint64_t dan_pm_sub(uint64_t a, uint64_t b, uint64_t p) { return a >= b ? a - b : a + (p - b); }
+static uint64_t dan_pm_inv(uint64_t a, uint64_t p) { return dan_powmod_u(a, p - 2, p); }
+
+static dan_pp dan_pp_from_z(const dan_zpoly *f, uint64_t p) {
+    dan_pp r = dan_pp_new(f->deg);
+    for (int64_t i = 0; i <= f->deg; i++) {
+        dan_i128 v = f->z[i] % (dan_i128)p;
+        r.c[i] = (uint64_t)(v < 0 ? v + (dan_i128)p : v);
+    }
+    dan_pp_trim(&r);
+    return r;
+}
+static void dan_pp_monic(dan_pp *a, uint64_t p) {
+    if (a->deg < 0) return;
+    uint64_t inv = dan_pm_inv(a->c[a->deg], p);
+    for (int64_t i = 0; i <= a->deg; i++) a->c[i] = dan_mulmod_u(a->c[i], inv, p);
+}
+static dan_pp dan_pp_mul(const dan_pp *a, const dan_pp *b, uint64_t p) {
+    if (a->deg < 0 || b->deg < 0) return dan_pp_new(-1);
+    dan_pp r = dan_pp_new(a->deg + b->deg);
+    for (int64_t i = 0; i <= a->deg; i++) {
+        if (a->c[i] == 0) continue;
+        for (int64_t j = 0; j <= b->deg; j++)
+            r.c[i + j] = dan_pm_add(r.c[i + j], dan_mulmod_u(a->c[i], b->c[j], p), p);
+    }
+    dan_pp_trim(&r);
+    return r;
+}
+/* a := a mod m; the quotient goes to *q unless q is NULL */
+static void dan_pp_divrem(dan_pp *a, const dan_pp *m, dan_pp *q, uint64_t p) {
+    int64_t dm = m->deg;
+    uint64_t inv = dan_pm_inv(m->c[dm], p);
+    if (q) *q = dan_pp_new(a->deg - dm < 0 ? -1 : a->deg - dm);
+    for (int64_t k = a->deg - dm; k >= 0; k--) {
+        uint64_t t = dan_mulmod_u(a->c[dm + k], inv, p);
+        if (q) q->c[k] = t;
+        if (t == 0) continue;
+        for (int64_t j = 0; j <= dm; j++)
+            a->c[j + k] = dan_pm_sub(a->c[j + k], dan_mulmod_u(t, m->c[j], p), p);
+    }
+    if (a->deg >= dm) a->deg = dm - 1;
+    dan_pp_trim(a);
+}
+static dan_pp dan_pp_mulmod(const dan_pp *a, const dan_pp *b, const dan_pp *m, uint64_t p) {
+    dan_pp r = dan_pp_mul(a, b, p);
+    dan_pp_divrem(&r, m, NULL, p);
+    return r;
+}
+/* monic greatest common divisor */
+static dan_pp dan_pp_gcd(const dan_pp *a0, const dan_pp *b0, uint64_t p) {
+    dan_pp a = dan_pp_copy(a0), b = dan_pp_copy(b0);
+    while (b.deg >= 0) {
+        dan_pp_divrem(&a, &b, NULL, p);
+        dan_pp t = a; a = b; b = t;
+    }
+    dan_free(b.c);
+    dan_pp_monic(&a, p);
+    return a;
+}
+static dan_pp dan_pp_powmod(const dan_pp *a, uint64_t e, const dan_pp *m, uint64_t p) {
+    dan_pp r = dan_pp_new(0), b = dan_pp_copy(a);
+    r.c[0] = 1;
+    dan_pp_divrem(&b, m, NULL, p);
+    while (e) {
+        if (e & 1) { dan_pp t = dan_pp_mulmod(&r, &b, m, p); dan_free(r.c); r = t; }
+        e >>= 1;
+        if (e) { dan_pp t = dan_pp_mulmod(&b, &b, m, p); dan_free(b.c); b = t; }
+    }
+    dan_free(b.c);
+    return r;
+}
+static dan_pp dan_pp_derivative(const dan_pp *a, uint64_t p) {
+    dan_pp r = dan_pp_new(a->deg - 1);
+    for (int64_t i = 1; i <= a->deg; i++) r.c[i - 1] = dan_mulmod_u(a->c[i], (uint64_t)i % p, p);
+    dan_pp_trim(&r);
+    return r;
+}
+/* the integer polynomial c * a with coefficients in (-p/2, p/2) */
+static dan_zpoly dan_pp_lift(const dan_pp *a, uint64_t c, uint64_t p) {
+    dan_zpoly r = dan_zp_new(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) {
+        uint64_t v = dan_mulmod_u(a->c[i], c, p);
+        r.z[i] = v > p / 2 ? (dan_i128)v - (dan_i128)p : (dan_i128)v;
+    }
+    dan_zp_trim(&r);
+    return r;
+}
+static uint64_t dan_z_mod(dan_i128 v, uint64_t p) {
+    v %= (dan_i128)p;
+    return (uint64_t)(v < 0 ? v + (dan_i128)p : v);
+}
+
+/* the k-th prime after 2^61 (a fixed sequence: the result does not depend on chance) */
+static uint64_t dan_big_prime(int k) {
+    uint64_t c = ((uint64_t)1 << 61) + 1;
+    for (;; c += 2)
+        if (dan_prime_u(c) && k-- == 0) return c;
+}
+
+/* Frobenius map a(x) -> a(x)^p = a(x^p) modulo f: row j is x^(p j) mod f. */
+typedef struct { int64_t n; uint64_t *q; } dan_frob;
+
+static dan_frob dan_frob_make(const dan_pp *f, uint64_t p) {
+    dan_frob F;
+    int64_t n = f->deg;
+    F.n = n;
+    F.q = dan_alloc(sizeof(uint64_t) * (size_t)(n * n));
+    for (int64_t i = 0; i < n * n; i++) F.q[i] = 0;
+    dan_pp x = dan_pp_new(1);
+    x.c[1] = 1;
+    dan_pp xp = dan_pp_powmod(&x, p, f, p), cur = dan_pp_new(0);
+    cur.c[0] = 1;
+    for (int64_t j = 0; j < n; j++) {
+        for (int64_t i = 0; i <= cur.deg; i++) F.q[j * n + i] = cur.c[i];
+        dan_pp t = dan_pp_mulmod(&cur, &xp, f, p);
+        dan_free(cur.c);
+        cur = t;
+    }
+    dan_free(x.c); dan_free(xp.c); dan_free(cur.c);
+    return F;
+}
+static dan_pp dan_frob_apply(const dan_frob *F, const dan_pp *a, uint64_t p) {
+    dan_pp r = dan_pp_new(F->n - 1);
+    for (int64_t j = 0; j <= a->deg; j++) {
+        if (a->c[j] == 0) continue;
+        const uint64_t *row = F->q + j * F->n;
+        for (int64_t i = 0; i < F->n; i++)
+            r.c[i] = dan_pm_add(r.c[i], dan_mulmod_u(a->c[j], row[i], p), p);
+    }
+    dan_pp_trim(&r);
+    return r;
+}
+
+typedef struct { dan_pp *u; int64_t n, cap; } dan_pplist;
+static void dan_pplist_push(dan_pplist *l, dan_pp a) {
+    if (l->n == l->cap) { l->cap = l->cap ? 2 * l->cap : 8; l->u = dan_realloc(l->u, sizeof(dan_pp) * (size_t)l->cap); }
+    l->u[l->n++] = a;
+}
+static void dan_pplist_free(dan_pplist *l) {
+    for (int64_t i = 0; i < l->n; i++) dan_free(l->u[i].c);
+    dan_free(l->u);
+    l->u = NULL; l->n = l->cap = 0;
+}
+
+/* Distinct-degree factorization of a monic square-free f: groups (product, degree of each factor). */
+static int64_t dan_pp_ddf(const dan_pp *f, const dan_frob *F, uint64_t p, dan_pplist *groups, int64_t *degs) {
+    int64_t k = 0, count = 0;
+    dan_pp cur = dan_pp_copy(f), h = dan_pp_new(1);
+    h.c[1] = 1;
+    if (f->deg == 1) { h.deg = 0; h.c[0] = 0; dan_pp_trim(&h); }
+    for (int64_t d = 1; 2 * d <= cur.deg; d++) {
+        dan_pp t = dan_frob_apply(F, &h, p);
+        dan_free(h.c);
+        h = t;                                       /* x^(p^d) mod f */
+        dan_pp s = dan_pp_copy(&h);
+        dan_pp_divrem(&s, &cur, NULL, p);
+        if (s.deg < 1) { dan_pp s2 = dan_pp_new(1); for (int64_t i = 0; i <= s.deg; i++) s2.c[i] = s.c[i]; dan_free(s.c); s = s2; }
+        s.c[1] = dan_pm_sub(s.c[1], 1, p);
+        dan_pp_trim(&s);
+        dan_pp g = dan_pp_gcd(&s, &cur, p);
+        dan_free(s.c);
+        if (g.deg > 0) {
+            dan_pp q, rem = dan_pp_copy(&cur);
+            dan_pp_divrem(&rem, &g, &q, p);
+            dan_free(rem.c);
+            dan_free(cur.c);
+            cur = q;
+            dan_pp_trim(&cur);
+            count += g.deg / d;
+            degs[k++] = d;
+            dan_pplist_push(groups, g);
+        } else dan_free(g.c);
+    }
+    if (cur.deg > 0) { count++; degs[k++] = cur.deg; dan_pplist_push(groups, cur); }
+    else dan_free(cur.c);
+    dan_free(h.c);
+    return count;
+}
+
+static uint64_t dan_xorshift(uint64_t *s) {
+    uint64_t x = *s;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    *s = x;
+    return x;
+}
+
+/* Equal-degree splitting (Cantor - Zassenhaus) of g, a product of factors of degree d. */
+static void dan_pp_edf(const dan_pp *g, int64_t d, const dan_frob *F, uint64_t p, uint64_t *seed, dan_pplist *out) {
+    if (g->deg == d) { dan_pplist_push(out, dan_pp_copy(g)); return; }
+    for (;;) {
+        dan_pp a = dan_pp_new(g->deg - 1);
+        for (int64_t i = 0; i < g->deg; i++) a.c[i] = dan_xorshift(seed) % p;
+        dan_pp_trim(&a);
+        if (a.deg < 1) { dan_free(a.c); continue; }
+        dan_pp u = dan_pp_copy(&a), t = dan_pp_copy(&a);
+        for (int64_t i = 1; i < d; i++) {
+            dan_pp t2 = dan_frob_apply(F, &t, p);
+            dan_free(t.c);
+            t = t2;
+            dan_pp_divrem(&t, g, NULL, p);
+            dan_pp u2 = dan_pp_mulmod(&u, &t, g, p);
+            dan_free(u.c);
+            u = u2;
+        }
+        dan_pp b = dan_pp_powmod(&u, (p - 1) / 2, g, p);
+        dan_free(a.c); dan_free(u.c); dan_free(t.c);
+        if (b.deg < 0) { dan_free(b.c); continue; }
+        b.c[0] = dan_pm_sub(b.c[0], 1, p);
+        dan_pp_trim(&b);
+        dan_pp h = dan_pp_gcd(&b, g, p);
+        dan_free(b.c);
+        if (h.deg > 0 && h.deg < g->deg) {
+            dan_pp q, rem = dan_pp_copy(g);
+            dan_pp_divrem(&rem, &h, &q, p);
+            dan_free(rem.c);
+            dan_pp_trim(&q);
+            dan_pp_edf(&h, d, F, p, seed, out);
+            dan_pp_edf(&q, d, F, p, seed, out);
+            dan_free(h.c);
+            dan_free(q.c);
+            return;
+        }
+        dan_free(h.c);
+    }
+}
+
+typedef struct { dan_zpoly *f; int64_t n, cap; } dan_zplist;
+static void dan_zplist_push(dan_zplist *l, dan_zpoly a) {
+    if (l->n == l->cap) { l->cap = l->cap ? 2 * l->cap : 8; l->f = dan_realloc(l->f, sizeof(dan_zpoly) * (size_t)l->cap); }
+    l->f[l->n++] = a;
+}
+
+#define DAN_FACTOR_SUBSETS 200000
+#define DAN_FACTOR_DEGREE 300
+
+/* One candidate of the recombination: 1 - a factor found (pushed to out, cur reduced),
+   0 - not a factor, -1 - undecided (numbers beyond 128 bits). */
+static int dan_try_subset(const dan_zpoly *f, dan_zpoly *cur, const dan_pplist *u, const int64_t *pos, int64_t m,
+                          const int64_t *idx, int64_t s, bool use_compl, uint64_t p, dan_zplist *out) {
+    dan_pp prod = dan_pp_new(0);
+    prod.c[0] = 1;
+    for (int64_t i = 0, t = 0; i < m; i++) {
+        bool in = t < s && idx[t] == i;
+        if (in) t++;
+        if (in != use_compl) { dan_pp q = dan_pp_mul(&prod, &u->u[pos[i]], p); dan_free(prod.c); prod = q; }
+    }
+    dan_zpoly h = dan_pp_lift(&prod, dan_z_mod(cur->z[cur->deg], p), p);
+    dan_free(prod.c);
+    dan_zp_primitive(&h);
+    dan_zpoly q;
+    int dv = h.deg > 0 && dan_zp_within(&h, dan_zp_bound(f, h.deg)) ? dan_zp_divexact(cur, &h, &q) : 0;
+    if (dv != 1) { dan_free(h.z); return dv; }
+    dan_free(cur->z);
+    if (use_compl) { dan_zplist_push(out, q); *cur = h; }
+    else { dan_zplist_push(out, h); *cur = q; }
+    dan_zp_primitive(cur);
+    return 1;
+}
+
+/* Zassenhaus recombination: f square-free primitive, u - its monic factors modulo p.
+   Subsets are tried by increasing size; a candidate is lc(f) times the product
+   (or of the complement, whichever has the smaller degree), lifted to (-p/2, p/2). */
+static bool dan_recombine(const dan_zpoly *f, const dan_pplist *u, uint64_t p, const char *allowed, dan_zplist *out) {
+    int64_t r = u->n;
+    char *alive = dan_alloc((size_t)r + 1);
+    int64_t *idx = dan_alloc(sizeof(int64_t) * (size_t)(r + 1));
+    int64_t *pos = dan_alloc(sizeof(int64_t) * (size_t)(r + 1));
+    for (int64_t i = 0; i < r; i++) alive[i] = 1;
+    int64_t nalive = r, tries = 0;
+    dan_zpoly cur = dan_zp_copy(f);
+    bool ok = true;
+    for (int64_t s = 1; 2 * s <= nalive;) {
+        int64_t m = 0;
+        for (int64_t i = 0; i < r; i++) if (alive[i]) pos[m++] = i;
+        for (int64_t i = 0; i < s; i++) idx[i] = i;
+        bool found = false;
+        for (;;) {
+            if (++tries > DAN_FACTOR_SUBSETS) { ok = false; break; }
+            int64_t dsum = 0;
+            for (int64_t i = 0; i < s; i++) dsum += u->u[pos[idx[i]]].deg;
+            bool use_compl = 2 * dsum > cur.deg;
+            int dv = allowed[dsum] && allowed[cur.deg - dsum]
+                     ? dan_try_subset(f, &cur, u, pos, m, idx, s, use_compl, p, out) : 0;
+            if (dv < 0) { ok = false; break; }
+            if (dv) {
+                for (int64_t i = 0; i < s; i++) alive[pos[idx[i]]] = 0;
+                nalive -= s;
+                found = true;
+                break;
+            }
+            /* next combination of s indices out of m */
+            int64_t i = s - 1;
+            while (i >= 0 && idx[i] == m - s + i) i--;
+            if (i < 0) break;
+            idx[i]++;
+            for (int64_t j = i + 1; j < s; j++) idx[j] = idx[j - 1] + 1;
+        }
+        if (!ok) break;
+        if (!found) s++;
+    }
+    if (ok && cur.deg > 0) dan_zplist_push(out, cur);
+    else dan_free(cur.z);
+    dan_free(alive); dan_free(idx); dan_free(pos);
+    return ok;
+}
+
+/* Irreducible factors over the integers of a square-free primitive f (deg >= 1).
+   false: beyond the limits (coefficient bound or number of subsets). */
+static bool dan_factor_squarefree(const dan_zpoly *f, dan_zplist *out) {
+    if (f->deg == 1) { dan_zplist_push(out, dan_zp_copy(f)); return true; }
+    if (f->deg > DAN_FACTOR_DEGREE) return false;
+    int64_t n = f->deg;
+    /* allowed[k]: a factor of degree k is possible modulo every prime tried so far */
+    char *allowed = dan_alloc((size_t)n + 1), *sums = dan_alloc((size_t)n + 1);
+    for (int64_t i = 0; i <= n; i++) allowed[i] = 1;
+    dan_pplist best = { NULL, 0, 0 };
+    int64_t best_count = -1, *best_degs = NULL;
+    uint64_t best_p = 0;
+    dan_frob best_F = { 0, NULL };
+    bool irreducible = false, bound_ok = dan_zp_bound_ok(f, n / 2);
+    int good = 0;
+    /* three primes are enough to choose one for recombination; beyond the bound up to twelve
+       primes are tried in order to prove irreducibility by the degrees of the factors */
+    for (int k = 0; k < 48 && good < (bound_ok ? 3 : 12) && !irreducible; k++) {
+        uint64_t p = dan_big_prime(k);
+        if (dan_z_mod(f->z[f->deg], p) == 0) continue;
+        dan_pp fp = dan_pp_from_z(f, p), dfp = dan_pp_derivative(&fp, p);
+        dan_pp g = dan_pp_gcd(&fp, &dfp, p);
+        dan_free(dfp.c);
+        if (g.deg != 0) { dan_free(g.c); dan_free(fp.c); continue; }
+        dan_free(g.c);
+        good++;
+        dan_pp_monic(&fp, p);
+        dan_frob F = dan_frob_make(&fp, p);
+        dan_pplist groups = { NULL, 0, 0 };
+        int64_t *degs = dan_alloc(sizeof(int64_t) * (size_t)(n + 1));
+        int64_t count = dan_pp_ddf(&fp, &F, p, &groups, degs);
+        dan_free(fp.c);
+        for (int64_t i = 0; i <= n; i++) sums[i] = i == 0;           /* subset sums of the degrees */
+        for (int64_t i = 0; i < groups.n; i++)
+            for (int64_t m = groups.u[i].deg / degs[i]; m > 0; m--)
+                for (int64_t t = n; t >= degs[i]; t--) if (sums[t - degs[i]]) sums[t] = 1;
+        irreducible = true;
+        for (int64_t i = 0; i <= n; i++) {
+            allowed[i] = allowed[i] && sums[i];
+            if (i > 0 && i < n && allowed[i]) irreducible = false;
+        }
+        if (best_count < 0 || count < best_count) {
+            dan_pplist_free(&best);
+            dan_free(best_degs);
+            dan_free(best_F.q);
+            best = groups; best_degs = degs; best_count = count; best_p = p; best_F = F;
+        } else { dan_pplist_free(&groups); dan_free(degs); dan_free(F.q); }
+    }
+    bool ok = best_count >= 0;
+    if (ok && (irreducible || best_count == 1)) dan_zplist_push(out, dan_zp_copy(f));
+    else if (ok && !bound_ok) ok = false;
+    else if (ok) {
+        dan_pplist u = { NULL, 0, 0 };
+        uint64_t seed = 88172645463325252ULL;
+        for (int64_t i = 0; i < best.n; i++) dan_pp_edf(&best.u[i], best_degs[i], &best_F, best_p, &seed, &u);
+        ok = dan_recombine(f, &u, best_p, allowed, out);
+        dan_pplist_free(&u);
+    }
+    dan_pplist_free(&best);
+    dan_free(best_degs);
+    dan_free(best_F.q);
+    dan_free(allowed);
+    dan_free(sums);
+    return ok;
+}
+
+/* gcd of f and f' modulo p (monic) and the monic cofactor f / gcd; false if p divides lc f */
+static bool dan_sqf_mod(const dan_zpoly *f, const dan_zpoly *df, uint64_t p, dan_pp *g, dan_pp *c) {
+    if (dan_z_mod(f->z[f->deg], p) == 0) return false;
+    dan_pp fp = dan_pp_from_z(f, p), dfp = dan_pp_from_z(df, p), rem = dan_pp_copy(&fp);
+    *g = dan_pp_gcd(&fp, &dfp, p);
+    dan_pp_divrem(&rem, g, c, p);
+    dan_pp_trim(c);
+    dan_pp_monic(c, p);
+    dan_free(fp.c); dan_free(dfp.c); dan_free(rem.c);
+    return true;
+}
+
+/* The integer congruent to l1 a modulo p1 and to l2 b modulo p2 (Chinese remainder theorem),
+   in (-p1 p2 / 2, p1 p2 / 2); p1 p2 < 2^124. */
+static dan_zpoly dan_pp_lift2(const dan_pp *a, uint64_t l1, uint64_t p1, const dan_pp *b, uint64_t l2, uint64_t p2) {
+    dan_u128 P = (dan_u128)p1 * p2;
+    uint64_t inv = dan_pm_inv(p1 % p2, p2);
+    dan_zpoly r = dan_zp_new(a->deg);
+    for (int64_t i = 0; i <= a->deg; i++) {
+        uint64_t x1 = dan_mulmod_u(a->c[i], l1, p1), x2 = dan_mulmod_u(b->c[i], l2, p2);
+        uint64_t t = dan_mulmod_u(dan_pm_sub(x2, x1 % p2, p2), inv, p2);
+        dan_u128 x = (dan_u128)x1 + (dan_u128)p1 * t;
+        r.z[i] = x > P / 2 ? (dan_i128)x - (dan_i128)P : (dan_i128)x;
+    }
+    dan_zp_trim(&r);
+    return r;
+}
+
+/* Square-free part of a primitive f (deg >= 1) over the integers: the gcd of f and f'
+   is found modulo one big prime (bound for its coefficients below 2^60) or two (below 2^121)
+   and checked by exact division. false: beyond the bound. */
+static bool dan_squarefree_part(const dan_zpoly *f, dan_zpoly *sf) {
+    dan_zpoly df;
+    if (!dan_zp_derivative(f, &df)) return false;
+    bool ok = false, stop = false;
+    for (int k = 0; k < 8 && !ok && !stop; k++) {
+        uint64_t p1 = dan_big_prime(k);
+        dan_pp g1, c1;
+        if (!dan_sqf_mod(f, &df, p1, &g1, &c1)) continue;
+        if (g1.deg == 0) { *sf = dan_zp_copy(f); ok = true; dan_free(g1.c); dan_free(c1.c); break; }
+        bool use_c = c1.deg <= g1.deg;                   /* the candidate of smaller degree */
+        double bound = dan_zp_bound(f, use_c ? c1.deg : g1.deg);
+        dan_zpoly h;
+        bool have = false;
+        uint64_t l1 = dan_z_mod(f->z[f->deg], p1);
+        if (bound < 1152921504606846976.0) {                       /* 2^60 */
+            h = dan_pp_lift(use_c ? &c1 : &g1, l1, p1);
+            have = true;
+        } else if (bound < 2658455991569831745807614120560689152.0) {   /* 2^121 */
+            uint64_t p2 = dan_big_prime(k + 1);
+            dan_pp g2, c2;
+            if (dan_sqf_mod(f, &df, p2, &g2, &c2)) {
+                if (g2.deg == g1.deg) {
+                    h = use_c ? dan_pp_lift2(&c1, l1, p1, &c2, dan_z_mod(f->z[f->deg], p2), p2)
+                              : dan_pp_lift2(&g1, l1, p1, &g2, dan_z_mod(f->z[f->deg], p2), p2);
+                    have = true;
+                }
+                dan_free(g2.c); dan_free(c2.c);
+            }
+        } else stop = true;
+        dan_free(g1.c); dan_free(c1.c);
+        if (!have) continue;
+        dan_zp_primitive(&h);
+        dan_zpoly q, q2;
+        if (h.deg > 0 && dan_zp_divexact(f, &h, &q) == 1) {
+            if (dan_zp_divexact(&df, use_c ? &q : &h, &q2) == 1) {
+                dan_free(q2.z);
+                if (use_c) { *sf = h; dan_free(q.z); }
+                else { dan_zp_primitive(&q); *sf = q; dan_free(h.z); }
+                ok = true;
+                continue;
+            }
+            dan_free(q.z);
+        }
+        dan_free(h.z);
+    }
+    dan_free(df.z);
+    return ok;
+}
+
+typedef struct { dan_zpoly f; int64_t mult; } dan_zfactor;
+
+static int dan_qcmp_zfactor(const void *a, const void *b) {
+    const dan_zpoly *x = &((const dan_zfactor *)a)->f, *y = &((const dan_zfactor *)b)->f;
+    if (x->deg != y->deg) return x->deg < y->deg ? -1 : 1;
+    for (int64_t i = x->deg; i >= 0; i--)
+        if (x->z[i] != y->z[i]) return x->z[i] < y->z[i] ? -1 : 1;
+    return 0;
+}
+
+/* Complete factorization of a primitive f (deg >= 1, leading coefficient > 0) into
+   irreducible primitive factors over the integers with multiplicities, ordered by degree
+   and then by coefficients. Returns -1 beyond the limits. */
+static int64_t dan_factor_z(const dan_zpoly *f, dan_zfactor **out) {
+    dan_zpoly sf;
+    if (!dan_squarefree_part(f, &sf)) return -1;
+    dan_zplist irr = { NULL, 0, 0 };
+    bool ok = dan_factor_squarefree(&sf, &irr);
+    dan_free(sf.z);
+    if (!ok) {
+        for (int64_t i = 0; i < irr.n; i++) dan_free(irr.f[i].z);
+        dan_free(irr.f);
+        return -1;
+    }
+    dan_zfactor *r = dan_alloc(sizeof(dan_zfactor) * (size_t)(irr.n ? irr.n : 1));
+    dan_zpoly cur = dan_zp_copy(f), q;
+    int dv = 1;
+    for (int64_t i = 0; i < irr.n; i++) {
+        dan_zp_primitive(&irr.f[i]);
+        r[i].f = irr.f[i];
+        r[i].mult = 0;
+        while (dv >= 0 && (dv = dan_zp_divexact(&cur, &r[i].f, &q)) == 1) { dan_free(cur.z); cur = q; r[i].mult++; }
+        if (dv == 0) dv = 1;
+    }
+    dan_free(cur.z);
+    if (dv < 0) {
+        for (int64_t i = 0; i < irr.n; i++) dan_free(r[i].f.z);
+        dan_free(r);
+        dan_free(irr.f);
+        return -1;
+    }
+    dan_free(irr.f);
+    qsort(r, (size_t)irr.n, sizeof(dan_zfactor), dan_qcmp_zfactor);
+    *out = r;
+    return irr.n;
+}
+
 typedef struct { dan_rat r; int64_t mult; } dan_rroot;
 
-/* Exact rational roots with multiplicities; f is reduced by every root found. */
-static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
+static bool dan_fits64(dan_i128 v) { return v <= INT64_MAX && v >= -INT64_MAX; }
+
+/* Exact rational roots with multiplicities; f is reduced by every root found.
+   Candidates p/q come from the divisors of the free and leading coefficients when both are
+   at most 10^12, otherwise from the linear factors of the complete factorization.
+   strict: beyond the limits - a run-time error; otherwise only the root 0 is taken out
+   and the rest is left to numerical methods. */
+static int64_t dan_rational_roots_ex(dan_zpoly *f, dan_rroot **out, bool strict, int line) {
     int64_t cap = 8, k = 0;
     dan_rroot *roots = dan_alloc(sizeof(dan_rroot) * (size_t)cap);
     int64_t zero_mult = 0;
@@ -1184,6 +1878,33 @@ static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
         zero_mult++;
     }
     if (zero_mult) { roots[k].r.n = 0; roots[k].r.d = 1; roots[k].mult = zero_mult; k++; }
+    const dan_i128 lim = (dan_i128)1000000000000LL;
+    if (f->deg > 0 && (dan_abs128(f->z[0]) > lim || dan_abs128(f->z[f->deg]) > lim)) {
+        dan_zfactor *fs;
+        int64_t nf = dan_factor_z(f, &fs);
+        if (nf < 0) {
+            if (strict) dan_error(DAN_MSG_POLY_BIG, line);
+            *out = roots;
+            return k;
+        }
+        for (int64_t i = 0; i < nf; i++) {
+            dan_zpoly *g = &fs[i].f;
+            if (g->deg == 1) {
+                dan_i128 p = -g->z[0], q = g->z[1];
+                if (strict || (dan_fits64(p) && dan_fits64(q))) {
+                    if (k == cap) { cap *= 2; roots = dan_realloc(roots, sizeof(dan_rroot) * (size_t)cap); }
+                    roots[k].r = dan_rat_make(p, q, line);
+                    roots[k].mult = fs[i].mult;
+                    k++;
+                    for (int64_t m = 0; m < fs[i].mult; m++) dan_zpoly_divide(f, p, q);
+                }
+            }
+            dan_free(g->z);
+        }
+        dan_free(fs);
+        *out = roots;
+        return k;
+    }
     if (f->deg > 0) {
         dan_i128 *dp, *dq;
         int64_t np = dan_divisors128(dan_abs128(f->z[0]), &dp, line);
@@ -1208,6 +1929,10 @@ static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
     }
     *out = roots;
     return k;
+}
+
+static int64_t dan_rational_roots(dan_zpoly *f, dan_rroot **out, int line) {
+    return dan_rational_roots_ex(f, out, true, line);
 }
 
 static int dan_qcmp_rroot(const void *a, const void *b) {
@@ -1360,25 +2085,36 @@ static int64_t dan_poly_real_roots(dan_mn p, dan_root **out, int line) {
     if (p->deg <= 0) { *out = roots; return 0; }
     dan_zpoly f = dan_zpoly_of(p, NULL, line);
     dan_rroot *rr;
-    int64_t nr = dan_rational_roots(&f, &rr, line);
+    int64_t nr = dan_rational_roots_ex(&f, &rr, false, line);
     for (int64_t i = 0; i < nr; i++) {
         roots[k].v = dan_rat_to_float(rr[i].r);
         roots[k].exact = 1;
         roots[k].r = rr[i].r;
         k++;
     }
-    if (f.deg >= 2) {                     /* the rest has no rational roots */
-        dan_poly *rest = dan_poly_alloc(f.deg);
-        for (int64_t i = 0; i <= f.deg; i++) {
-            if (f.z[i] > INT64_MAX || f.z[i] < -INT64_MAX) dan_error(DAN_MSG_POLY_BIG, line);
-            rest->c[i] = dan_rat_from_int((int64_t)f.z[i], line);
+    if (f.deg >= 1) {                     /* the rest: its roots numerically */
+        double *c;
+        int64_t n;
+        dan_zpoly sf;
+        if (dan_squarefree_part(&f, &sf)) {           /* exact, modulo a big prime */
+            n = sf.deg;
+            c = dan_alloc(sizeof(double) * (size_t)(n + 1));
+            for (int64_t i = 0; i <= n; i++) c[i] = (double)sf.z[i];
+            dan_free(sf.z);
+        } else {                                      /* beyond the bound: in fractions */
+            dan_poly *rest = dan_poly_alloc(f.deg);
+            for (int64_t i = 0; i <= f.deg; i++) {
+                if (!dan_fits64(f.z[i])) dan_error(DAN_MSG_POLY_BIG, line);
+                rest->c[i] = dan_rat_from_int((int64_t)f.z[i], line);
+            }
+            dan_mn g = dan_poly_gcd(rest, dan_poly_derivative(rest, line), line);
+            dan_mn sfr = dan_poly_div(rest, g, line);
+            n = sfr->deg;
+            c = dan_alloc(sizeof(double) * (size_t)(n + 1));
+            for (int64_t i = 0; i <= n; i++) c[i] = dan_rat_to_float(sfr->c[i]);
         }
-        dan_mn g = dan_poly_gcd(rest, dan_poly_derivative(rest, line), line);
-        dan_mn sf = dan_poly_div(rest, g, line);          /* square-free part */
-        double *c = dan_alloc(sizeof(double) * (size_t)(sf->deg + 1));
-        for (int64_t i = 0; i <= sf->deg; i++) c[i] = dan_rat_to_float(sf->c[i]);
-        double *v = dan_alloc(sizeof(double) * (size_t)(sf->deg + 1));
-        int nv = dan_real_roots_d(c, (int)sf->deg, v);
+        double *v = dan_alloc(sizeof(double) * (size_t)(n + 1));
+        int nv = dan_real_roots_d(c, (int)n, v);
         for (int i = 0; i < nv; i++) { roots[k].v = v[i]; roots[k].exact = 0; k++; }
         dan_free(c);
         dan_free(v);
@@ -1451,13 +2187,59 @@ static void dan_buf_const_factor(dan_buf *b, dan_rat c, bool alone) {
     else dan_buf_rat(b, c);
 }
 
+static void dan_buf_i128(dan_buf *b, dan_i128 v) {
+    char t[48];
+    int i = 47;
+    dan_u128 u = v < 0 ? (dan_u128)0 - (dan_u128)v : (dan_u128)v;
+    t[i] = 0;
+    do { t[--i] = (char)('0' + (int)(u % 10)); u /= 10; } while (u);
+    if (v < 0) t[--i] = '-';
+    dan_buf_add(b, t + i);
+}
+
+static void dan_buf_mult(dan_buf *b, int64_t mult) {
+    if (mult < 2) return;
+    char digits[24];
+    snprintf(digits, sizeof digits, "%" PRId64, mult);
+    for (char *p = digits; *p; p++) dan_buf_add(b, dan_sup[*p - '0']);
+}
+
+/* integer polynomial in the same notation as dan_buf_poly: 2х² - х + 3 */
+static void dan_buf_zpoly(dan_buf *b, const dan_zpoly *f) {
+    bool first = true;
+    for (int64_t i = f->deg; i >= 0; i--) {
+        dan_i128 c = f->z[i];
+        if (c == 0) continue;
+        bool neg = c < 0;
+        if (first) { if (neg) dan_buf_add(b, "-"); }
+        else dan_buf_add(b, neg ? " - " : " + ");
+        first = false;
+        dan_i128 a = neg ? -c : c;
+        if (i == 0 || a != 1) dan_buf_i128(b, a);
+        if (i > 0) dan_buf_power(b, i);
+    }
+}
+
+/* Factorization over the rationals: a constant, linear factors (by the root) and the
+   irreducible factors of higher degree (by degree, then by coefficients). */
 static dan_str dan_factor_str(dan_mn p, int line) {
     if (p->deg <= 0) return dan_poly_to_str(p);
     dan_rat scale;
     dan_zpoly f = dan_zpoly_of(p, &scale, line);
     dan_rroot *roots;
     int64_t k = dan_rational_roots(&f, &roots, line);
-    if (k == 0 && scale.n == 1 && scale.d == 1) { dan_free(roots); dan_free(f.z); return dan_poly_to_str(p); }   /* does not factor */
+    dan_zfactor *fs = NULL;
+    int64_t nf = 0;
+    if (f.deg >= 4) {                 /* degree 2 and 3 without rational roots is irreducible */
+        nf = dan_factor_z(&f, &fs);
+        if (nf < 0) dan_error(DAN_MSG_FACTOR_LIMIT, line);
+    }
+    bool irreducible = nf == 0 || (nf == 1 && fs[0].mult == 1);
+    if (k == 0 && scale.n == 1 && scale.d == 1 && irreducible) {        /* does not factor */
+        for (int64_t i = 0; i < nf; i++) dan_free(fs[i].f.z);
+        dan_free(fs); dan_free(roots); dan_free(f.z);
+        return dan_poly_to_str(p);
+    }
     qsort(roots, (size_t)k, sizeof(dan_rroot), dan_qcmp_rroot);
     dan_buf b = { NULL, 0, 0 };
     dan_buf_add(&b, "");
@@ -1466,13 +2248,19 @@ static dan_str dan_factor_str(dan_mn p, int line) {
         if (roots[i].r.n == 0) dan_buf_power(&b, roots[i].mult);      /* х^m */
         else dan_buf_factor(&b, roots[i].r, roots[i].mult);
     }
-    if (f.deg > 0) {
-        dan_poly *rest = dan_poly_alloc(f.deg);
-        for (int64_t i = 0; i <= f.deg; i++) rest->c[i] = dan_rat_from_int((int64_t)f.z[i], line);
+    if (nf == 0 && f.deg > 0) {
         dan_buf_add(&b, "(");
-        dan_buf_poly(&b, rest);
+        dan_buf_zpoly(&b, &f);
         dan_buf_add(&b, ")");
     }
+    for (int64_t i = 0; i < nf; i++) {
+        dan_buf_add(&b, "(");
+        dan_buf_zpoly(&b, &fs[i].f);
+        dan_buf_add(&b, ")");
+        dan_buf_mult(&b, fs[i].mult);
+        dan_free(fs[i].f.z);
+    }
+    dan_free(fs);
     dan_free(roots);
     dan_free(f.z);
     return dan_buf_str(&b);
