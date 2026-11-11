@@ -194,3 +194,70 @@ class ТестыРазбораВТипы(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def мутации(сл, число):
+    """Тексты JSON из json.dumps Python и испорченные варианты: вставка, удаление, замена знака."""
+    def значение(г=0):
+        в = сл.randint(0, 8 if г < 4 else 4)
+        if в == 0:
+            return None
+        if в == 1:
+            return сл.random() < 0.5
+        if в == 2:
+            return сл.choice([0, -1, 7, 2 ** 63 - 1, -2 ** 63, 2 ** 64, 10 ** 30])
+        if в == 3:
+            return сл.choice([0.5, -1e300, 1e-7, 3.0, 123456.789])
+        if в == 4:
+            return "".join(сл.choice('aё"\\\n\t\x01/😀') for _ in range(сл.randint(0, 5)))
+        if в <= 6:
+            return [значение(г + 1) for _ in range(сл.randint(0, 4))]
+        return {"".join(сл.choice('abё"') for _ in range(сл.randint(0, 3))): значение(г + 1) for _ in range(сл.randint(0, 4))}
+    итог = []
+    for _ in range(число):
+        т = json.dumps(значение(), ensure_ascii=сл.random() < 0.5, indent=сл.choice([None, 1]))
+        if сл.random() < 0.5:
+            т = list(т)
+            for _ in range(сл.randint(1, 3)):
+                оп, место = сл.randint(0, 2), сл.randint(0, len(т))
+                if оп == 0 and т:
+                    del т[min(место, len(т) - 1)]
+                elif оп == 1:
+                    т.insert(место, сл.choice('{}[],:"\\ntfe-.01x '))
+                elif т:
+                    т[min(место, len(т) - 1)] = сл.choice('{}[],:"0a ')
+            т = "".join(т)
+        итог.append(т)
+    return итог
+
+
+@unittest.skipUnless(КОМПИЛЯТОР_ЕСТЬ, "нет компилятора C")
+class ТестыДереваНаC(unittest.TestCase):
+    """json.разобрать и json.записать: компилятор на Дане строит и пишет дерево json.Значение кодом на C,
+    компилятор на Python выполняет код модуля на Дане; значения, текст и сообщения об ошибках совпадают."""
+
+    ПРОГРАММА = """подключить "json"
+пока истина {
+    пусть т = ввод()
+    если т == "<<конец>>" { прервать }
+    если пусть з = json.разобрать(т.заменить("\\\\n", "\\n")) { вывод(json.записать(з)) } иначе ошибка о { вывод(о) }
+}
+пусть з = json.разобрать("[1,")!
+"""
+
+    def test_как_код_модуля(self):
+        тексты = мутации(random.Random(20261111), 1500)
+        ввод_ = "".join(т.replace("\\n", "\\\\n").replace("\n", "\\n") + "\n" for т in тексты) + "<<конец>>\n"
+        with tempfile.TemporaryDirectory() as папка:
+            путь = os.path.join(папка, "программа.dan")
+            with open(путь, "w", encoding="utf-8") as ф:
+                ф.write(self.ПРОГРАММА)
+            выходы = []
+            for код_c in (dan.перевести_python(self.ПРОГРАММА, путь), sam_kompilyator.перевести(self.ПРОГРАММА)):
+                исп = dan.собрать_код(код_c, os.path.join(папка, "п%d" % len(выходы)), папка, выпуск=True)
+                р = subprocess.run([исп], capture_output=True, text=True, encoding="utf-8", input=ввод_, timeout=120, cwd=папка)
+                выходы.append((р.returncode, р.stdout, р.stderr))
+        self.assertIn("dan_jr_check", sam_kompilyator.перевести(self.ПРОГРАММА))
+        self.assertEqual(выходы[0], выходы[1])
+        self.assertEqual(выходы[1][0], 1)
+        self.assertIn("json.dan, строка", выходы[1][2])
