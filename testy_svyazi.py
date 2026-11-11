@@ -126,6 +126,7 @@ import re
     (["создать_llms.py", "llms.txt", "llms-full.txt"], ["test_llms"]),
     # набор задач для оценки языковых моделей: эталоны, сценарий оценки, описание языка в запросе
     (["оценка_моделей/*", "llms-full.txt"], ["test_ocenka_modeley"]),
+    (["решения/*", "ROADMAP.md", "AGENTS.md"], ["test_resheniya"]),
     # сервер MCP для агентов («дан mcp») и новый проект («дан новый»)
     (["сам/mcp.dan", "сам/проект.dan", "сам/дан.dan", "сам/песочница.dan", "сам/подсказки.dan", "llms-full.txt",
       "sam_kompilyator.py"], ["test_mcp"]),
