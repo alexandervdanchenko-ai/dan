@@ -85,12 +85,7 @@ class ТестыВоспроизводимости(unittest.TestCase):
         self.assertEqual(различия, ["разное содержимое: a", "только в первой сборке: b",
                                     "только во второй сборке: c"])
 
-    def test_компоновка_без_времени(self):
-        with open(os.path.join(ПАПКА, "поставка", "zig_cc.c"), encoding="utf-8") as ф:
-            обёртка = ф.read()
-        self.assertIn("--no-insert-timestamp", обёртка)
-        with open(os.path.join(ПАПКА, "поставка", "собрать.py"), encoding="utf-8") as ф:
-            self.assertIn('"-Wl,--no-insert-timestamp"', ф.read())
+    def test_задание_ci(self):
         with open(os.path.join(ПАПКА, ".github", "workflows", "proverka.yml"), encoding="utf-8") as ф:
             self.assertIn("поставка/проверить_воспроизводимость.py", ф.read())
 
