@@ -15,6 +15,7 @@
 - [Справочник](https://github.com/alexandervdanchenko-ai/dan/blob/main/справочник.md): краткий перечень возможностей
 - [Каталог программ](https://github.com/alexandervdanchenko-ai/dan/blob/main/каталог/программы): задачи и их вывод
 - [Каталог ошибок](https://github.com/alexandervdanchenko-ai/dan/blob/main/каталог/ошибки): частые ошибки и исправления
+- [Показательные программы](https://github.com/alexandervdanchenko-ai/dan/blob/main/показательные): бот для Telegram, веб-сервис с SQLite, сводка документов в Excel, поиск дубликатов файлов
 
 ## Команды
 
