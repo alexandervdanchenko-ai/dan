@@ -358,6 +358,90 @@ class ТестыСсылокСервераНаДане(unittest.TestCase):
         self.assertIn("не может быть именем", ответ["error"]["message"])
 
 
+class ТестыБыстрыхИсправленийСервераНаДане(unittest.TestCase):
+    """textDocument/codeAction сервера на Дане: готовые исправления из сообщений, как у «дан исправить»."""
+
+    ТЕКСТ = ("пусть сумма = 1\n"                  # 0
+             "print(сумм)\n"                      # 1
+             "если сумма == 1 {\n"                # 2
+             "    вывод(len(\"а\"))\n"            # 3 - сообщение без готового исправления
+             "}\n")                               # 4
+    ИСПРАВЛЕННЫЙ = ТЕКСТ.replace("print(сумм)", "вывод(сумма)")
+
+    def setUp(self):
+        self.папка = tempfile.TemporaryDirectory()
+        self.uri = test_server.uri_из_пути(os.path.join(self.папка.name, "главная.dan"))
+        self.клиент = test_server.Клиент([компилятор(), "сервер"], среда())
+        ответ = self.клиент.запрос("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+        self.assertEqual(ответ["capabilities"]["codeActionProvider"], {"codeActionKinds": ["quickfix"]})
+
+    def tearDown(self):
+        self.клиент.закрыть()
+        self.папка.cleanup()
+
+    def открыть(self, текст, версия=1):
+        метод = "textDocument/didOpen" if версия == 1 else "textDocument/didChange"
+        self.клиент.уведомление(метод, {"textDocument": {"uri": self.uri, "languageId": "dan", "version": версия,
+                                                         "text": текст}, "contentChanges": [{"text": текст}]})
+        return self.клиент.ждать_ошибок(self.uri)
+
+    def действия(self, от, до, символ_до=0):
+        return self.клиент.запрос("textDocument/codeAction", {
+            "textDocument": {"uri": self.uri},
+            "range": {"start": {"line": от, "character": 0}, "end": {"line": до, "character": символ_до}},
+            "context": {"diagnostics": []}})
+
+    @staticmethod
+    def применить(текст, правки):
+        """Правки WorkspaceEdit к тексту (позиции в единицах UTF-16), с конца, как редактор."""
+        строки = текст.split("\n")
+        for п in sorted(правки, key=lambda п: (п["range"]["start"]["line"], п["range"]["start"]["character"]),
+                        reverse=True):
+            н, к = п["range"]["start"], п["range"]["end"]
+            assert н["line"] == к["line"]
+            линия = строки[н["line"]].encode("utf-16-le")
+            строки[н["line"]] = (линия[:2 * н["character"]].decode("utf-16-le") + п["newText"]
+                                 + линия[2 * к["character"]:].decode("utf-16-le"))
+        return "\n".join(строки)
+
+    def test_исправления_в_строке(self):
+        ошибки = self.открыть(self.ТЕКСТ)
+        self.assertEqual(len(ошибки), 3)
+        действия = self.действия(1, 1, 3)
+        self.assertEqual([д["title"] for д in действия], ["Заменить «print» на «вывод»", "Заменить «сумм» на «сумма»"])
+        for д in действия:
+            self.assertEqual(д["kind"], "quickfix")
+            self.assertEqual(list(д["edit"]["changes"]), [self.uri])
+            self.assertEqual(len(д["diagnostics"]), 1)
+            self.assertIn(д["diagnostics"][0], ошибки)
+        self.assertEqual(действия[0]["edit"]["changes"][self.uri],
+                         [{"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+                           "newText": "вывод"}])
+        правки = [п for д in действия for п in д["edit"]["changes"][self.uri]]
+        исправленный = self.применить(self.ТЕКСТ, правки)
+        self.assertEqual(исправленный, self.ИСПРАВЛЕННЫЙ)
+        # после правки в строке не осталось ни ошибок, ни исправлений
+        ошибки = self.открыть(исправленный, 2)
+        self.assertEqual([о["range"]["start"]["line"] for о in ошибки], [3])
+        self.assertEqual(self.действия(0, 4), [])
+
+    def test_без_исправлений(self):
+        self.открыть(self.ТЕКСТ)
+        self.assertEqual(self.действия(0, 0), [])       # строка без ошибок
+        self.assertEqual(self.действия(3, 3), [])       # ошибка без готового исправления
+        self.assertEqual(len(self.действия(0, 4)), 2)   # весь текст
+
+    def test_единицы_utf16(self):
+        текст = "пусть сумма = \"😀\"\nвывод(\"😀\" + сумм)\n"
+        self.открыть(текст)
+        действия = self.действия(1, 1)
+        self.assertEqual([д["title"] for д in действия], ["Заменить «сумм» на «сумма»"])
+        место = действия[0]["edit"]["changes"][self.uri][0]["range"]
+        self.assertEqual(место, {"start": {"line": 1, "character": 13}, "end": {"line": 1, "character": 17}})
+        self.assertEqual(self.применить(текст, действия[0]["edit"]["changes"][self.uri]),
+                         текст.replace("+ сумм)", "+ сумма)"))
+
+
 class ТестыСверкиСервера(unittest.TestCase):
     """Сервер на Дане отвечает так же, как сервер на Python, и знает возможности версий 1.5 и новее."""
 
