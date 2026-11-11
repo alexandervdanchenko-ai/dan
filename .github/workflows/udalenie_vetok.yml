@@ -1,0 +1,57 @@
+# Удаление служебных веток (необязательный сценарий, не входит в проверку).
+# Ветки задаются списком через пробел; main и ветки открытых запросов на слияние не удаляются.
+# Перед удалением в итог задания печатается последний коммит каждой ветки - по нему ветку
+# можно восстановить: git push origin <коммит>:refs/heads/<ветка>.
+#
+# Запуск вручную:
+#   gh api -X POST repos/<владелец>/dan/actions/workflows/udalenie_vetok.yml/dispatches -f ref=main \
+#     -f "inputs[vetki]=ветка-1 ветка-2"
+name: Удаление веток
+
+on:
+  workflow_dispatch:
+    inputs:
+      vetki:
+        description: "Ветки через пробел"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  udalit:
+    name: Удалить ветки
+    runs-on: ubuntu-latest
+    steps:
+      - name: Удалить
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VETKI: ${{ github.event.inputs.vetki }}
+        run: |
+          otkrytye=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --jq '.[].head.ref')
+          {
+            echo "| Ветка | Последний коммит | Итог |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          oshibki=0
+          for v in $VETKI; do
+            if [ "$v" = "main" ] || printf '%s\n' "$otkrytye" | grep -qxF "$v"; then
+              echo "| $v | - | оставлена (main или открытый запрос) |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            sha=$(gh api "repos/$REPO/git/ref/heads/$v" --jq .object.sha 2>/dev/null || true)
+            if [ -z "$sha" ]; then
+              echo "| $v | - | нет такой ветки |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if gh api -X DELETE "repos/$REPO/git/refs/heads/$v" > /dev/null; then
+              echo "| $v | $sha | удалена |" >> "$GITHUB_STEP_SUMMARY"
+              echo "удалена $v ($sha)"
+            else
+              echo "| $v | $sha | ошибка |" >> "$GITHUB_STEP_SUMMARY"
+              oshibki=$((oshibki + 1))
+            fi
+          done
+          test "$oshibki" -eq 0
