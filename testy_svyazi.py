@@ -73,6 +73,8 @@ import re
     (["sreda/yadra.c", "sreda/yadra_test.c", "sreda/yadra_etalon.h", "sreda/yadra_ggml.c"], ["test_yadra"]),
     # примеры документации с записью, которую разбирает только компилятор на Дане
     (["сам/разбор.dan", "сам/лексер.dan"], ["test_dokumentaciya"]),
+    # пределы вложенности разбора и стек задачи компилятора
+    (["сам/разбор.dan", "сам/дан.dan", "semya/sobrat.sh"], ["test_predely_vlozhennosti"]),
     (["yadra.py"], ТАБЛИЦЫ + ["test_yadra"]),
     # опись математики (математика/охват.md) сверяется с таблицами встроенных функций
     (["математика/*", "matematika.py", "vysshaya.py", "yadra.py", "bity.py"], ["test_ohvat_matematiki"]),

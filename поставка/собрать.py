@@ -91,7 +91,7 @@ def собрать_компилятор_на_дане():
             shutil.copy(os.path.join(ЗНАЧКИ, "dan.ico"), os.path.join(работа, "dan.ico"))
             иконка = [os.path.join(работа, "dan.rc")]
         subprocess.run([zig, "cc", *цель, "-std=c11", "-O2", "-fwrapv", "-ffp-contract=off", "-w", "-s", семя,
-                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else [])], check=True)
+                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else ["-pthread"])], check=True)
         shutil.copy(выход, os.path.join(ПАПКА, "dan" + exe))
         if windows:
             обёртка = os.path.join(работа, "zig_cc.c")
