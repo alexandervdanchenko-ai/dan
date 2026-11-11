@@ -237,6 +237,40 @@ jobs:
           path: фаззинг/находки_сборок
           if-no-files-found: ignore
 
+
+  sanitayzery:
+    name: Компилятор под санитайзерами
+    # компилятор из семени с ASan, LSan и UBSan переводит сам себя (код C совпадает с семенем) и все
+    # программы каталога, примеров, совместимости, показательных и задач; вывод сверяется с обычной сборкой
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Компилятор под санитайзерами
+        run: python sanitayzery_kompilyatora.py
+
+  vyklyuchateli:
+    name: Выключатели оптимизаций
+    # программы каталога, показательные и задачи со всеми выключателями оптимизаций Дана и обычными
+    # ядрами C дают тот же вывод, что записан в каталоге: ошибку оптимизации локализует один выключатель
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      DAN_KOMPILYATOR: сам
+      DAN_BEZ_PERENOSA: "1"
+      DAN_BEZ_DIAPAZONOV: "1"
+      DAN_YADRA: c
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Каталог со всеми выключателями
+        run: python testy.py test_katalog test_sam.ТестыРезультатаПрограмм test_pokazatelnye test_zadachi test_massivy test_parallelno
   ustanovka:
     name: Установка в Windows по инструкции
     needs: llama
