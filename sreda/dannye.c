@@ -653,24 +653,101 @@ static void dan_sha256_block(dan_sha256 *c, const uint8_t *p) {
     c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
 }
 
+/* SHA-256 by the SHA extensions of x86-64 (SHA-NI: Intel since Goldmont and Ice Lake, AMD since
+   Zen): two rounds per SHA256RNDS2, the message schedule by SHA256MSG1 and SHA256MSG2; the state
+   is kept as ABEF and CDGH, as the instructions want (Intel, "New Instructions Supporting the
+   Secure Hash Algorithm on Intel Architecture Processors", 2013). The same bits as the code in C;
+   DAN_SHA=c chooses the code in C. */
+#ifdef DAN_CRC_X86
+#include <immintrin.h>
+#define DAN_SHA_X86 1
+#define DAN_SHA_GROUP(i, cur, next, prev) do { \
+    m = _mm_add_epi32(cur, _mm_loadu_si128((const __m128i *)(dan_sha256_k + 4 * (i)))); \
+    s1 = _mm_sha256rnds2_epu32(s1, s0, m); \
+    if ((i) >= 3 && (i) <= 14) { next = _mm_add_epi32(next, _mm_alignr_epi8(cur, prev, 4)); next = _mm_sha256msg2_epu32(next, cur); } \
+    s0 = _mm_sha256rnds2_epu32(s0, s1, _mm_shuffle_epi32(m, 0x0E)); \
+    if ((i) >= 1 && (i) <= 12) prev = _mm_sha256msg1_epu32(prev, cur); } while (0)
+__attribute__((target("sha,sse4.1,ssse3")))
+static void dan_sha256_blocks_ni(uint32_t h[8], const uint8_t *p, size_t blocks) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bll, 0x0405060700010203ll);
+    __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)h), 0xB1);        /* CDAB */
+    __m128i s1 = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)(h + 4)), 0x1B); /* EFGH */
+    __m128i s0 = _mm_alignr_epi8(t, s1, 8);                                          /* ABEF */
+    s1 = _mm_blend_epi16(s1, t, 0xF0);                                               /* CDGH */
+    for (; blocks > 0; blocks--, p += 64) {
+        __m128i a0 = s0, a1 = s1, m;
+        __m128i w0 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)p), mask);
+        __m128i w1 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 16)), mask);
+        __m128i w2 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 32)), mask);
+        __m128i w3 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 48)), mask);
+        DAN_SHA_GROUP(0, w0, w1, w3); DAN_SHA_GROUP(1, w1, w2, w0);
+        DAN_SHA_GROUP(2, w2, w3, w1); DAN_SHA_GROUP(3, w3, w0, w2);
+        DAN_SHA_GROUP(4, w0, w1, w3); DAN_SHA_GROUP(5, w1, w2, w0);
+        DAN_SHA_GROUP(6, w2, w3, w1); DAN_SHA_GROUP(7, w3, w0, w2);
+        DAN_SHA_GROUP(8, w0, w1, w3); DAN_SHA_GROUP(9, w1, w2, w0);
+        DAN_SHA_GROUP(10, w2, w3, w1); DAN_SHA_GROUP(11, w3, w0, w2);
+        DAN_SHA_GROUP(12, w0, w1, w3); DAN_SHA_GROUP(13, w1, w2, w0);
+        DAN_SHA_GROUP(14, w2, w3, w1); DAN_SHA_GROUP(15, w3, w0, w2);
+        s0 = _mm_add_epi32(s0, a0);
+        s1 = _mm_add_epi32(s1, a1);
+    }
+    t = _mm_shuffle_epi32(s0, 0x1B);                       /* FEBA */
+    s1 = _mm_shuffle_epi32(s1, 0xB1);                      /* DCHG */
+    _mm_storeu_si128((__m128i *)h, _mm_blend_epi16(t, s1, 0xF0));        /* DCBA */
+    _mm_storeu_si128((__m128i *)(h + 4), _mm_alignr_epi8(s1, t, 8));     /* HGFE */
+}
+#undef DAN_SHA_GROUP
+#endif
+
+static int dan_sha_hw = -1;
+
+static int dan_sha_choose(void) {
+    int hw = 0;
+#ifdef DAN_SHA_X86
+    const char *env = getenv("DAN_SHA");
+    unsigned int ea, eb, ec, ed;
+    if (!(env && strcmp(env, "c") == 0) && __get_cpuid(1, &ea, &eb, &ec, &ed)
+        && (ec & (1u << 9)) && (ec & (1u << 19))                                  /* SSSE3, SSE4.1 */
+        && __get_cpuid_count(7, 0, &ea, &eb, &ec, &ed) && (eb & (1u << 29))) hw = 1;  /* SHA */
+#endif
+    __atomic_store_n(&dan_sha_hw, hw, __ATOMIC_RELEASE);
+    return hw;
+}
+
+static void dan_sha256_blocks(dan_sha256 *c, const uint8_t *p, size_t blocks) {
+    int hw = __atomic_load_n(&dan_sha_hw, __ATOMIC_ACQUIRE);
+    if (hw < 0) hw = dan_sha_choose();
+#ifdef DAN_SHA_X86
+    if (hw) { dan_sha256_blocks_ni(c->h, p, blocks); return; }
+#endif
+    (void)hw;
+    for (; blocks > 0; blocks--, p += 64) dan_sha256_block(c, p);
+}
+
 static void dan_sha256_update(dan_sha256 *c, const uint8_t *p, size_t n) {
     c->len += n;
     while (n > 0) {
-        if (c->n == 0 && n >= 64) { dan_sha256_block(c, p); p += 64; n -= 64; continue; }
+        if (c->n == 0 && n >= 64) { size_t k = n / 64; dan_sha256_blocks(c, p, k); p += 64 * k; n -= 64 * k; continue; }
         size_t k = 64 - c->n < n ? 64 - c->n : n;
         memcpy(c->buf + c->n, p, k);
         c->n += k; p += k; n -= k;
-        if (c->n == 64) { dan_sha256_block(c, c->buf); c->n = 0; }
+        if (c->n == 64) { dan_sha256_blocks(c, c->buf, 1); c->n = 0; }
     }
 }
 
 static void dan_sha256_final(dan_sha256 *c, uint8_t out[32]) {
     uint64_t bits = c->len * 8;
-    uint8_t pad = 0x80, zero = 0, lenb[8];
-    dan_sha256_update(c, &pad, 1);
-    while (c->n != 56) dan_sha256_update(c, &zero, 1);
-    for (int i = 0; i < 8; i++) lenb[i] = (uint8_t)(bits >> (56 - 8 * i));
-    dan_sha256_update(c, lenb, 8);
+    /* 0x80, zeros and the length in bits: one or two blocks */
+    c->buf[c->n++] = 0x80;
+    if (c->n > 56) {
+        memset(c->buf + c->n, 0, 64 - c->n);
+        dan_sha256_blocks(c, c->buf, 1);
+        c->n = 0;
+    }
+    memset(c->buf + c->n, 0, 56 - c->n);
+    for (int i = 0; i < 8; i++) c->buf[56 + i] = (uint8_t)(bits >> (56 - 8 * i));
+    dan_sha256_blocks(c, c->buf, 1);
+    c->n = 0;
     for (int i = 0; i < 8; i++) {
         out[4 * i] = (uint8_t)(c->h[i] >> 24); out[4 * i + 1] = (uint8_t)(c->h[i] >> 16);
         out[4 * i + 2] = (uint8_t)(c->h[i] >> 8); out[4 * i + 3] = (uint8_t)c->h[i];
@@ -833,6 +910,439 @@ static dan_str dan_sha256_hex(const uint8_t *p, size_t n) {
 
 static dan_str dan_hash_bytes(dan_bytes b) { return dan_sha256_hex(b->data, (size_t)b->len); }
 static dan_str dan_hash_str(dan_str s) { return dan_sha256_hex((const uint8_t *)s, strlen(s)); }
+
+/* ---- hashes and message authentication codes as bytes: SHA-224, SHA-256, SHA-384,
+   SHA-512 (FIPS 180-4), SHA3-256, SHA3-512 (FIPS 202), BLAKE3, HMAC (RFC 2104),
+   HKDF (RFC 5869), PBKDF2 (RFC 8018) ---- */
+
+static dan_bytes dan_digest_bytes(const uint8_t *h, size_t n) {
+    uint8_t *d = dan_alloc(n + 1);
+    memcpy(d, h, n);
+    return dan_bytes_wrap(d, (int64_t)n);
+}
+
+static void dan_sha256_digest(const uint8_t *p, size_t n, uint8_t out[32]) {
+    dan_sha256 c;
+    dan_sha256_init(&c);
+    dan_sha256_update(&c, p, n);
+    dan_sha256_final(&c, out);
+}
+
+static void dan_sha224_digest(const uint8_t *p, size_t n, uint8_t out[28]) {
+    static const uint32_t h0[8] = { 0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939,
+                                    0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4 };
+    dan_sha256 c;
+    uint8_t full[32];
+    dan_sha256_init(&c);
+    memcpy(c.h, h0, sizeof h0);
+    dan_sha256_update(&c, p, n);
+    dan_sha256_final(&c, full);
+    memcpy(out, full, 28);
+}
+
+/* SHA-512 and SHA-384: 64-bit words, 128-byte blocks */
+
+typedef struct { uint64_t h[8]; uint64_t len; uint8_t buf[128]; size_t n; } dan_sha512;
+
+static const uint64_t dan_sha512_k[80] = {
+    0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full, 0xe9b5dba58189dbbcull,
+    0x3956c25bf348b538ull, 0x59f111f1b605d019ull, 0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull,
+    0xd807aa98a3030242ull, 0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+    0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull, 0xc19bf174cf692694ull,
+    0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull, 0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull,
+    0x2de92c6f592b0275ull, 0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+    0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full, 0xbf597fc7beef0ee4ull,
+    0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull, 0x06ca6351e003826full, 0x142929670a0e6e70ull,
+    0x27b70a8546d22ffcull, 0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+    0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull, 0x92722c851482353bull,
+    0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull, 0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull,
+    0xd192e819d6ef5218ull, 0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+    0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull, 0x34b0bcb5e19b48a8ull,
+    0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull, 0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull,
+    0x748f82ee5defb2fcull, 0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+    0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull,
+    0xca273eceea26619cull, 0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull,
+    0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+    0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull, 0x431d67c49c100d4cull,
+    0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull,
+};
+
+static uint64_t dan_rotr64(uint64_t x, int n) { return (x >> n) | (x << (64 - n)); }
+static uint64_t dan_rotl64(uint64_t x, int n) { return (x << n) | (x >> (64 - n)); }
+
+static uint64_t dan_be64(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = v << 8 | p[i];
+    return v;
+}
+
+static void dan_put_be64(uint8_t *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (56 - 8 * i));
+}
+
+static void dan_sha512_init(dan_sha512 *c, int is384) {
+    static const uint64_t h512[8] = {
+        0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+        0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull };
+    static const uint64_t h384[8] = {
+        0xcbbb9d5dc1059ed8ull, 0x629a292a367cd507ull, 0x9159015a3070dd17ull, 0x152fecd8f70e5939ull,
+        0x67332667ffc00b31ull, 0x8eb44a8768581511ull, 0xdb0c2e0d64f98fa7ull, 0x47b5481dbefa4fa4ull };
+    memcpy(c->h, is384 ? h384 : h512, sizeof h512);
+    c->len = 0;
+    c->n = 0;
+}
+
+static void dan_sha512_block(dan_sha512 *c, const uint8_t *p) {
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++) w[i] = dan_be64(p + 8 * i);
+    for (int i = 16; i < 80; i++) {
+        uint64_t s0 = dan_rotr64(w[i - 15], 1) ^ dan_rotr64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        uint64_t s1 = dan_rotr64(w[i - 2], 19) ^ dan_rotr64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint64_t a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3], e = c->h[4], f = c->h[5], g = c->h[6], h = c->h[7];
+    for (int i = 0; i < 80; i++) {
+        uint64_t s1 = dan_rotr64(e, 14) ^ dan_rotr64(e, 18) ^ dan_rotr64(e, 41);
+        uint64_t ch = (e & f) ^ (~e & g);
+        uint64_t t1 = h + s1 + ch + dan_sha512_k[i] + w[i];
+        uint64_t s0 = dan_rotr64(a, 28) ^ dan_rotr64(a, 34) ^ dan_rotr64(a, 39);
+        uint64_t mj = (a & b) ^ (a & cc) ^ (b & cc);
+        h = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + s0 + mj;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d;
+    c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
+}
+
+static void dan_sha512_update(dan_sha512 *c, const uint8_t *p, size_t n) {
+    c->len += n;
+    while (n > 0) {
+        if (c->n == 0 && n >= 128) { dan_sha512_block(c, p); p += 128; n -= 128; continue; }
+        size_t k = 128 - c->n < n ? 128 - c->n : n;
+        memcpy(c->buf + c->n, p, k);
+        c->n += k; p += k; n -= k;
+        if (c->n == 128) { dan_sha512_block(c, c->buf); c->n = 0; }
+    }
+}
+
+/* out - 64 bytes; SHA-384 takes the first 48 */
+static void dan_sha512_final(dan_sha512 *c, uint8_t out[64]) {
+    uint64_t len = c->len;
+    uint8_t pad[128 + 16] = { 0x80 }, lenb[16];
+    size_t k = c->n < 112 ? 112 - c->n : 240 - c->n;
+    dan_put_be64(lenb, len >> 61);
+    dan_put_be64(lenb + 8, len << 3);
+    dan_sha512_update(c, pad, k);
+    dan_sha512_update(c, lenb, 16);
+    for (int i = 0; i < 8; i++) dan_put_be64(out + 8 * i, c->h[i]);
+}
+
+static void dan_sha512_digest(const uint8_t *p, size_t n, uint8_t out[64], int is384) {
+    dan_sha512 c;
+    dan_sha512_init(&c, is384);
+    dan_sha512_update(&c, p, n);
+    dan_sha512_final(&c, out);
+}
+
+/* SHA-3: the permutation Keccak-f[1600]; lanes are read and written byte by byte
+   (little-endian, whatever the order of bytes of the processor) */
+
+static void dan_keccak_f(uint64_t a[25]) {
+    static const uint64_t rc[24] = {
+        0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull, 0x8000000080008000ull,
+        0x000000000000808bull, 0x0000000080000001ull, 0x8000000080008081ull, 0x8000000000008009ull,
+        0x000000000000008aull, 0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
+        0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull, 0x8000000000008003ull,
+        0x8000000000008002ull, 0x8000000000000080ull, 0x000000000000800aull, 0x800000008000000aull,
+        0x8000000080008081ull, 0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull };
+    /* rho and pi together: the lane at pos[i] takes the previous one, rotated by rot[i] */
+    static const uint8_t rot[24] = { 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
+                                     27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44 };
+    static const uint8_t pos[24] = { 10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
+                                     15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1 };
+    for (int r = 0; r < 24; r++) {
+        uint64_t c[5], t;
+        for (int x = 0; x < 5; x++) c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+        for (int x = 0; x < 5; x++) {
+            t = c[(x + 4) % 5] ^ dan_rotl64(c[(x + 1) % 5], 1);
+            a[x] ^= t; a[x + 5] ^= t; a[x + 10] ^= t; a[x + 15] ^= t; a[x + 20] ^= t;
+        }
+        t = a[1];
+        for (int i = 0; i < 24; i++) {
+            uint64_t next = a[pos[i]];
+            a[pos[i]] = dan_rotl64(t, rot[i]);
+            t = next;
+        }
+        for (int y = 0; y < 25; y += 5) {
+            uint64_t b0 = a[y], b1 = a[y + 1], b2 = a[y + 2], b3 = a[y + 3], b4 = a[y + 4];
+            a[y] = b0 ^ (~b1 & b2); a[y + 1] = b1 ^ (~b2 & b3); a[y + 2] = b2 ^ (~b3 & b4);
+            a[y + 3] = b3 ^ (~b4 & b0); a[y + 4] = b4 ^ (~b0 & b1);
+        }
+        a[0] ^= rc[r];
+    }
+}
+
+static uint64_t dan_le64(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = v << 8 | p[i];
+    return v;
+}
+
+/* rate - 136 bytes for SHA3-256, 72 for SHA3-512 (200 - 2 * the size of the hash) */
+static void dan_sha3(const uint8_t *p, size_t n, size_t rate, uint8_t *out, size_t outlen) {
+    uint64_t a[25] = { 0 };
+    while (n >= rate) {
+        for (size_t i = 0; i < rate / 8; i++) a[i] ^= dan_le64(p + 8 * i);
+        dan_keccak_f(a);
+        p += rate; n -= rate;
+    }
+    uint8_t last[200] = { 0 };
+    memcpy(last, p, n);
+    last[n] ^= 0x06;
+    last[rate - 1] ^= 0x80;
+    for (size_t i = 0; i < rate / 8; i++) a[i] ^= dan_le64(last + 8 * i);
+    dan_keccak_f(a);
+    for (size_t i = 0; i < outlen; i++) out[i] = (uint8_t)(a[i / 8] >> (8 * (i % 8)));
+}
+
+/* BLAKE3 (J. O'Connor, J.-P. Aumasson, S. Neves, Z. Wilcox-O'Hearn, 2020): the plain hash of
+   32 bytes, as the reference implementation; chunks of 1024 bytes are hashed one after another,
+   the chaining values of complete subtrees are kept on a stack (at most 54 for 2^64 bytes) */
+
+enum { DAN_B3_CHUNK_START = 1, DAN_B3_CHUNK_END = 2, DAN_B3_PARENT = 4, DAN_B3_ROOT = 8 };
+
+static const uint32_t dan_b3_iv[8] = { 0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+                                       0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19 };
+
+static const uint8_t dan_b3_sched[7][16] = {
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+    { 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8 },
+    { 3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1 },
+    { 10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6 },
+    { 12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4 },
+    { 9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7 },
+    { 11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13 },
+};
+
+#define DAN_B3_G(a, b, c, d, x, y) do { \
+    s[a] = s[a] + s[b] + (x); s[d] = dan_rotr32(s[d] ^ s[a], 16); \
+    s[c] = s[c] + s[d]; s[b] = dan_rotr32(s[b] ^ s[c], 12); \
+    s[a] = s[a] + s[b] + (y); s[d] = dan_rotr32(s[d] ^ s[a], 8); \
+    s[c] = s[c] + s[d]; s[b] = dan_rotr32(s[b] ^ s[c], 7); } while (0)
+
+/* compression; out - the first 8 words of the result (enough for chaining values and 32 bytes) */
+static void dan_b3_compress(const uint32_t cv[8], const uint8_t block[64], uint64_t counter,
+                            uint32_t blen, uint32_t flags, uint32_t out[8]) {
+    uint32_t m[16], s[16];
+    for (int i = 0; i < 16; i++) m[i] = dan_le32(block + 4 * i);
+    for (int i = 0; i < 8; i++) s[i] = cv[i];
+    s[8] = dan_b3_iv[0]; s[9] = dan_b3_iv[1]; s[10] = dan_b3_iv[2]; s[11] = dan_b3_iv[3];
+    s[12] = (uint32_t)counter; s[13] = (uint32_t)(counter >> 32); s[14] = blen; s[15] = flags;
+    for (int r = 0; r < 7; r++) {
+        const uint8_t *z = dan_b3_sched[r];
+        DAN_B3_G(0, 4, 8, 12, m[z[0]], m[z[1]]);
+        DAN_B3_G(1, 5, 9, 13, m[z[2]], m[z[3]]);
+        DAN_B3_G(2, 6, 10, 14, m[z[4]], m[z[5]]);
+        DAN_B3_G(3, 7, 11, 15, m[z[6]], m[z[7]]);
+        DAN_B3_G(0, 5, 10, 15, m[z[8]], m[z[9]]);
+        DAN_B3_G(1, 6, 11, 12, m[z[10]], m[z[11]]);
+        DAN_B3_G(2, 7, 8, 13, m[z[12]], m[z[13]]);
+        DAN_B3_G(3, 4, 9, 14, m[z[14]], m[z[15]]);
+    }
+    for (int i = 0; i < 8; i++) out[i] = s[i] ^ s[i + 8];
+}
+
+/* the last compression of a node, delayed to know whether it is the root */
+typedef struct { uint32_t cv[8]; uint8_t block[64]; uint64_t counter; uint32_t blen, flags; } dan_b3_out;
+
+/* a chunk (1 to 1024 bytes, or 0 for empty input): all blocks but the last are compressed */
+static void dan_b3_chunk(const uint8_t *p, size_t n, uint64_t index, dan_b3_out *o) {
+    uint32_t cv[8];
+    memcpy(cv, dan_b3_iv, sizeof cv);
+    uint32_t start = DAN_B3_CHUNK_START;
+    while (n > 64) {
+        dan_b3_compress(cv, p, index, 64, start, cv);
+        start = 0;
+        p += 64; n -= 64;
+    }
+    memcpy(o->cv, cv, sizeof cv);
+    memset(o->block, 0, 64);
+    if (n) memcpy(o->block, p, n);
+    o->counter = index;
+    o->blen = (uint32_t)n;
+    o->flags = start | DAN_B3_CHUNK_END;
+}
+
+static void dan_b3_parent(const uint32_t l[8], const uint32_t r[8], dan_b3_out *o) {
+    memcpy(o->cv, dan_b3_iv, sizeof o->cv);
+    for (int i = 0; i < 8; i++) { dan_put_le32(o->block + 4 * i, l[i]); dan_put_le32(o->block + 32 + 4 * i, r[i]); }
+    o->counter = 0;
+    o->blen = 64;
+    o->flags = DAN_B3_PARENT;
+}
+
+static void dan_b3_cv(const dan_b3_out *o, uint32_t cv[8]) {
+    dan_b3_compress(o->cv, o->block, o->counter, o->blen, o->flags, cv);
+}
+
+static void dan_blake3_digest(const uint8_t *p, size_t n, uint8_t out[32]) {
+    uint32_t stack[64][8];
+    int depth = 0;
+    uint64_t chunks = 0;
+    dan_b3_out o;
+    while (n > 1024) {
+        uint32_t cv[8];
+        dan_b3_chunk(p, 1024, chunks, &o);
+        dan_b3_cv(&o, cv);
+        p += 1024; n -= 1024;
+        chunks++;
+        for (uint64_t t = chunks; (t & 1) == 0; t >>= 1) {
+            dan_b3_out par;
+            depth--;
+            dan_b3_parent(stack[depth], cv, &par);
+            dan_b3_cv(&par, cv);
+        }
+        memcpy(stack[depth++], cv, sizeof cv);
+    }
+    dan_b3_chunk(p, n, chunks, &o);
+    while (depth > 0) {
+        uint32_t cv[8];
+        dan_b3_cv(&o, cv);
+        depth--;
+        dan_b3_parent(stack[depth], cv, &o);
+    }
+    uint32_t w[8];
+    dan_b3_compress(o.cv, o.block, 0, o.blen, o.flags | DAN_B3_ROOT, w);
+    for (int i = 0; i < 8; i++) dan_put_le32(out + 4 * i, w[i]);
+}
+
+#define DAN_HASH_FN(name, size, call) \
+    static dan_bytes name##_b(dan_bytes b) { uint8_t h[64]; const uint8_t *p = b->data; size_t n = (size_t)b->len; call; return dan_digest_bytes(h, size); } \
+    static dan_bytes name##_s(dan_str s) { uint8_t h[64]; const uint8_t *p = (const uint8_t *)s; size_t n = strlen(s); call; return dan_digest_bytes(h, size); }
+DAN_HASH_FN(dan_h_sha224, 28, dan_sha224_digest(p, n, h))
+DAN_HASH_FN(dan_h_sha256, 32, dan_sha256_digest(p, n, h))
+DAN_HASH_FN(dan_h_sha384, 48, dan_sha512_digest(p, n, h, 1))
+DAN_HASH_FN(dan_h_sha512, 64, dan_sha512_digest(p, n, h, 0))
+DAN_HASH_FN(dan_h_sha3_256, 32, dan_sha3(p, n, 136, h, 32))
+DAN_HASH_FN(dan_h_sha3_512, 64, dan_sha3(p, n, 72, h, 64))
+DAN_HASH_FN(dan_h_blake3, 32, dan_blake3_digest(p, n, h))
+#undef DAN_HASH_FN
+
+/* HMAC-SHA512 (128-byte blocks) */
+
+typedef struct { dan_sha512 in, out; } dan_hmac512_ctx;
+
+static void dan_hmac512_init(dan_hmac512_ctx *m, const uint8_t *key, size_t klen) {
+    uint8_t k[128] = { 0 }, pad[128];
+    if (klen > 128) dan_sha512_digest(key, klen, k, 0);
+    else if (klen) memcpy(k, key, klen);
+    for (int i = 0; i < 128; i++) pad[i] = k[i] ^ 0x36;
+    dan_sha512_init(&m->in, 0); dan_sha512_update(&m->in, pad, 128);
+    for (int i = 0; i < 128; i++) pad[i] = k[i] ^ 0x5c;
+    dan_sha512_init(&m->out, 0); dan_sha512_update(&m->out, pad, 128);
+}
+
+static void dan_hmac512(const dan_hmac512_ctx *m, const uint8_t *msg, size_t n, uint8_t out[64]) {
+    dan_sha512 c = m->in;
+    uint8_t ih[64];
+    dan_sha512_update(&c, msg, n);
+    dan_sha512_final(&c, ih);
+    c = m->out;
+    dan_sha512_update(&c, ih, 64);
+    dan_sha512_final(&c, out);
+}
+
+static dan_bytes dan_hmac_sha256_raw(const uint8_t *k, size_t kn, const uint8_t *p, size_t n) {
+    dan_hmac256_ctx m;
+    uint8_t h[32];
+    dan_hmac256_init(&m, k, kn);
+    dan_hmac256(&m, p, n, h);
+    return dan_digest_bytes(h, 32);
+}
+
+static dan_bytes dan_hmac_sha512_raw(const uint8_t *k, size_t kn, const uint8_t *p, size_t n) {
+    dan_hmac512_ctx m;
+    uint8_t h[64];
+    dan_hmac512_init(&m, k, kn);
+    dan_hmac512(&m, p, n, h);
+    return dan_digest_bytes(h, 64);
+}
+
+#define DAN_B(x) (x)->data, (size_t)(x)->len
+#define DAN_S(x) (const uint8_t *)(x), strlen(x)
+static dan_bytes dan_hmac256_bb(dan_bytes k, dan_bytes d) { return dan_hmac_sha256_raw(DAN_B(k), DAN_B(d)); }
+static dan_bytes dan_hmac256_bs(dan_bytes k, dan_str d) { return dan_hmac_sha256_raw(DAN_B(k), DAN_S(d)); }
+static dan_bytes dan_hmac256_sb(dan_str k, dan_bytes d) { return dan_hmac_sha256_raw(DAN_S(k), DAN_B(d)); }
+static dan_bytes dan_hmac256_ss(dan_str k, dan_str d) { return dan_hmac_sha256_raw(DAN_S(k), DAN_S(d)); }
+static dan_bytes dan_hmac512_bb(dan_bytes k, dan_bytes d) { return dan_hmac_sha512_raw(DAN_B(k), DAN_B(d)); }
+static dan_bytes dan_hmac512_bs(dan_bytes k, dan_str d) { return dan_hmac_sha512_raw(DAN_B(k), DAN_S(d)); }
+static dan_bytes dan_hmac512_sb(dan_str k, dan_bytes d) { return dan_hmac_sha512_raw(DAN_S(k), DAN_B(d)); }
+static dan_bytes dan_hmac512_ss(dan_str k, dan_str d) { return dan_hmac_sha512_raw(DAN_S(k), DAN_S(d)); }
+
+/* HKDF-SHA256: extract (PRK = HMAC(salt, IKM); an empty salt is 32 zero bytes, which
+   gives the same key block), then expand into length bytes, at most 255 * 32 */
+static dan_bytes dan_hkdf_raw(const uint8_t *ikm, size_t ikmn, const uint8_t *salt, size_t saltn,
+                              const uint8_t *info, size_t infon, int64_t length, int line) {
+    if (length < 1 || length > 255 * 32) dan_error(DAN_MSG_HKDF_LEN, line);
+    dan_hmac256_ctx m;
+    uint8_t prk[32], t[32];
+    dan_hmac256_init(&m, salt, saltn);
+    dan_hmac256(&m, ikm, ikmn, prk);
+    dan_hmac256_init(&m, prk, 32);
+    uint8_t *out = dan_alloc((size_t)length + 1);
+    size_t done = 0, tn = 0;
+    for (uint32_t i = 1; done < (size_t)length; i++) {
+        dan_sha256 c = m.in;
+        uint8_t ctr = (uint8_t)i, ih[32];
+        dan_sha256_update(&c, t, tn);
+        if (infon) dan_sha256_update(&c, info, infon);
+        dan_sha256_update(&c, &ctr, 1);
+        dan_sha256_final(&c, ih);
+        c = m.out;
+        dan_sha256_update(&c, ih, 32);
+        dan_sha256_final(&c, t);
+        tn = 32;
+        size_t k = (size_t)length - done < 32 ? (size_t)length - done : 32;
+        memcpy(out + done, t, k);
+        done += k;
+    }
+    return dan_bytes_wrap(out, length);
+}
+
+static dan_bytes dan_hkdf256_b(dan_bytes ikm, dan_bytes salt, dan_bytes info, int64_t length, int line) {
+    return dan_hkdf_raw(DAN_B(ikm), DAN_B(salt), DAN_B(info), length, line);
+}
+static dan_bytes dan_hkdf256_s(dan_bytes ikm, dan_bytes salt, dan_str info, int64_t length, int line) {
+    return dan_hkdf_raw(DAN_B(ikm), DAN_B(salt), DAN_S(info), length, line);
+}
+
+/* PBKDF2-HMAC-SHA256: iterations from 1 to 100 000 000, length from 1 to 1024 bytes */
+static dan_bytes dan_pbkdf2_raw(const uint8_t *pw, size_t pwn, dan_bytes salt, int64_t iter, int64_t length, int line) {
+    if (iter < 1 || iter > 100000000) dan_error(DAN_MSG_PBKDF2_ITER, line);
+    if (length < 1 || length > 1024) dan_error(DAN_MSG_PBKDF2_LEN, line);
+    uint8_t *out = dan_alloc((size_t)length + 1);
+    dan_pbkdf2_sha256(pw, pwn, salt->data, (size_t)salt->len, (uint32_t)iter, out, (size_t)length);
+    return dan_bytes_wrap(out, length);
+}
+
+static dan_bytes dan_pbkdf2_256_b(dan_bytes pw, dan_bytes salt, int64_t iter, int64_t length, int line) {
+    return dan_pbkdf2_raw(DAN_B(pw), salt, iter, length, line);
+}
+static dan_bytes dan_pbkdf2_256_s(dan_str pw, dan_bytes salt, int64_t iter, int64_t length, int line) {
+    return dan_pbkdf2_raw(DAN_S(pw), salt, iter, length, line);
+}
+
+/* comparison whose time depends only on the lengths, not on where the bytes differ:
+   for codes of authentication, so that the time of a refusal tells nothing about the code */
+static bool dan_ct_equal_raw(const uint8_t *a, size_t an, const uint8_t *b, size_t bn) {
+    if (an != bn) return false;
+    volatile uint8_t acc = 0;
+    for (size_t i = 0; i < an; i++) acc = (uint8_t)(acc | (a[i] ^ b[i]));
+    return acc == 0;
+}
+static bool dan_ct_equal_b(dan_bytes a, dan_bytes b) { return dan_ct_equal_raw(DAN_B(a), DAN_B(b)); }
+static bool dan_ct_equal_s(dan_str a, dan_str b) { return dan_ct_equal_raw(DAN_S(a), DAN_S(b)); }
+#undef DAN_B
+#undef DAN_S
 
 /* ---- AES (encryption direction only: CTR mode needs no decryption)
 
