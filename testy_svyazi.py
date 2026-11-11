@@ -132,7 +132,8 @@ import re
     (["сам/буквы.dan", "сам/создать_буквы.py", "сам/лексер.dan"], ["test_bukvy"]),
     (["сам/порождение.dan", "sverka_sborok.py"], ["test_vyklyuchateli"]),
     (["sanitayzery_kompilyatora.py", ".github/workflows/proverka.yml"], ["test_sanitayzery_kompilyatora"]),
-    ([".github/workflows/vypusk.yml", "README.md"], ["test_vypusk"]),
+    ([".github/workflows/vypusk.yml", ".github/workflows/proverka_vypuska.yml", "README.md", "semya/sobrat.sh",
+      "поставка/холодная_пересборка.py"], ["test_vypusk"]),
     # сервер MCP для агентов («дан mcp») и новый проект («дан новый»)
     (["сам/mcp.dan", "сам/проект.dan", "сам/дан.dan", "сам/песочница.dan", "сам/подсказки.dan", "llms-full.txt",
       "sam_kompilyator.py"], ["test_mcp"]),
