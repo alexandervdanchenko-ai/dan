@@ -4341,6 +4341,41 @@ static int dan_jr_is_key(dan_jr *r, const char *key, size_t n) {
     return r->j.tmp.len == n && (n == 0 || !memcmp(r->j.tmp.s, key, n));
 }
 
+/* проверка всего текста тем же разбором, что у части_json: те же сообщения и места ошибок */
+static int dan_jr_check(dan_jr *r) {
+    size_t e = dan_json_value(&r->j, r->i, 0);
+    if (r->j.err) return 0;
+    size_t end = dan_json_space(&r->j, e);
+    if (end < r->j.n) return dan_json_fail(&r->j, end, "после значения лишний текст");
+    return 1;
+}
+
+/* число JSON: 1 - целое, помещающееся в цел (*iv), 2 - дробное или большое целое (*fv), 0 - ошибка */
+static int dan_jr_num(dan_jr *r, int64_t *iv, double *fv) {
+    size_t e;
+    int integer;
+    if (!dan_jr_number(r, &e, &integer, "ожидалось значение JSON")) return 0;
+    if (integer) {
+        const char *p = r->j.s + r->i;
+        int neg = *p == '-';
+        if (neg) p++;
+        uint64_t v = 0;
+        int fits = 1;
+        for (; p < r->j.s + e; p++) {
+            unsigned d = (unsigned)(*p - '0');
+            if (v > (UINT64_MAX - d) / 10) { fits = 0; break; }
+            v = v * 10 + d;
+        }
+        if (fits && v <= (uint64_t)INT64_MAX + (uint64_t)neg) {
+            *iv = neg ? (int64_t)(0 - v) : (int64_t)v;
+            r->i = e;
+            return 1;
+        }
+    }
+    if (!dan_jr_float(r, fv)) return 0;
+    return 2;
+}
+
 /* после значения - только пробелы */
 static int dan_jr_end(dan_jr *r) {
     size_t e = dan_json_space(&r->j, r->i);
