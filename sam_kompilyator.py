@@ -163,9 +163,11 @@ def исполняемый():
         os.makedirs(папка, exist_ok=True)
         замок = os.path.join(папка, "сборка")
         начало = time.time()
+        свой_замок = False
         while True:
             try:
                 os.mkdir(замок)
+                свой_замок = True
                 break
             except FileExistsError:
                 # другой процесс тестов уже собирает компилятор
@@ -185,8 +187,13 @@ def исполняемый():
                     shutil.copymode(готовый, копия)
                     os.replace(копия, путь)
         finally:
-            if os.path.isdir(замок):
-                os.rmdir(замок)
+            # замок снимает только тот процесс, который его поставил: иначе процесс, дождавшийся
+            # чужой сборки, снимал замок третьего процесса, и тот падал на os.rmdir
+            if свой_замок:
+                try:
+                    os.rmdir(замок)
+                except FileNotFoundError:
+                    pass
     _ИСПОЛНЯЕМЫЙ.append(путь)
     return путь
 

@@ -90,6 +90,28 @@ class ТестыРежимовСи(unittest.TestCase):
 
 class ТестыКэшаКомпилятора(unittest.TestCase):
 
+    def test_чужой_замок_не_снимается(self):
+        # процесс, который дождался компилятора, собранного другим, не снимает замок третьего
+        # процесса (раньше третий падал на os.rmdir: FileNotFoundError в задании «Выключатели»)
+        with tempfile.TemporaryDirectory() as кэш, \
+                mock.patch.object(sam_kompilyator, "_DAN_CACHE", кэш), \
+                mock.patch.object(sam_kompilyator, "_ИСПОЛНЯЕМЫЙ", []), \
+                mock.patch.dict(os.environ, {"DAN_SAM_EXE": ""}):
+            папка = os.path.join(кэш, "сам", sam_kompilyator.отпечаток())
+            os.makedirs(os.path.join(папка, "сборка"))          # замок другого процесса
+            путь = os.path.join(папка, "дан" + (".exe" if os.name == "nt" else ""))
+            настоящий = os.mkdir
+
+            def mkdir(п, *а, **к):
+                if п.endswith("сборка"):
+                    with open(путь, "w") as ф:                   # тот процесс тем временем собрал
+                        ф.write("готово")
+                return настоящий(п, *а, **к)
+
+            with mock.patch.object(sam_kompilyator.os, "mkdir", mkdir):
+                self.assertEqual(sam_kompilyator.исполняемый(), путь)
+            self.assertTrue(os.path.isdir(os.path.join(папка, "сборка")))
+
     def test_кэш_на_другом_диске(self):
         # в Windows временная папка и кэш (DAN_CACHE) могут быть на разных дисках: os.replace между
         # дисками не работает, и собранный компилятор переносится копией рядом с целью
