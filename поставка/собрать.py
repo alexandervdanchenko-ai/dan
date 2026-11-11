@@ -28,7 +28,7 @@ Inno Setup 6 (если его нет, установщик не собирает
 
 Сборка воспроизводима: из того же коммита получаются те же dan.exe, zig-cc.exe, редактор и переносной
 архив байт в байт (проверка - поставка/проверить_воспроизводимость.py). Для этого компилятор собирается
-в папке с постоянным именем, компоновщик не пишет в файлы .exe время сборки, а в архиве файлы идут
+в папке с постоянным именем (zig cc сам не пишет в файлы .exe время сборки), а в архиве файлы идут
 по порядку имён и с одним временем - SOURCE_DATE_EPOCH или временем последнего коммита. Установщик
 Inno Setup в эту проверку не входит: он сам вписывает время сборки.
 """
@@ -48,10 +48,6 @@ sys.path.insert(0, КОРЕНЬ)
 
 # Заголовки C для систем, под которые Дан не собирает программы: в поставку не входят.
 ЛИШНЕЕ_В_ZIG = ["freebsd", "netbsd", "openbsd", "dragonfly", "haiku", "solaris", "illumos", "serenity"]
-
-
-# компоновщик zig (lld) для Windows по умолчанию пишет в заголовок .exe время сборки
-БЕЗ_ВРЕМЕНИ = ["-Wl,--no-insert-timestamp"] if os.name == "nt" else []
 
 
 def шаг(текст):
@@ -104,13 +100,13 @@ def собрать_компилятор_на_дане():
             shutil.copy(os.path.join(ЗНАЧКИ, "dan.ico"), os.path.join(работа, "dan.ico"))
             иконка = [os.path.join(работа, "dan.rc")]
         subprocess.run([zig, "cc", *цель, "-std=c11", "-O2", "-fwrapv", "-ffp-contract=off", "-w", "-s", семя,
-                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else ["-pthread"]), *БЕЗ_ВРЕМЕНИ], check=True)
+                        *иконка, "-o", выход, "-lm", *(["-Wl,--stack,67108864"] if windows else ["-pthread"])], check=True)
         shutil.copy(выход, os.path.join(ПАПКА, "dan" + exe))
         if windows:
             обёртка = os.path.join(работа, "zig_cc.c")
             shutil.copy(os.path.join(КОРЕНЬ, "поставка", "zig_cc.c"), обёртка)
             готовая = os.path.join(работа, "zig-cc.exe")
-            subprocess.run([zig, "cc", *цель, "-O2", "-s", обёртка, "-o", готовая, "-lshell32", *БЕЗ_ВРЕМЕНИ], check=True)
+            subprocess.run([zig, "cc", *цель, "-O2", "-s", обёртка, "-o", готовая, "-lshell32"], check=True)
             shutil.copy(готовая, os.path.join(ПАПКА, "zig", "zig-cc.exe"))
     # среда выполнения, стандартная библиотека и задачник - рядом с dan.exe (папка Дана)
     for папка in ("sreda", "библиотека", os.path.join("учебник", "задачи")):
