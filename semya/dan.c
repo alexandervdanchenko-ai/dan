@@ -27983,10 +27983,14 @@ static int dan_lz_common(const uint8_t *a, const uint8_t *b, int max) {
         memcpy(&y, b + l, 8);
         if (x != y) {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-            uint64_t d = x ^ y;
+            uint64_t d = x ^ y;           /* the first differing byte is the lowest */
+#if defined(__GNUC__) || defined(__clang__)
+            return l + (__builtin_ctzll(d) >> 3);   /* one instruction (as in LZ4) */
+#else
             int k = 0;
-            while (!(d & 0xFF)) { d >>= 8; k++; }   /* the first differing byte is the lowest */
+            while (!(d & 0xFF)) { d >>= 8; k++; }
             return l + k;
+#endif
 #else
             break;
 #endif
@@ -28002,12 +28006,16 @@ static int dan_lz_common(const uint8_t *a, const uint8_t *b, int max) {
    against the one starting a byte later (0 - no such check, levels 1-3); nice - a match this long is
    not improved; chain - how many earlier places with the same hash are compared. Level 9 is the
    former behaviour of the runtime (before 1.13): the same bytes as then. */
-typedef struct { int good, lazy, nice, chain; } dan_lz_level;
+typedef struct { int good, lazy, nice, chain, skip; } dan_lz_level;
+/* skip - incompressible stretches are passed faster (the «acceleration» of LZ4): after 2^skip
+   bytes in a row without a match the search is made every second byte, after twice as many
+   every third, and so on; the bytes between go as literals and are still put into the hash, so
+   the next repeat is found. 0 - every byte is searched (levels 7-9: level 9 gives the former bytes) */
 static const dan_lz_level dan_lz_levels[10] = {
-    { 0, 0, 0, 0 },
-    { 4, 0, 8, 4 }, { 4, 0, 16, 8 }, { 4, 0, 32, 32 },
-    { 4, 4, 16, 16 }, { 8, 16, 32, 32 }, { 8, 16, 128, 128 },
-    { 8, 32, 128, 256 }, { 32, 128, 258, 1024 }, { 32, 258, 258, DAN_MAX_CHAIN },
+    { 0, 0, 0, 0, 0 },
+    { 4, 0, 8, 4, 5 }, { 4, 0, 16, 8, 5 }, { 4, 0, 32, 32, 6 },
+    { 4, 4, 16, 16, 6 }, { 8, 16, 32, 32, 6 }, { 8, 16, 128, 128, 7 },
+    { 8, 32, 128, 256, 0 }, { 32, 128, 258, 1024, 0 }, { 32, 258, 258, DAN_MAX_CHAIN, 0 },
 };
 #define DAN_GZIP_LEVEL 6        /* as zlib and Python by default */
 
@@ -28033,6 +28041,7 @@ static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count, int lev
     dan_lz *out = dan_alloc(sizeof(dan_lz) * (n ? n : 1));
     size_t k = 0, i = 0;
     int have_next = 0, next_len = 0, next_dist = 0;
+    size_t misses = 0;                                  /* bytes in a row without a match */
     while (i < n) {
         int len, dist = 0;
         if (have_next) { len = next_len; dist = next_dist; have_next = 0; }
@@ -28051,9 +28060,18 @@ static dan_lz *dan_lz77_parse(const uint8_t *d, size_t n, size_t *count, int lev
             out[k].len = (uint16_t)len; out[k].dist = (uint16_t)dist; k++;
             for (int j = 1; j < len; j++) dan_lz_insert(&z, i + (size_t)j);
             i += (size_t)len;
+            misses = 0;
         } else {
             out[k].len = 0; out[k].dist = d[i]; k++;
             i++;
+            if (lv.skip) {
+                size_t extra = ++misses >> lv.skip;     /* bytes passed without a search */
+                while (extra-- > 0 && i < n) {
+                    dan_lz_insert(&z, i);
+                    out[k].len = 0; out[k].dist = d[i]; k++;
+                    i++;
+                }
+            }
         }
     }
     dan_free(z.head);
