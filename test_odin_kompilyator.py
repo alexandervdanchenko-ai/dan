@@ -22,6 +22,7 @@ import zipfile
 from contextlib import redirect_stdout
 
 import dan
+import ed25519_obrazec
 import sam_kompilyator
 import versiya
 
@@ -523,6 +524,9 @@ def адрес(путь):
     return pathlib.Path(путь).as_uri()
 
 
+КЛЮЧ_ОБРАЗЦОВ = bytes(range(32))     # закрытый ключ выпусков-образцов (только для тестов)
+
+
 class ТестыОбновления(unittest.TestCase):
     """«обновить»: те же выпуски, что в test_obnovlenie.py, через curl и адреса file://."""
 
@@ -542,11 +546,13 @@ class ТестыОбновления(unittest.TestCase):
         self.env = среда(DAN_CONFIG=os.path.join(self.п, "настройки"))
         for имя in ("DAN_RELEASES_URL", "DAN_UPDATE_MODE", "DAN_UPDATE_DRY_RUN"):
             self.env.pop(имя, None)
+        # выпуски-образцы подписаны своим ключом: он действует только с DAN_RELEASES_URL
+        self.env["DAN_KLYUCH_VYPUSKOV"] = ed25519_obrazec.открытый_ключ(КЛЮЧ_ОБРАЗЦОВ).hex()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def выпуск(self, версия, пробный=False, испортить=False):
+    def выпуск(self, версия, пробный=False, испортить=False, подпись="верная"):
         # латиницей: curl в Windows не раскодирует русские буквы в адресе file://
         папка = os.path.join(self.п, "vypusk_" + версия)
         os.makedirs(папка)
@@ -563,8 +569,15 @@ class ТестыОбновления(unittest.TestCase):
                 with open(путь, "rb") as фф:
                     сумма = hashlib.sha256(фф.read()).hexdigest()
                 ф.write(f"{'0' * 64 if испортить else сумма}  {os.path.basename(путь)}\n")
+        пути = [архив, установщик, суммы]
+        if подпись != "нет":
+            with open(суммы, "rb") as ф:
+                п = ed25519_obrazec.подписать(КЛЮЧ_ОБРАЗЦОВ if подпись == "верная" else b"\x01" * 32, ф.read())
+            пути.append(суммы + ".sig")
+            with open(пути[-1], "w", encoding="utf-8") as ф:
+                ф.write(п.hex() + "\n")
         файлы = [{"name": os.path.basename(п), "size": os.path.getsize(п), "browser_download_url": адрес(п)}
-                 for п in (архив, установщик, суммы)]
+                 for п in пути]
         return {"tag_name": "v" + версия, "prerelease": пробный, "html_url": "https://example.org/" + версия,
                 "assets": файлы}
 
@@ -634,6 +647,32 @@ class ТестыОбновления(unittest.TestCase):
         self.assertEqual(код, 1)
         self.assertIn("не совпадает с контрольной суммой", вывод_)
         self.assertEqual(os.listdir(os.path.join(self.п, "программы")), ["dan"])
+
+    def test_неверная_подпись_ничего_не_меняет(self):
+        self.env["DAN_UPDATE_MODE"] = "архив"
+        self.опубликовать(self.выпуск("99.0", подпись="чужая"))
+        код, вывод_ = self.выполнить()
+        self.assertEqual(код, 1, вывод_)
+        self.assertIn("подпись файла SHA256SUMS.txt выпуска v99.0 неверна", вывод_)
+        self.assertEqual(os.listdir(os.path.join(self.п, "программы")), ["dan"])
+
+    def test_неподписанный_новый_выпуск_не_ставится(self):
+        self.env["DAN_UPDATE_MODE"] = "архив"
+        self.опубликовать(self.выпуск("99.0", подпись="нет"))
+        код, вывод_ = self.выполнить()
+        self.assertEqual(код, 1, вывод_)
+        self.assertIn("не подписан", вывод_)
+        self.assertEqual(os.listdir(os.path.join(self.п, "программы")), ["dan"])
+
+    def test_выпуск_до_подписи_со_сверкой_сумм(self):
+        # выпуски раньше подписаны_с() не подписаны: ставятся по суммам с предупреждением
+        if not dan_версия_меньше("1.14"):
+            self.skipTest("установлена версия не раньше 1.14")
+        self.env["DAN_UPDATE_MODE"] = "архив"
+        self.опубликовать(self.выпуск(versiya.ВЕРСИЯ + ".9", подпись="нет"))
+        код, вывод_ = self.выполнить()
+        self.assertEqual(код, 0, вывод_)
+        self.assertIn("вышел до подписи выпусков: сверены только контрольные суммы", вывод_)
 
     def test_установщик_скачивается(self):
         self.env["DAN_UPDATE_MODE"] = "установщик"
