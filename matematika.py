@@ -923,7 +923,8 @@ _добавить("решить_приближённо", [
 ФУНКЦИИ["решить_приближенно"] = ФУНКЦИИ["решить_приближённо"]
 _добавить("разложить", [([МН], СТР, "dan_factor_str", True)],
           "разложение многочлена на неприводимые множители над рациональными числами: "
-          "разложить(х^4 + 3*х^2 + 2) = \"(х² + 1)(х² + 2)\"; сверх пределов (spec.md, раздел 11.6) - ошибка выполнения")
+          "разложить(х^4 + 3*х^2 + 2) = \"(х² + 1)(х² + 2)\"; сверх пределов (spec.md, раздел 11.6) раскладываются "
+          "только множители с рациональными корнями, остаток выводится как есть")
 _добавить("вынести_общий_множитель", [([МН], СТР, "dan_common_factor_str", True)],
           "вынесение общего множителя за скобки: 2х² + 6х = \"2х(х + 3)\"")
 _добавить("решить_неравенство", [([МН, СТР, МН], СТР, "dan_ineq_str", True)],
@@ -948,8 +949,6 @@ _формула("дискриминант", "абв", ("-", умн(А(1), А(1))
 СООБЩЕНИЯ.update({
     "DAN_MSG_POLY_NEG_POW": "многочлен нельзя возводить в отрицательную степень",
     "DAN_MSG_POLY_BIG": "многочлен слишком сложен: степень или коэффициенты слишком велики",
-    "DAN_MSG_FACTOR_LIMIT": "многочлен не удалось разложить на неприводимые множители: степень или коэффициенты "
-                            "слишком велики (оценка коэффициентов множителей больше 2^60)",
     "DAN_MSG_ANY_X": "уравнение верно при любом значении х",
     "DAN_MSG_BAD_REL": "неизвестный знак сравнения \"%s\"; используйте <, <=, >, >=, =, !=",
     "DAN_MSG_SYS_SHAPE": "в системе из N уравнений каждая строка должна содержать N коэффициентов "
@@ -2221,7 +2220,8 @@ static void dan_buf_zpoly(dan_buf *b, const dan_zpoly *f) {
 }
 
 /* Factorization over the rationals: a constant, linear factors (by the root) and the
-   irreducible factors of higher degree (by degree, then by coefficients). */
+   irreducible factors of higher degree (by degree, then by coefficients). Beyond the limits
+   of dan_factor_z the rest without rational roots is written as it is (as before). */
 static dan_str dan_factor_str(dan_mn p, int line) {
     if (p->deg <= 0) return dan_poly_to_str(p);
     dan_rat scale;
@@ -2232,7 +2232,7 @@ static dan_str dan_factor_str(dan_mn p, int line) {
     int64_t nf = 0;
     if (f.deg >= 4) {                 /* degree 2 and 3 without rational roots is irreducible */
         nf = dan_factor_z(&f, &fs);
-        if (nf < 0) dan_error(DAN_MSG_FACTOR_LIMIT, line);
+        if (nf < 0) nf = 0;
     }
     bool irreducible = nf == 0 || (nf == 1 && fs[0].mult == 1);
     if (k == 0 && scale.n == 1 && scale.d == 1 && irreducible) {        /* does not factor */
