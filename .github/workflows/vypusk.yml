@@ -51,7 +51,7 @@ jobs:
       - name: Сборка поставки
         shell: bash
         run: python поставка/собрать.py --llama="$(ls llama-vypusk/llama-*-windows-x64.zip)"
-      - name: Подпись файла сумм
+      - name: Пакет для подписи файла сумм (cryptography)
         run: python -m pip install --quiet cryptography
       - name: Создать или обновить выпуск
         id: vypusk

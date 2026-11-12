@@ -209,16 +209,15 @@ def в_обычный(текст):
 
 
 def собрать(папка, имя, код_c, tsan=False):
+    """Исполняемый файл из кода C; имя - латиницей (компоновщик MinGW не открывает русские имена)."""
+    if not tsan:
+        return dan.собрать_код(код_c, os.path.join(папка, имя), ПАПКА)
     путь_c = os.path.join(папка, имя + ".c")
     with open(путь_c, "w", encoding="utf-8") as ф:
         ф.write(код_c)
     выход = os.path.join(папка, имя)
-    if tsan:
-        компилятор = shutil.which("clang") or "clang"
-        флаги = ["-O1", "-g", "-fsanitize=thread"]
-    else:
-        компилятор = os.environ.get("DAN_COMPILER") or "cc"
-        флаги = ["-O2"]
+    компилятор = shutil.which("clang") or "clang"
+    флаги = ["-O1", "-g", "-fsanitize=thread"]
     р = subprocess.run([компилятор, "-std=c11", "-fwrapv", "-ffp-contract=off", "-w", *флаги, путь_c, "-o", выход,
                         "-lm", "-pthread"], capture_output=True, text=True, errors="replace")
     if р.returncode != 0:
@@ -257,7 +256,7 @@ def проверить_программу(зерно, tsan=False):
     if коды:
         return [("верная программа отвергнута: " + ", ".join(коды), текст)]
     with tempfile.TemporaryDirectory() as папка:
-        исп = собрать(папка, "пар", sam_kompilyator.перевести(текст))
+        исп = собрать(папка, "par", sam_kompilyator.перевести(текст))
         итоги = {п: выполнить(исп, п) for п in ПОТОКИ}
         первый = итоги[ПОТОКИ[0]]
         if первый[0] != 0:
@@ -270,7 +269,7 @@ def проверить_программу(зерно, tsan=False):
         # с обычным «для» она совпадает не всегда, а с самой собой при любом числе потоков - всегда
         if not находки and not дробная_сводка:
             обычный = в_обычный(текст)
-            исп2 = собрать(папка, "обыч", sam_kompilyator.перевести(обычный))
+            исп2 = собрать(папка, "obych", sam_kompilyator.перевести(обычный))
             if выполнить(исп2, 1)[:2] != первый[:2]:
                 находки.append(("вывод отличается от обычного «для»", текст))
         if tsan and not находки:
