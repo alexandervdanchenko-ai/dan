@@ -33,7 +33,9 @@ import sam_kompilyator
 class ТестыПорядкаВычисления(unittest.TestCase):
     def test_элемент_до_правой_части(self):
         код_c = sam_kompilyator.перевести(ПРОГРАММА)
-        компиляторы = [к for к in ("gcc", "clang") if shutil.which(к)] or [None]
+        # в Windows clang из PATH обычно собирает для MSVC (без -lm и среды MinGW): там - компилятор
+        # по умолчанию, а сравнение gcc и clang - в Linux и macOS
+        компиляторы = [None] if os.name == "nt" else ([к for к in ("gcc", "clang") if shutil.which(к)] or [None])
         for к in компиляторы:
             for арг in ([], ["массив"]):
                 with self.subTest(компилятор=к, массив=bool(арг)), tempfile.TemporaryDirectory() as папка:
