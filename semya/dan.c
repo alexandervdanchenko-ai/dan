@@ -43990,12 +43990,12 @@ static int64_t d_razboru2epredel_skobok(void) {
 
 /* line 4000537 */
 static int64_t d_razboru2epredel_znakov(void) {
-    return INT64_C(500);
+    return INT64_C(250);
 }
 
 /* line 4000538 */
 static int64_t d_razboru2epredel_inache(void) {
-    return INT64_C(1000);
+    return INT64_C(500);
 }
 
 /* line 4000541 */
